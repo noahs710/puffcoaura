@@ -1,0 +1,114 @@
+=== INPUT 0 ===
+<USER_REQUEST>
+/goal Help me find the underlying issue and reason bleak keeps giving me charictaristic not found errors when attempting to connect. Use my browser to test until it can be connected to reliably
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-29T02:26:45-04:00.
+
+The user has mentioned some items in the form @[ITEM]. Here is extra information about the items that were mentioned by the user, in the order that they appear:
+
+/goal is a [Slash Command]:
+The user has marked this task with /goal, indicating that this task is intended to run for a long time without user input, e.g. overnight. You should be extra thorough and only stop when you are confident the goal has been completely fulfilled. The system will force you to continue execution, prompting you to audit your work until completion.
+</ADDITIONAL_METADATA>
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from None to Gemini 3.1 Pro (High). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>
+
+=== INPUT 1 ===
+<USER_REQUEST>
+IS there a better ble library to use that this can be converted to
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-29T02:29:28-04:00.
+</ADDITIONAL_METADATA>
+
+=== INPUT 2 ===
+<USER_REQUEST>
+Getting charictaristic error after disconnecting and trying to reconnect. Battery isnt truly converting from raw data make sure to convert given data into the real percentage. Stealth and lantern mode dont chech the current state on launch and dont update checks while connected leading to strange behavior. make this all work better sweetheart
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-29T02:44:33-04:00.
+</ADDITIONAL_METADATA>
+
+=== INPUT 3 ===
+<USER_REQUEST>
+Battery reads 100% even though it is around 45-20% fix this
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-29T02:51:10-04:00.
+</ADDITIONAL_METADATA>
+
+=== INPUT 4 ===
+<USER_REQUEST>
+it no longer connects and throws a timeout
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-29T03:06:24-04:00.
+</ADDITIONAL_METADATA>
+
+=== INPUT 5 ===
+<USER_REQUEST>
+Look through all the lorax paths and create a way to interwact with them in the UI. Also Make the colors use the same format for storing color and animation data and the official app uses. Use these logs of me connection to the official app, then changing and saving my mood light option to the profile
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-30T02:54:27-04:00.
+</ADDITIONAL_METADATA>
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from Gemini 3.1 Pro (High) to Gemini 3.5 Flash (Medium). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>
+
+=== INPUT 6 ===
+<USER_REQUEST>
+2026-05-29T19:14:14.992Z | ble | INFO : Connect succeeded. 
+{
+  "peripheral": {
+    "id": "jsPPyoHwBD+W7wONVrO1cg==",
+    "name": "Pretty Peaky",
+    "type": "peach",
+    "product": "Pearl",
+    "productCode": 80,
+    "series": "pikachoid",
+    "chamber": 2
+  },
+  "type": "manual",
+  "duration": 14999.39999999851,
+  "attempt": 1,
+  "flowId": "01KSTHHT89TXZ4XDJ57YMSJJ3V",
+  "attributes": {
+    "boostTemperature": 5.55555534362793,
+    "boostTime": 30,
+    "brightness": 255,
+    "mode": -1,
+    "chargeState": 4,
+    "chargeEstimatedTimeToFull": null,
+    "batteryLevel": 25,
+    "batteryCapacity": 5955.2548828125,
+    "dateOfBirth": 1775323175,
+    "utcTime": 1780082052,
+    "lanternTime": 0,
+    "selectedHeatCycle": 1,
+    "dabTotalTime": 47864.4140625,
+    "totalHeatCycles": 812,
+    "dabsPerDay": 0.23333333432674408,
+    "approxDabsRemaining": 9.667325019836426,
+    "stealth": 0,
+    "maxBatteryLevel": 100,
+    "chamberType": 2,
+    "stateElapsedTime": 2.051849365234375,
+    "stateTotalTime": null,
+    "operatingState": "Idle",
+    "faultEndIndex": 1392,
+    "currentTemperature": 27.314254760742188,
+    "targetTemperature": 0,
+    "bleFault": {
+      "absoluteCount": 6,
+      "creditCount": 6
+    },
+    "lowBatteryIndicator": true
+  }
+}
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-05-30T02:54:29-04:00.
+</ADDITIONAL_METADATA>
+

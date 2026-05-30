@@ -1,0 +1,139 @@
+# PuffcoBLE Controller
+
+Windows-only local web app and command-line controller for a Puffco device.
+The normal web app run path is a single batch file and uses the light stdlib
+server in `server.py`; there is no npm, FastAPI, uvicorn, Docker, or build step.
+
+## Web App
+
+Start the app with one command:
+
+```powershell
+.\start.bat
+```
+
+Check the Windows runtime without starting the server:
+
+```powershell
+.\start.bat --check
+```
+
+The launcher opens `http://localhost:8420` and runs the stdlib HTTP server plus
+a local WebSocket control channel. Keep the terminal open while using the app.
+
+Or run the server directly with an installed Windows Python:
+
+```powershell
+C:\Python314\python.exe .\server.py --open
+```
+
+Open `http://localhost:8420`. The web app includes connection management, live
+status, heat/boost/stop, profile selection and editing, hex color changes,
+1-100% LED brightness, lantern and stealth toggles, battery/version LED display,
+sleep, power off, and guarded factory reset.
+
+## Setup
+
+The runtime is intentionally Windows-local and minimal. Required at run time:
+
+- Windows 10/11 with Bluetooth LE enabled
+- Python 3.11+ for Windows
+- The `.venv-puffco\Lib\site-packages` package folder beside `start.bat`
+- A Chromium-family browser, Edge, Chrome, or similar
+
+No Node.js is required to run the app. The `browser_*.js` files are only local
+test harnesses.
+
+Use the same Python for CLI commands:
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py --help
+```
+
+For faster repeated use, set your device address once:
+
+```powershell
+$env:PUFFCO_MAC="F0:AD:4E:4B:75:1B"
+```
+
+Add `--quick` to one-shot commands when you want one fast connection attempt instead of retries.
+
+## Common Commands
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py find
+C:\Python314\python.exe .\puffcussy.py doctor
+C:\Python314\python.exe .\puffcussy.py info --quick
+C:\Python314\python.exe .\puffcussy.py info --full --json --quick
+C:\Python314\python.exe .\puffcussy.py about --json --quick
+```
+
+For repeated actions without reconnecting every time:
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py session
+```
+
+Inside `session`, use commands like `info`, `heat`, `stop`, `boost`, `profiles`,
+`profile 1`, `lantern on`, `stealth off`, `brightness 128 128 128 128`,
+`color "#00aaff"`, `battery`, `state`, and `quit`.
+
+## Heat Control
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py heat --yes --fast --quick
+C:\Python314\python.exe .\puffcussy.py boost --quick
+C:\Python314\python.exe .\puffcussy.py stop --quick
+C:\Python314\python.exe .\puffcussy.py monitor --seconds 120
+```
+
+## Live Chamber Temperature Mapping
+
+Live temperature is never fabricated. Until a firmware path is proven, the UI
+shows `Current --`. During a real heat cycle the server automatically samples
+read-only heater candidates and promotes a path only when repeated samples look
+like a plausible chamber temperature and change over time.
+
+Once promoted, the mapping is saved in `lorax_mappings.json` and reused on the
+next app launch. Delete that file, or send the `temperature_source` command with
+`{"clear": true}`, to force rediscovery.
+
+## Profiles
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py profile list --quick
+C:\Python314\python.exe .\puffcussy.py profile list --json --quick
+C:\Python314\python.exe .\puffcussy.py profile select 1 --quick
+C:\Python314\python.exe .\puffcussy.py profile set 1 --name Evening --temp 520 --time 45 --color "#00aaff" --select
+```
+
+Back up profiles before experimenting:
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py profile export --output profiles.json
+C:\Python314\python.exe .\puffcussy.py profile restore profiles.json
+C:\Python314\python.exe .\puffcussy.py profile restore profiles.json --select-active --yes
+```
+
+`profile restore` is a dry run until `--yes` is passed.
+
+## Lights And Power
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py light lantern on --quick
+C:\Python314\python.exe .\puffcussy.py light stealth on --quick
+C:\Python314\python.exe .\puffcussy.py light brightness --base 128 --mid 128 --glass 128 --logo 128
+C:\Python314\python.exe .\puffcussy.py light show-battery --quick
+C:\Python314\python.exe .\puffcussy.py power sleep --quick
+C:\Python314\python.exe .\puffcussy.py power off --quick
+```
+
+## Advanced Reads And Writes
+
+```powershell
+C:\Python314\python.exe .\puffcussy.py read /p/app/stat/id --size 1 --type uint8
+C:\Python314\python.exe .\puffcussy.py write /u/app/ui/stlm 1 --type uint8
+C:\Python314\python.exe .\puffcussy.py write /u/app/ui/stlm 1 --type uint8 --yes
+```
+
+`write` is also a dry run until `--yes` is passed.

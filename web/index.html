@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Control your Puffco Peak Pro via Bluetooth: profiles, heat, lighting, brightness, power, and diagnostics." />
+  <meta name="theme-color" content="#07070c" />
+  <title>Puffco Controller</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2307070c'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2300d6b4' stroke-width='7'/%3E%3Cpath d='M22 36c8 8 22 3 22-8' fill='none' stroke='%23f6a623' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div class="toast-container" id="toast-container"></div>
+
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo">Puffco BLE</div>
+      <div class="subtitle">Local device console</div>
+      <div class="connection-badge" id="connection-badge">
+        <span class="dot"></span>
+        <span id="connection-text">Disconnected</span>
+      </div>
+    </header>
+
+    <nav class="app-menu" aria-label="App sections">
+      <a href="#connect-card">Connect</a>
+      <a href="#status-card">Status</a>
+      <a href="#heat-control-card">Heat</a>
+      <a href="#profiles-card">Profiles</a>
+      <a href="#advanced-panel">Dev</a>
+    </nav>
+
+    <!-- Connection Card -->
+    <section class="card" id="connect-card">
+      <div class="card-header">
+        <h2><span class="icon icon-link"></span> Connection</h2>
+      </div>
+      <div class="connect-section">
+        <div class="input-group bridge-field">
+          <label for="bridge-url">Local Bridge</label>
+          <input type="text" id="bridge-url" placeholder="ws://127.0.0.1:8421/ws" />
+        </div>
+        <button class="btn btn-secondary" id="btn-bridge" onclick="app.connectBridge()">
+          Use Bridge
+        </button>
+      </div>
+      <div class="bridge-note" id="bridge-note">
+        GitHub Pages can host the UI, but the Windows bridge must stay running locally for Bluetooth.
+      </div>
+      <div class="connect-section">
+        <div class="input-group">
+          <label for="device-name">Device Name</label>
+          <input type="text" id="device-name" placeholder="Peak" value="Peak" />
+        </div>
+        <div class="input-group">
+          <label for="device-mac">MAC Address (optional)</label>
+          <input type="text" id="device-mac" placeholder="F0:AD:4E:..." />
+        </div>
+        <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
+          Connect
+        </button>
+        <button class="btn btn-secondary" id="btn-scan" onclick="app.scanDevices()">
+          Scan
+        </button>
+        <button class="btn btn-danger hidden" id="btn-disconnect" onclick="app.disconnect()">
+          Disconnect
+        </button>
+      </div>
+      <div class="scan-results" id="device-scan-results"></div>
+    </section>
+
+    <!-- Device Status -->
+    <section class="card" id="status-card">
+      <div class="card-header">
+        <h2><span class="icon icon-status"></span> Device Status</h2>
+        <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Refresh</button>
+      </div>
+
+      <div class="disconnected-overlay visible" id="status-empty">
+        <div class="offline-stage">
+          <div>
+            <div class="stage-eyebrow">Ready to sync</div>
+            <h3>Pair your Puffco</h3>
+            <p>Connect to reveal live temperature, battery state, heat timer, profile data, and firmware diagnostics.</p>
+          </div>
+          <div class="offline-device" aria-hidden="true">
+            <div class="device-halo"></div>
+            <div class="peak-body">
+              <div class="peak-glass"></div>
+              <div class="peak-cap"></div>
+              <div class="peak-light"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hidden" id="status-content">
+        <div class="device-stage">
+          <div class="device-stage-copy">
+            <div class="stage-eyebrow">Live device</div>
+            <div class="device-title-row">
+              <h3 id="hero-device-name">—</h3>
+              <span class="state-chip" id="hero-state-chip">—</span>
+            </div>
+            <div class="device-temp-readout">
+              <span id="hero-current-temp">—</span>
+              <small>chamber temperature</small>
+            </div>
+            <div class="hero-telemetry-strip">
+              <div>
+                <span>Target</span>
+                <strong id="hero-target-temp">—</strong>
+              </div>
+              <div>
+                <span>Timer</span>
+                <strong id="hero-heat-timer">—</strong>
+              </div>
+              <div>
+                <span>Profile</span>
+                <strong id="hero-profile">—</strong>
+              </div>
+            </div>
+          </div>
+          <div class="device-visual" aria-hidden="true">
+            <div class="device-halo"></div>
+            <div class="peak-body">
+              <div class="peak-glass"></div>
+              <div class="peak-cap"></div>
+              <div class="peak-light"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-summary">
+          <div class="battery-panel">
+            <div class="battery-ring" id="battery-ring" style="--battery-level: 0;">
+              <div class="battery-core">
+                <span class="battery-pct" id="battery-pct">—</span>
+                <span class="battery-caption">battery</span>
+              </div>
+            </div>
+            <div class="battery-details">
+              <div class="stat-label">Power</div>
+              <div class="charge-pill" id="charge-pill">—</div>
+              <div class="battery-rail" aria-hidden="true">
+                <div class="battery-fill" id="battery-fill" style="width: 0%"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="metric-cards">
+            <div class="metric-card metric-primary">
+              <div class="stat-label">Dabs left</div>
+              <div class="metric-value" id="stat-drem">—</div>
+              <div class="metric-note">estimated remaining</div>
+            </div>
+            <div class="metric-card">
+              <div class="stat-label">Dabs/day</div>
+              <div class="metric-value" id="stat-dpd">—</div>
+              <div class="metric-note">usage pace</div>
+            </div>
+            <div class="metric-card">
+              <div class="stat-label">Total dabs</div>
+              <div class="metric-value" id="stat-total-dabs">—</div>
+              <div class="metric-note">lifetime count</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-grid mt-md">
+          <div class="stat-item">
+            <div class="stat-label">State</div>
+            <div class="stat-value" id="stat-state">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Chamber</div>
+            <div class="stat-value" id="stat-chamber">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge</div>
+            <div class="stat-value" id="stat-charge">—</div>
+          </div>
+          <div class="stat-item telemetry-stat">
+            <div class="stat-label">Live Temp</div>
+            <div class="stat-value" id="stat-current-temp">—</div>
+          </div>
+          <div class="stat-item telemetry-stat">
+            <div class="stat-label">Target</div>
+            <div class="stat-value" id="stat-target-temp">—</div>
+          </div>
+          <div class="stat-item telemetry-stat">
+            <div class="stat-label">Timer</div>
+            <div class="stat-value" id="stat-heat-timer">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Active Profile</div>
+            <div class="stat-value" id="stat-profile">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Source</div>
+            <div class="stat-value" id="stat-battery-source">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge ETA</div>
+            <div class="stat-value" id="stat-charge-eta">—</div>
+          </div>
+          <div class="stat-item telemetry-stat">
+            <div class="stat-label">Boost</div>
+            <div class="stat-value" id="stat-boost">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Lantern</div>
+            <div class="stat-value" id="stat-lantern-time">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Low Battery</div>
+            <div class="stat-value" id="stat-low-battery">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Max Battery</div>
+            <div class="stat-value" id="stat-max-battery">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">LED Brightness</div>
+            <div class="stat-value" id="stat-led-brightness">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Firmware</div>
+            <div class="stat-value" id="stat-firmware">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Bootloader</div>
+            <div class="stat-value" id="stat-bootloader">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Serial</div>
+            <div class="stat-value" id="stat-serial">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Device Name</div>
+            <div class="stat-value" id="stat-name">—</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-grid" id="controls-grid">
+      <!-- Heat Controls -->
+      <section class="card" id="heat-control-card">
+        <div class="card-header">
+          <h2><span class="icon icon-heat"></span> Heat Control</h2>
+        </div>
+        <div class="heat-controls">
+          <button class="btn btn-heat" id="btn-heat" onclick="app.heat()">Start Heat</button>
+          <button class="btn btn-secondary" id="btn-boost" onclick="app.boost()">Boost</button>
+          <button class="btn btn-danger" id="btn-stop" onclick="app.stop()">Stop</button>
+        </div>
+        <div class="heat-indicator mt-sm" id="heat-indicator" aria-live="polite">
+          <span class="heat-dot"></span>
+          <span id="heat-status-text">Idle</span>
+        </div>
+        <div class="heat-live-panel" id="heat-live-panel" aria-live="polite">
+          <div>
+            <span class="heat-live-label">Timer</span>
+            <strong id="heat-countdown">--</strong>
+          </div>
+          <div class="heat-live-details">
+            <span id="heat-live-phase">Idle</span>
+            <span id="heat-live-current">Current --</span>
+            <span id="heat-live-target">Target --</span>
+            <span id="heat-live-meta">Waiting for device</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Lighting -->
+      <section class="card">
+        <div class="card-header">
+          <h2><span class="icon icon-light"></span> Lighting</h2>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="toggle-wrap">
+            <div class="toggle" id="toggle-lantern" onclick="app.toggleLantern()"></div>
+            <span class="toggle-label">Lantern Mode</span>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle" id="toggle-stealth" onclick="app.toggleStealth()"></div>
+            <span class="toggle-label">Stealth Mode</span>
+          </div>
+          <div class="inline-actions">
+            <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Show Battery</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.showVersion()">Show Version</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Profiles -->
+    <section class="card" id="profiles-card">
+      <div class="card-header">
+        <h2><span class="icon icon-profile"></span> Profiles</h2>
+      </div>
+      <div class="profiles-grid" id="profiles-grid">
+        <!-- Populated by JS -->
+      </div>
+    </section>
+
+    <!-- Brightness -->
+    <section class="card" id="brightness-card">
+      <div class="card-header">
+        <h2><span class="icon icon-bright"></span> LED Brightness</h2>
+        <button class="btn btn-sm btn-primary" onclick="app.applyBrightness()">Apply</button>
+      </div>
+      <div class="brightness-sliders">
+        <div class="slider-group slider-wide">
+          <label>All LEDs <span class="slider-value" id="val-all">50%</span></label>
+          <input type="range" id="slider-all" min="1" max="100" value="50" oninput="app.updateAllBrightness()" />
+        </div>
+        <div class="slider-group">
+          <label>Base <span class="slider-value" id="val-base">50%</span></label>
+          <input type="range" id="slider-base" min="1" max="100" value="50" oninput="app.updateSliderLabel('base')" />
+        </div>
+        <div class="slider-group">
+          <label>Mid <span class="slider-value" id="val-mid">50%</span></label>
+          <input type="range" id="slider-mid" min="1" max="100" value="50" oninput="app.updateSliderLabel('mid')" />
+        </div>
+        <div class="slider-group">
+          <label>Glass <span class="slider-value" id="val-glass">50%</span></label>
+          <input type="range" id="slider-glass" min="1" max="100" value="50" oninput="app.updateSliderLabel('glass')" />
+        </div>
+        <div class="slider-group">
+          <label>Logo <span class="slider-value" id="val-logo">50%</span></label>
+          <input type="range" id="slider-logo" min="1" max="100" value="50" oninput="app.updateSliderLabel('logo')" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Power -->
+    <section class="card" id="power-card">
+      <div class="card-header">
+        <h2><span class="icon icon-power"></span> Power</h2>
+      </div>
+      <div class="power-controls">
+        <button class="btn btn-secondary" onclick="app.power('sleep')">Sleep</button>
+        <button class="btn btn-danger" onclick="app.power('off')">⏻ Power Off</button>
+        <button class="btn btn-danger" onclick="app.factoryReset()">Factory Reset</button>
+      </div>
+    </section>
+
+    <details class="advanced-panel" id="advanced-panel">
+      <summary>
+        <span>Advanced diagnostics</span>
+        <small>Lorax paths, raw reads, and activity</small>
+      </summary>
+
+      <section class="card" id="backend-card">
+        <div class="card-header">
+          <h2><span class="icon icon-status"></span> Backend Mirror</h2>
+          <div class="inline-actions">
+            <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Sync Now</button>
+            <button class="btn btn-sm btn-primary" onclick="app.resyncDevice()">Resync BLE</button>
+          </div>
+        </div>
+        <div class="backend-summary-grid">
+          <div class="stat-item telemetry-stat">
+            <div class="stat-label">Backend Stage</div>
+            <div class="stat-value" id="backend-stage">Socket idle</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Last Message</div>
+            <div class="stat-value" id="backend-last-message">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Updated</div>
+            <div class="stat-value" id="backend-updated">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">BLE Link</div>
+            <div class="stat-value" id="backend-ble-link">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Backend Connected</div>
+            <div class="stat-value" id="backend-connected">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Polling</div>
+            <div class="stat-value" id="backend-poll">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Raw</div>
+            <div class="stat-value" id="backend-battery-raw">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Temp Source</div>
+            <div class="stat-value" id="backend-temp-source">—</div>
+          </div>
+        </div>
+        <div class="backend-json-grid mt-md">
+          <details open class="backend-json-panel">
+            <summary>Device Snapshot</summary>
+            <pre id="backend-snapshot-json">No snapshot yet</pre>
+          </details>
+          <details class="backend-json-panel">
+            <summary>Official Attributes</summary>
+            <pre id="backend-official-json">No official attributes yet</pre>
+          </details>
+          <details class="backend-json-panel">
+            <summary>Latest Backend Message</summary>
+            <pre id="backend-message-json">No backend message yet</pre>
+          </details>
+        </div>
+      </section>
+
+      <section class="card" id="dev-command-card">
+        <div class="card-header">
+          <h2><span class="icon icon-explorer"></span> Developer Command Deck</h2>
+          <button class="btn btn-sm btn-secondary" onclick="app.clearDevOutput()">Clear Output</button>
+        </div>
+        <div class="dev-command-grid">
+          <div class="dev-command-box">
+            <div class="stat-label">Official telemetry</div>
+            <button class="btn btn-sm btn-primary" onclick="app.devOfficialAttrs()">Read Official Attributes</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Refresh Snapshot</button>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Live temperature discovery</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devHeatProbe()">Probe Heater Paths</button>
+              <button class="btn btn-sm btn-primary" onclick="app.devHeatObserve()">Observe Heat</button>
+            </div>
+            <label class="checkbox-row compact">
+              <input type="checkbox" id="dev-promote-temp" />
+              <span>Promote matching temp source</span>
+            </label>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Lorax probe</div>
+            <div class="dev-inline-fields">
+              <select id="dev-lorax-category">
+                <option value="">Any category</option>
+                <option value="system">System</option>
+                <option value="heater">Heater</option>
+                <option value="battery">Battery</option>
+                <option value="profile">Profile</option>
+                <option value="lighting">Lighting</option>
+                <option value="usage">Usage</option>
+                <option value="logs">Logs</option>
+                <option value="misc">Misc</option>
+              </select>
+              <select id="dev-lorax-status">
+                <option value="experimental">Experimental</option>
+                <option value="known">Known</option>
+                <option value="">Any status</option>
+              </select>
+              <input type="number" id="dev-lorax-limit" min="1" max="150" value="40" />
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devLoraxProbe()">Probe</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devLoraxObserve()">Observe</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Temperature source</div>
+            <input type="text" id="dev-temp-path" placeholder="/p/app/..." />
+            <select id="dev-temp-encoding">
+              <option value="float32_c">float32 C</option>
+              <option value="float32_f">float32 F</option>
+              <option value="uint16_c_x10">uint16 C x10</option>
+              <option value="uint16_f_x10">uint16 F x10</option>
+              <option value="uint8_c">uint8 C</option>
+              <option value="uint8_f">uint8 F</option>
+            </select>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devSetTemperatureSource()">Set Source</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devClearTemperatureSource()">Clear</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Lorax action</div>
+            <select id="dev-lorax-action">
+              <option value="">Load registry for actions</option>
+            </select>
+            <input type="text" id="dev-action-confirm" placeholder="Confirm text if required" />
+            <button class="btn btn-sm btn-danger" onclick="app.devRunLoraxAction()">Run Action</button>
+          </div>
+        </div>
+        <pre class="dev-output" id="dev-command-output">Developer command output will appear here.</pre>
+      </section>
+
+      <!-- Lorax Path Explorer -->
+      <section class="card" id="lorax-card">
+        <div class="card-header">
+          <h2><span class="icon icon-explorer"></span> Lorax Path Explorer</h2>
+          <button class="btn btn-sm btn-secondary" id="btn-reload-lorax" onclick="app.refreshLoraxRegistry()">Reload Registry</button>
+        </div>
+
+        <div class="disconnected-overlay visible" id="lorax-empty">
+          <div class="icon-large"></div>
+          <p>Connect to your device to explore Lorax paths</p>
+        </div>
+
+        <div class="hidden" id="lorax-content">
+          <!-- Filters -->
+          <div class="lorax-filters">
+            <div class="input-group">
+              <label for="lorax-search">Search Paths</label>
+              <input type="text" id="lorax-search" placeholder="Search path or name..." oninput="app.filterLoraxPaths()" />
+            </div>
+            <div class="input-group">
+              <label for="lorax-category-filter">Category</label>
+              <select id="lorax-category-filter" onchange="app.filterLoraxPaths()">
+                <option value="all">All Categories</option>
+                <option value="system">System</option>
+                <option value="heater">Heater</option>
+                <option value="battery">Battery</option>
+                <option value="profile">Profile</option>
+                <option value="lighting">Lighting</option>
+                <option value="usage">Usage</option>
+                <option value="logs">Logs</option>
+                <option value="misc">Misc</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label for="lorax-status-filter">Status</label>
+              <select id="lorax-status-filter" onchange="app.filterLoraxPaths()">
+                <option value="all">All Statuses</option>
+                <option value="known">Known</option>
+                <option value="experimental">Experimental</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="lorax-explorer-layout">
+            <!-- Left Panel: Path List -->
+            <div class="lorax-path-panel">
+              <div class="lorax-path-list-header">
+                <span>Path</span>
+                <span>Access</span>
+              </div>
+              <div class="lorax-path-list" id="lorax-path-list">
+                <!-- Dynamically populated -->
+              </div>
+            </div>
+
+            <!-- Right Panel: Path Details & Interactive Terminal -->
+            <div class="lorax-details-panel" id="lorax-details-panel">
+              <div class="lorax-placeholder-text">
+                Select a path from the list to view details, read, or write value.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Activity -->
+      <section class="card" id="activity-card">
+        <div class="card-header">
+          <h2><span class="icon icon-activity"></span> Activity</h2>
+          <button class="btn btn-sm btn-secondary" onclick="app.clearLog()">Clear</button>
+        </div>
+        <div class="activity-log" id="activity-log">
+          <div class="log-empty">No activity yet</div>
+        </div>
+      </section>
+    </details>
+  </div>
+
+  <!-- Profile Edit Modal -->
+  <div class="modal-backdrop" id="profile-modal">
+    <div class="modal profile-editor-sheet">
+      <div class="profile-editor-hero">
+        <button class="icon-btn modal-close" onclick="app.closeModal()" title="Close editor">×</button>
+        <div class="profile-editor-glow" id="modal-color-preview" style="background:#ff0000;"></div>
+        <div class="profile-editor-title">
+          <span id="modal-kicker">Profile 0</span>
+          <input type="text" id="modal-name" placeholder="Profile name" maxlength="31" />
+          <p id="modal-summary">520°F · 60s · No animation</p>
+        </div>
+      </div>
+
+      <div class="profile-editor-body">
+        <section class="editor-panel heat-panel">
+          <div class="mood-section-title">
+            <span>Heat Profile</span>
+            <small>Temperature and duration</small>
+          </div>
+          <div class="profile-dials">
+            <label class="dial-field">
+              <span>Temperature</span>
+              <input type="number" id="modal-temp" min="250" max="700" step="5" placeholder="520" />
+              <strong>°F</strong>
+            </label>
+            <label class="dial-field">
+              <span>Duration</span>
+              <input type="number" id="modal-time" min="5" max="180" step="1" placeholder="60" />
+              <strong>s</strong>
+            </label>
+          </div>
+          <label class="check-row">
+            <input type="checkbox" id="modal-select" />
+            <span>Make active after saving</span>
+          </label>
+        </section>
+
+        <section class="editor-panel mood-studio">
+          <div class="mood-hero compact">
+            <div class="mood-orbit" id="color-preview" style="background:#ff0000;"></div>
+            <div>
+              <div class="stat-label">Mood Light</div>
+              <p>Official-style preset controls saved with this profile.</p>
+            </div>
+          </div>
+          <div class="mood-presets" id="mood-presets"></div>
+          <div class="mood-editor-grid">
+            <div class="mood-panel">
+              <div class="mood-section-title">
+                <span>Colors</span>
+                <small id="mood-color-range">1-6 colors</small>
+              </div>
+              <div class="mood-colors" id="mood-colors"></div>
+              <div class="mood-color-tools">
+                <button class="btn btn-sm btn-secondary" id="mood-add-color" onclick="app.addMoodColor()">Add color</button>
+                <div class="color-input-wrapper">
+                  <input type="color" id="color-wheel" value="#ff0000" />
+                  <input type="text" id="hex-input" class="hex-input" value="#FF0000" placeholder="#RRGGBB" maxlength="7" />
+                </div>
+              </div>
+            </div>
+
+            <div class="mood-panel">
+              <div class="mood-section-title">
+                <span>Motion</span>
+                <small>Device animation params</small>
+              </div>
+              <div class="slider-group" id="mood-tempo-wrap">
+                <label>Tempo <span class="slider-value" id="mood-tempo-value">50%</span></label>
+                <input type="range" id="mood-tempo" min="0" max="100" value="50" />
+              </div>
+              <label class="check-row">
+                <input type="checkbox" id="mood-dynamic" />
+                <span>Dynamic inhale</span>
+              </label>
+              <div class="stat-label mb-sm">Quick Colors</div>
+              <div class="color-swatches" id="color-swatches"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <input type="hidden" id="modal-index" />
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+        <button class="btn btn-primary" data-device-command="set_profile" onclick="app.saveProfile()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
