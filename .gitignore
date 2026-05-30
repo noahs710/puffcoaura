@@ -1,0 +1,17 @@
+.python311/
+.venv*/
+.tmp/
+__pycache__/
+*.py[cod]
+*.log
+
+python-*-embed-amd64.zip
+lorax_mappings.json
+profiles*.json
+
+logs_and_data/*.png
+logs_and_data/*.txt
+logs_and_data/*.log
+
+.DS_Store
+Thumbs.db

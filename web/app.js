@@ -2471,3 +2471,5 @@ const app = (() => {
     devRunLoraxAction,
   };
 })();
+
+window.app = app;

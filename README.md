@@ -32,6 +32,38 @@ status, heat/boost/stop, profile selection and editing, hex color changes,
 1-100% LED brightness, lantern and stealth toggles, battery/version LED display,
 sleep, power off, and guarded factory reset.
 
+## GitHub Pages Deployment
+
+This project can publish the static UI with GitHub Pages. Bluetooth still runs
+on your Windows computer through `start.bat`; GitHub cannot access your local
+Bluetooth adapter or connect to the Puffco by itself.
+
+Deployment layout:
+
+- `web/` is the static public site.
+- `.github/workflows/pages.yml` publishes `web/` whenever `main` is pushed.
+- `server.py` remains the local Windows bridge and exposes
+  `ws://127.0.0.1:8421/ws`.
+
+One-time GitHub setup:
+
+```powershell
+git init
+git add .
+git commit -m "Initial Puffco BLE web app"
+git branch -M main
+git remote add origin https://github.com/YOUR_NAME/YOUR_REPO.git
+git push -u origin main
+```
+
+In GitHub, open the repository settings, enable Pages with "GitHub Actions" as
+the source, then run `.\start.bat` locally before opening the public Pages URL.
+If the public page cannot reach the bridge, set the Local Bridge field to:
+
+```text
+ws://127.0.0.1:8421/ws
+```
+
 ## Setup
 
 The runtime is intentionally Windows-local and minimal. Required at run time:
