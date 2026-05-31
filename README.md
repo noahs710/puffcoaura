@@ -1,8 +1,9 @@
 # PuffcoBLE Controller
 
-Windows-only local web app and command-line controller for a Puffco device.
-The normal web app run path is a single batch file and uses the light stdlib
-server in `server.py`; there is no npm, FastAPI, uvicorn, Docker, or build step.
+Windows-first web app and command-line controller for a Puffco device. The app
+can talk to the device directly from the browser with Web Bluetooth on HTTPS,
+localhost, or 127.0.0.1. The Windows Python bridge remains available as a
+fallback and for CLI/dev workflows.
 
 ## Web App
 
@@ -27,23 +28,28 @@ Or run the server directly with an installed Windows Python:
 C:\Python314\python.exe .\server.py --open
 ```
 
-Open `http://localhost:8420`. The web app includes connection management, live
-status, heat/boost/stop, profile selection and editing, hex color changes,
-1-100% LED brightness, lantern and stealth toggles, battery/version LED display,
-sleep, power off, and guarded factory reset.
+Open `http://localhost:8420`. In Chrome or Edge the default transport is
+Browser Bluetooth, which opens the browser device chooser and talks to the
+Puffco without the WebSocket bridge. The web app includes connection
+management, live status, heat/boost/stop, profile selection and editing, hex
+color changes, 1-100% LED brightness, lantern and stealth toggles,
+battery/version LED display, sleep, power off, and guarded factory reset.
 
 ## GitHub Pages Deployment
 
-This project can publish the static UI with GitHub Pages. Bluetooth still runs
-on your Windows computer through `start.bat`; GitHub cannot access your local
-Bluetooth adapter or connect to the Puffco by itself.
+This project can publish the static UI with GitHub Pages. Chrome and Edge allow
+Web Bluetooth from secure HTTPS pages, so the public Pages site can connect to
+the Puffco directly through the browser Bluetooth chooser, like `puffco.app`.
+The local Windows bridge is only a fallback for browsers/environments that block
+Web Bluetooth.
 
 Deployment layout:
 
 - `web/` is the static public site.
 - `.github/workflows/pages.yml` publishes `web/` whenever `main` is pushed.
-- `server.py` remains the local Windows bridge and exposes
-  `ws://127.0.0.1:8421/ws`.
+- `web/ble-client.js` is the browser-native Lorax/Web Bluetooth transport.
+- `server.py` remains the optional local Windows bridge and exposes
+  `ws://127.0.0.1:8421/ws` when you need it.
 
 One-time GitHub setup:
 
@@ -57,8 +63,10 @@ git push -u origin main
 ```
 
 In GitHub, open the repository settings, enable Pages with "GitHub Actions" as
-the source, then run `.\start.bat` locally before opening the public Pages URL.
-If the public page cannot reach the bridge, set the Local Bridge field to:
+the source, then open the public Pages URL in Chrome or Edge and choose Browser
+Bluetooth in the connection panel. If that browser cannot expose Web Bluetooth,
+run `.\start.bat` locally, switch the transport to Local Windows Bridge, and set
+the bridge field to:
 
 ```text
 ws://127.0.0.1:8421/ws

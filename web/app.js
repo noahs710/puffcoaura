@@ -23,6 +23,9 @@ const app = (() => {
   let lastConnectionStatus = null;
   let bridgeUrl = null;
   let suppressSocketReconnect = false;
+  let transportMode = 'browser_ble';
+  let browserBle = null;
+  let browserBlePoll = null;
 
   // Lorax Path Explorer State
   let loraxPaths = [];
@@ -147,9 +150,94 @@ const app = (() => {
     note.classList.toggle('offline', state === 'offline');
   }
 
+  function browserBleSupported() {
+    return Boolean(window.PuffcoBrowserBleClient && navigator.bluetooth && window.isSecureContext);
+  }
+
+  function defaultTransportMode() {
+    return browserBleSupported() ? 'browser_ble' : 'bridge';
+  }
+
+  function normalizeTransportMode(mode) {
+    if (mode === 'browser_ble' && browserBleSupported()) return 'browser_ble';
+    return 'bridge';
+  }
+
+  function getBrowserBle() {
+    if (!browserBle) {
+      browserBle = new window.PuffcoBrowserBleClient();
+      browserBle.onDisconnected = () => {
+        handleMessage({
+          type: 'disconnected',
+          message: 'Browser Bluetooth disconnected.',
+          data: { connected: false, reason: 'Browser Bluetooth disconnected' },
+        });
+      };
+    }
+    return browserBle;
+  }
+
   function renderBridgeUI() {
     const input = document.getElementById('bridge-url');
     if (input && document.activeElement !== input) input.value = bridgeUrl || defaultBridgeUrl();
+    const select = document.getElementById('transport-mode');
+    if (select && select.value !== transportMode) select.value = transportMode;
+    const bridgeGroup = document.getElementById('bridge-url-group');
+    const bridgeButton = document.getElementById('btn-bridge');
+    const browserMode = transportMode === 'browser_ble';
+    if (bridgeGroup) bridgeGroup.classList.toggle('hidden', browserMode);
+    if (bridgeButton) bridgeButton.classList.toggle('hidden', browserMode);
+    if (browserMode) {
+      const supported = browserBleSupported();
+      setBridgeNote(
+        supported
+          ? 'Browser Bluetooth is active. GitHub Pages can connect directly through the Chrome/Edge Bluetooth chooser.'
+          : 'Browser Bluetooth is unavailable here. Use Chrome or Edge on HTTPS, localhost, or 127.0.0.1, or switch to the local bridge.',
+        supported ? 'online' : 'offline',
+      );
+    }
+  }
+
+  function stopBrowserBlePolling() {
+    if (browserBlePoll) {
+      clearInterval(browserBlePoll);
+      browserBlePoll = null;
+    }
+  }
+
+  function startBrowserBlePolling() {
+    if (transportMode !== 'browser_ble' || browserBlePoll) return;
+    browserBlePoll = setInterval(() => {
+      if (transportMode === 'browser_ble' && connected && !connectPending) send('status');
+    }, 1000);
+  }
+
+  function closeBridgeSocket() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (ws && ws.readyState < WebSocket.CLOSING) {
+      suppressSocketReconnect = true;
+      ws.close();
+    }
+  }
+
+  function setTransportMode(mode) {
+    const nextMode = normalizeTransportMode(mode);
+    transportMode = nextMode;
+    localStorage.setItem('puffco_transport_mode', transportMode);
+    renderBridgeUI();
+    if (transportMode === 'browser_ble') {
+      closeBridgeSocket();
+      ws = null;
+      if (!connected) {
+        setBridgeNote('Browser Bluetooth is active. Press Connect to open the browser Bluetooth chooser.', 'online');
+      }
+    } else {
+      stopBrowserBlePolling();
+      connectBridge();
+    }
   }
 
   function initWebSocket(urlOverride) {
@@ -214,6 +302,9 @@ const app = (() => {
   }
 
   function connectBridge() {
+    transportMode = 'bridge';
+    localStorage.setItem('puffco_transport_mode', transportMode);
+    stopBrowserBlePolling();
     const input = document.getElementById('bridge-url');
     bridgeUrl = normalizeBridgeUrl(input?.value);
     localStorage.setItem('puffco_bridge_url', bridgeUrl);
@@ -230,7 +321,33 @@ const app = (() => {
     setTimeout(() => initWebSocket(bridgeUrl), 50);
   }
 
+  async function sendBrowserBle(cmd, params = {}) {
+    try {
+      const response = await getBrowserBle().handleCommand(cmd, params);
+      handleMessage(response);
+    } catch (err) {
+      const detail = err?.message || String(err);
+      handleMessage({ type: 'error', message: `Browser Bluetooth ${cmd} failed: ${detail}` });
+    }
+  }
+
   function send(cmd, params = {}) {
+    if (transportMode === 'browser_ble') {
+      if (!browserBleSupported()) {
+        toast('Browser Bluetooth is unavailable here', 'error');
+        appendLog('Browser Bluetooth requires Chrome or Edge on HTTPS, localhost, or 127.0.0.1', 'error');
+        return false;
+      }
+      if (DEVICE_COMMANDS.has(cmd) && !connected) {
+        toast('Connect to your device first', 'error');
+        appendLog(`Blocked ${cmd}: browser Bluetooth disconnected`, 'error');
+        return false;
+      }
+      if (cmd !== 'status') appendLog(`Sent ${cmd} through browser Bluetooth`, 'info');
+      sendBrowserBle(cmd, params);
+      return true;
+    }
+
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       toast('Not connected to server', 'error');
       appendLog(`Server socket is not connected (${bridgeUrl || defaultBridgeUrl()})`, 'error');
@@ -261,6 +378,7 @@ const app = (() => {
         case 'connected':
           connectPending = false;
           updateDeviceState(normalizeConnectedPayload(msg.data));
+          if (transportMode === 'browser_ble') startBrowserBlePolling();
           toast('Connected to device!', 'success');
           appendLog(msg.message || 'Connected to device', 'success');
           break;
@@ -268,6 +386,7 @@ const app = (() => {
           connectPending = false;
           scanPending = false;
           connected = false;
+          stopBrowserBlePolling();
           lastDeviceSnapshot = normalizeDisconnectedPayload(msg.data, msg.message);
           deviceState = null;
           updateConnectionUI(false);
@@ -2390,12 +2509,17 @@ const app = (() => {
     const savedName = localStorage.getItem('puffco_device_name');
     const savedMac = localStorage.getItem('puffco_device_mac');
     bridgeUrl = normalizeBridgeUrl(localStorage.getItem('puffco_bridge_url'));
+    transportMode = normalizeTransportMode(localStorage.getItem('puffco_transport_mode') || defaultTransportMode());
     if (savedName) document.getElementById('device-name').value = savedName;
     if (savedMac) document.getElementById('device-mac').value = savedMac;
     renderBridgeUI();
 
     initColorControls();
-    initWebSocket(bridgeUrl);
+    if (transportMode === 'bridge') {
+      initWebSocket(bridgeUrl);
+    } else {
+      setBridgeNote('Browser Bluetooth is active. Press Connect to open the browser Bluetooth chooser.', 'online');
+    }
     const advancedPanel = document.getElementById('advanced-panel');
     if (advancedPanel) {
       advancedPanel.addEventListener('toggle', () => {
@@ -2425,6 +2549,7 @@ const app = (() => {
 
   // Public API
   return {
+    setTransportMode,
     connectBridge,
     connect: connectDevice,
     disconnect: disconnectDevice,

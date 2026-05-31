@@ -39,6 +39,13 @@
       </div>
       <div class="connect-section">
         <div class="input-group bridge-field">
+          <label for="transport-mode">BLE Transport</label>
+          <select id="transport-mode" onchange="app.setTransportMode(this.value)">
+            <option value="browser_ble">Browser Bluetooth</option>
+            <option value="bridge">Local Windows Bridge</option>
+          </select>
+        </div>
+        <div class="input-group bridge-field" id="bridge-url-group">
           <label for="bridge-url">Local Bridge</label>
           <input type="text" id="bridge-url" placeholder="ws://127.0.0.1:8421/ws" />
         </div>
@@ -47,7 +54,7 @@
         </button>
       </div>
       <div class="bridge-note" id="bridge-note">
-        GitHub Pages can host the UI, but the Windows bridge must stay running locally for Bluetooth.
+        Browser Bluetooth runs online from HTTPS, including GitHub Pages. Use the local bridge only as a fallback.
       </div>
       <div class="connect-section">
         <div class="input-group">
@@ -657,6 +664,7 @@
     </div>
   </div>
 
+  <script src="ble-client.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
