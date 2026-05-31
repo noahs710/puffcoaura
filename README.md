@@ -1,23 +1,8 @@
 # PuffcoBLE Controller
-
-Windows-first web app and command-line controller for a Puffco device. The app
+Web app and command-line controller for a Puffco device. The app
 can talk to the device directly from the browser with Web Bluetooth on HTTPS,
 localhost, or 127.0.0.1. The Windows Python bridge remains available as a
 fallback and for CLI/dev workflows.
-
-## Web App
-
-Start the app with one command:
-
-```powershell
-.\start.bat
-```
-
-Check the Windows runtime without starting the server:
-
-```powershell
-.\start.bat --check
-```
 
 The launcher opens `http://localhost:8420` and runs the stdlib HTTP server plus
 a local WebSocket control channel. Keep the terminal open while using the app.
@@ -50,24 +35,6 @@ Deployment layout:
 - `web/ble-client.js` is the browser-native Lorax/Web Bluetooth transport.
 - `server.py` remains the optional local Windows bridge and exposes
   `ws://127.0.0.1:8421/ws` when you need it.
-
-One-time GitHub setup:
-
-```powershell
-git init
-git add .
-git commit -m "Initial Puffco BLE web app"
-git branch -M main
-git remote add origin https://github.com/YOUR_NAME/YOUR_REPO.git
-git push -u origin main
-```
-
-In GitHub, open the repository settings, enable Pages with "GitHub Actions" as
-the source, then open the public Pages URL in Chrome or Edge and choose Browser
-Bluetooth in the connection panel. If that browser cannot expose Web Bluetooth,
-run `.\start.bat` locally, switch the transport to Local Windows Bridge, and set
-the bridge field to:
-
 ```text
 ws://127.0.0.1:8421/ws
 ```
