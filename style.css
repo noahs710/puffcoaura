@@ -362,6 +362,32 @@ body.device-disconnected .connected-only-nav {
   .section-grid {
     grid-template-columns: 1fr;
   }
+
+  .app-container {
+    padding-bottom: 124px;
+  }
+
+  .app-menu {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    top: auto;
+    justify-content: space-around;
+    margin: 0;
+    padding: 8px;
+  }
+
+  .app-menu a {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 9px 8px;
+    text-align: center;
+  }
+
+  .session-debug-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 /* ---- Connect Section ---- */
@@ -2838,5 +2864,14 @@ input[type="range"]::-moz-range-thumb {
 @media (max-width: 600px) {
   .lorax-write-inputs {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
