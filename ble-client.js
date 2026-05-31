@@ -11,6 +11,9 @@ class PuffcoBrowserBleClient {
     this.commandQueue = Promise.resolve();
     this.lastProfiles = null;
     this.onDisconnected = null;
+    this.disconnecting = false;
+    this.replyHandler = (event) => this.onReply(event);
+    this.disconnectHandler = () => this.handleGattDisconnected();
   }
 
   static LORAX_SERVICE = 'e276967f-ea8a-478a-a92e-d78f5dd15dd5';
@@ -91,7 +94,7 @@ class PuffcoBrowserBleClient {
   }
 
   supported() {
-    return Boolean(navigator.bluetooth && window.isSecureContext);
+    return Boolean(window.navigator?.bluetooth && window.isSecureContext);
   }
 
   async handleCommand(cmd, params = {}) {
@@ -142,40 +145,83 @@ class PuffcoBrowserBleClient {
       return { type: 'connected', message: 'Already connected through browser Bluetooth.', data: await this.snapshot(true) };
     }
 
+    this.resetSessionState('Starting new browser Bluetooth connection');
+    this.disconnecting = false;
+
     const requestOptions = {
       acceptAllDevices: true,
       optionalServices: [PuffcoBrowserBleClient.LORAX_SERVICE],
     };
-    this.device = await navigator.bluetooth.requestDevice(requestOptions);
-    this.device.addEventListener('gattserverdisconnected', () => {
-      this.commandChar = null;
-      this.replyChar = null;
-      this.versionChar = null;
-      if (typeof this.onDisconnected === 'function') this.onDisconnected();
-    });
-    this.server = await this.device.gatt.connect();
-    this.service = await this.server.getPrimaryService(PuffcoBrowserBleClient.LORAX_SERVICE);
-    this.versionChar = await this.service.getCharacteristic(PuffcoBrowserBleClient.VERSION_CHAR);
-    this.commandChar = await this.service.getCharacteristic(PuffcoBrowserBleClient.COMMAND_CHAR);
-    this.replyChar = await this.service.getCharacteristic(PuffcoBrowserBleClient.REPLY_CHAR);
-    await this.versionChar.readValue();
-    await this.replyChar.startNotifications();
-    this.replyChar.addEventListener('characteristicvaluechanged', (event) => this.onReply(event));
-    await this.auth();
-    return {
-      type: 'connected',
-      message: 'Connected through browser Web Bluetooth.',
-      data: await this.snapshot(true),
-    };
+    try {
+      if (this.device) this.device.removeEventListener('gattserverdisconnected', this.disconnectHandler);
+      this.device = await window.navigator.bluetooth.requestDevice(requestOptions);
+      this.device.addEventListener('gattserverdisconnected', this.disconnectHandler);
+      this.server = await this.device.gatt.connect();
+      this.service = await this.server.getPrimaryService(PuffcoBrowserBleClient.LORAX_SERVICE);
+      this.versionChar = await this.service.getCharacteristic(PuffcoBrowserBleClient.VERSION_CHAR);
+      this.commandChar = await this.service.getCharacteristic(PuffcoBrowserBleClient.COMMAND_CHAR);
+      this.replyChar = await this.service.getCharacteristic(PuffcoBrowserBleClient.REPLY_CHAR);
+      await this.versionChar.readValue();
+      await this.replyChar.startNotifications();
+      this.replyChar.removeEventListener('characteristicvaluechanged', this.replyHandler);
+      this.replyChar.addEventListener('characteristicvaluechanged', this.replyHandler);
+      await this.auth();
+      return {
+        type: 'connected',
+        message: 'Connected through browser Web Bluetooth.',
+        data: await this.snapshot(true),
+      };
+    } catch (error) {
+      const hadConnection = Boolean(this.device?.gatt?.connected);
+      if (hadConnection) {
+        this.disconnecting = true;
+        this.device.gatt.disconnect();
+      }
+      this.resetSessionState('Browser Bluetooth connection failed');
+      if (!hadConnection) this.disconnecting = false;
+      throw error;
+    }
   }
 
   async disconnect() {
-    if (this.device?.gatt?.connected) this.device.gatt.disconnect();
+    const hadConnection = Boolean(this.device?.gatt?.connected);
+    this.disconnecting = true;
+    if (hadConnection) this.device.gatt.disconnect();
+    this.resetSessionState('User disconnected');
+    if (!hadConnection) this.disconnecting = false;
+    return { type: 'disconnected', message: 'Disconnected browser Bluetooth.', data: this.disconnectedSnapshot('User disconnected') };
+  }
+
+  handleGattDisconnected() {
+    const manual = this.disconnecting;
+    this.resetSessionState('Browser Bluetooth disconnected');
+    this.disconnecting = false;
+    if (!manual && typeof this.onDisconnected === 'function') this.onDisconnected();
+  }
+
+  rejectPending(reason) {
+    const error = new Error(reason);
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  resetSessionState(reason = 'Browser Bluetooth session reset') {
+    this.rejectPending(reason);
+    if (this.replyChar) {
+      try {
+        this.replyChar.removeEventListener('characteristicvaluechanged', this.replyHandler);
+      } catch {}
+    }
+    this.server = null;
+    this.service = null;
     this.commandChar = null;
     this.replyChar = null;
     this.versionChar = null;
-    this.pending.clear();
-    return { type: 'disconnected', message: 'Disconnected browser Bluetooth.', data: this.disconnectedSnapshot('User disconnected') };
+    this.lastProfiles = null;
+    this.commandQueue = Promise.resolve();
   }
 
   scanDevices() {

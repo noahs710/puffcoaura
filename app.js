@@ -26,6 +26,10 @@ const app = (() => {
   let transportMode = 'browser_ble';
   let browserBle = null;
   let browserBlePoll = null;
+  let browserBleStatusInFlight = false;
+  let browserBleDisconnectHandled = false;
+  const browserDebugEvents = [];
+  const BROWSER_DEBUG_LIMIT = 300;
 
   // Lorax Path Explorer State
   let loraxPaths = [];
@@ -151,7 +155,69 @@ const app = (() => {
   }
 
   function browserBleSupported() {
-    return Boolean(window.PuffcoBrowserBleClient && navigator.bluetooth && window.isSecureContext);
+    return Boolean(window.PuffcoBrowserBleClient && window.navigator?.bluetooth && window.isSecureContext);
+  }
+
+  function platformSummary() {
+    const ua = window.navigator.userAgent || '';
+    const platform = window.navigator.userAgentData?.platform || window.navigator.platform || 'Unknown';
+    const brands = window.navigator.userAgentData?.brands?.map((item) => item.brand).join(', ') || '';
+    const isIOS = /iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && window.navigator.maxTouchPoints > 1);
+    const isAndroid = /Android/i.test(ua);
+    const isFirefox = /Firefox\//i.test(ua);
+    const isSafari = /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(ua);
+    const isChromium = /Chrome|Chromium|Edg|OPR|Brave|SamsungBrowser/i.test(ua) || /Chromium|Google Chrome|Microsoft Edge/i.test(brands);
+    const browser = isFirefox ? 'Firefox' : isSafari ? 'Safari' : isChromium ? 'Chromium browser' : 'Unknown browser';
+    const os = isIOS ? 'iOS/iPadOS' : isAndroid ? 'Android' : /Win/i.test(platform) ? 'Windows' : /Mac/i.test(platform) ? 'macOS' : /Linux/i.test(platform) ? 'Linux' : platform;
+    return { browser, os, isIOS, isAndroid, isFirefox, isSafari, isChromium };
+  }
+
+  async function updateBleCapabilityPanel() {
+    const panel = document.getElementById('ble-capability');
+    if (!panel) return;
+    const title = document.getElementById('ble-capability-title');
+    const copy = document.getElementById('ble-capability-copy');
+    const tags = document.getElementById('ble-capability-tags');
+    const platform = platformSummary();
+    const secure = window.isSecureContext;
+    const apiPresent = Boolean(window.navigator?.bluetooth);
+    let available = null;
+    if (apiPresent && typeof window.navigator.bluetooth.getAvailability === 'function') {
+      try {
+        available = await window.navigator.bluetooth.getAvailability();
+      } catch {
+        available = null;
+      }
+    }
+
+    const directReady = browserBleSupported() && available !== false;
+    const hardBlocked = !secure || !apiPresent || platform.isIOS || platform.isSafari || platform.isFirefox;
+    panel.classList.toggle('blocked', hardBlocked);
+    panel.classList.toggle('limited', !hardBlocked && !directReady);
+    panel.classList.toggle('online', directReady);
+
+    const tagValues = [
+      platform.browser,
+      platform.os,
+      secure ? 'Secure page' : 'HTTPS required',
+      apiPresent ? 'Web Bluetooth API found' : 'No Web Bluetooth API',
+      available === false ? 'Bluetooth unavailable' : available === true ? 'Adapter available' : 'Adapter unknown',
+    ];
+    if (tags) tags.innerHTML = tagValues.map((tag) => `<span class="capability-tag">${escHtml(tag)}</span>`).join('');
+
+    if (directReady) {
+      setText('ble-capability-title', 'Direct web Bluetooth ready');
+      setText('ble-capability-copy', 'This browser can connect from GitHub Pages or localhost. Press Connect and approve the browser Bluetooth chooser.');
+    } else if (!secure) {
+      setText('ble-capability-title', 'HTTPS is required for web Bluetooth');
+      setText('ble-capability-copy', 'Direct BLE only works from HTTPS, localhost, or 127.0.0.1. Use GitHub Pages or the local bridge.');
+    } else if (platform.isIOS || platform.isSafari || platform.isFirefox || !apiPresent) {
+      setText('ble-capability-title', 'Direct BLE is not exposed by this browser');
+      setText('ble-capability-copy', 'Use Chrome or Edge on Windows, macOS, Linux, ChromeOS, or Android for direct web BLE. This browser can still view the app and use a local bridge where available.');
+    } else {
+      setText('ble-capability-title', 'Bluetooth availability needs attention');
+      setText('ble-capability-copy', 'The Web Bluetooth API exists, but the adapter may be off, blocked by browser policy, or unavailable to this page.');
+    }
   }
 
   function defaultTransportMode() {
@@ -167,6 +233,8 @@ const app = (() => {
     if (!browserBle) {
       browserBle = new window.PuffcoBrowserBleClient();
       browserBle.onDisconnected = () => {
+        if (browserBleDisconnectHandled) return;
+        browserBleDisconnectHandled = true;
         handleMessage({
           type: 'disconnected',
           message: 'Browser Bluetooth disconnected.',
@@ -196,6 +264,91 @@ const app = (() => {
         supported ? 'online' : 'offline',
       );
     }
+    updateBleCapabilityPanel();
+    renderBrowserDebugSummary();
+  }
+
+  function renderBrowserDebugSummary() {
+    const latest = browserDebugEvents[browserDebugEvents.length - 1];
+    const platform = platformSummary();
+    setText('debug-transport', transportMode === 'browser_ble' ? 'Browser Bluetooth' : 'Local bridge');
+    setText('debug-platform', `${platform.browser} / ${platform.os}`);
+    setText('debug-event-count', String(browserDebugEvents.length));
+    setText('debug-last-event', latest ? `${logLabel(latest.type)} ${latest.message || latest.type}` : 'Ready');
+  }
+
+  function recordBrowserDebug(type, message, data = null) {
+    const entry = {
+      time: new Date().toISOString(),
+      transport: transportMode,
+      type: normalizeLogType(type),
+      message: String(message || ''),
+      data,
+    };
+    browserDebugEvents.push(entry);
+    while (browserDebugEvents.length > BROWSER_DEBUG_LIMIT) browserDebugEvents.shift();
+    try {
+      localStorage.setItem('puffco_browser_debug_log', JSON.stringify(browserDebugEvents));
+    } catch {}
+    const logger = entry.type === 'error' ? console.error : entry.type === 'warn' ? console.warn : console.info;
+    logger.call(console, `[Puffco ${entry.type.toUpperCase()}] ${entry.message}`, data ?? '');
+    renderBrowserDebugSummary();
+  }
+
+  function restoreBrowserDebugLog() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('puffco_browser_debug_log') || '[]');
+      if (Array.isArray(saved)) {
+        browserDebugEvents.splice(0, browserDebugEvents.length, ...saved.slice(-BROWSER_DEBUG_LIMIT));
+        renderBrowserDebugSummary();
+      }
+    } catch {}
+  }
+
+  function exportBrowserDebugLog() {
+    return browserDebugEvents.slice();
+  }
+
+  function browserDebugPayload() {
+    return {
+      generated_at: new Date().toISOString(),
+      location: location.href,
+      platform: platformSummary(),
+      secure_context: window.isSecureContext,
+      web_bluetooth_api: Boolean(window.navigator?.bluetooth),
+      transport: transportMode,
+      connected,
+      last_connection_status: lastConnectionStatus,
+      last_message: lastBackendMessage,
+      last_snapshot: lastDeviceSnapshot,
+      events: exportBrowserDebugLog(),
+    };
+  }
+
+  async function copyBrowserDebugLog() {
+    const text = safeJsonStringify(browserDebugPayload());
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Debug log copied', 'success');
+      appendLog('Browser debug log copied to clipboard', 'success');
+    } catch (err) {
+      toast('Clipboard copy failed', 'error');
+      appendLog(`Clipboard copy failed: ${err?.message || err}`, 'error');
+    }
+  }
+
+  function downloadBrowserDebugLog() {
+    const text = safeJsonStringify(browserDebugPayload());
+    const blob = new Blob([text], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `puffco-debug-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    appendLog('Browser debug log downloaded', 'success');
   }
 
   function stopBrowserBlePolling() {
@@ -203,13 +356,29 @@ const app = (() => {
       clearInterval(browserBlePoll);
       browserBlePoll = null;
     }
+    browserBleStatusInFlight = false;
+  }
+
+  async function pollBrowserBleStatus() {
+    if (transportMode !== 'browser_ble' || !connected || connectPending || browserBleStatusInFlight) return;
+    browserBleStatusInFlight = true;
+    try {
+      const response = await getBrowserBle().handleCommand('status');
+      handleMessage(response);
+    } catch (err) {
+      if (connected) {
+        const detail = err?.message || String(err);
+        handleMessage({ type: 'error', message: `Browser Bluetooth status failed: ${detail}` });
+      }
+    } finally {
+      browserBleStatusInFlight = false;
+    }
   }
 
   function startBrowserBlePolling() {
     if (transportMode !== 'browser_ble' || browserBlePoll) return;
-    browserBlePoll = setInterval(() => {
-      if (transportMode === 'browser_ble' && connected && !connectPending) send('status');
-    }, 1000);
+    pollBrowserBleStatus();
+    browserBlePoll = setInterval(pollBrowserBleStatus, 1000);
   }
 
   function closeBridgeSocket() {
@@ -236,6 +405,7 @@ const app = (() => {
       }
     } else {
       stopBrowserBlePolling();
+      if (browserBle?.connected) sendBrowserBle('disconnect', {}, { quiet: true });
       connectBridge();
     }
   }
@@ -321,13 +491,15 @@ const app = (() => {
     setTimeout(() => initWebSocket(bridgeUrl), 50);
   }
 
-  async function sendBrowserBle(cmd, params = {}) {
+  async function sendBrowserBle(cmd, params = {}, options = {}) {
     try {
+      if (cmd !== 'status' && !options.quiet) recordBrowserDebug('info', `Browser BLE command: ${cmd}`, params);
       const response = await getBrowserBle().handleCommand(cmd, params);
       handleMessage(response);
     } catch (err) {
-      const detail = err?.message || String(err);
-      handleMessage({ type: 'error', message: `Browser Bluetooth ${cmd} failed: ${detail}` });
+      let detail = err?.message || String(err);
+      if (err?.name === 'NotFoundError') detail = 'Bluetooth chooser was canceled.';
+      if (!options.quiet) handleMessage({ type: 'error', message: `Browser Bluetooth ${cmd} failed: ${detail}` });
     }
   }
 
@@ -344,6 +516,7 @@ const app = (() => {
         return false;
       }
       if (cmd !== 'status') appendLog(`Sent ${cmd} through browser Bluetooth`, 'info');
+      if (cmd === 'connect') browserBleDisconnectHandled = false;
       sendBrowserBle(cmd, params);
       return true;
     }
@@ -377,6 +550,7 @@ const app = (() => {
           break;
         case 'connected':
           connectPending = false;
+          browserBleDisconnectHandled = false;
           updateDeviceState(normalizeConnectedPayload(msg.data));
           if (transportMode === 'browser_ble') startBrowserBlePolling();
           toast('Connected to device!', 'success');
@@ -387,6 +561,7 @@ const app = (() => {
           scanPending = false;
           connected = false;
           stopBrowserBlePolling();
+          browserBleDisconnectHandled = true;
           lastDeviceSnapshot = normalizeDisconnectedPayload(msg.data, msg.message);
           deviceState = null;
           updateConnectionUI(false);
@@ -423,7 +598,7 @@ const app = (() => {
           if (connectPending) {
             connectPending = false;
             updateConnectionUI(false);
-          } else if (connected) {
+          } else if (connected && transportMode !== 'browser_ble') {
             setTimeout(() => send('status'), 50);
           }
           heatCommandPending = null;
@@ -535,7 +710,21 @@ const app = (() => {
 
   // ---- UI Updates ----
 
+  function setConnectedOnlyVisibility(isConnected) {
+    document.querySelectorAll('.connected-only, .connected-only-nav').forEach((el) => {
+      el.hidden = !isConnected;
+      el.setAttribute('aria-hidden', String(!isConnected));
+      if ('inert' in el) el.inert = !isConnected;
+      if (el.classList.contains('connected-only-nav')) {
+        el.tabIndex = isConnected ? 0 : -1;
+      }
+    });
+  }
+
   function updateConnectionUI(isConnected) {
+    document.body.classList.toggle('device-connected', isConnected);
+    document.body.classList.toggle('device-disconnected', !isConnected);
+    setConnectedOnlyVisibility(isConnected);
     const badge = document.getElementById('connection-badge');
     const text = document.getElementById('connection-text');
     const btnConnect = document.getElementById('btn-connect');
@@ -611,6 +800,7 @@ const app = (() => {
       'button[data-device-command]',
       '#profiles-card button',
       '#brightness-card button',
+      '#brightness-card input',
       '#power-card button',
     ];
     document.querySelectorAll(selectors.join(',')).forEach((el) => {
@@ -1392,14 +1582,16 @@ const app = (() => {
       return;
     }
 
-    // Safety timeout: if backend never responds, reset to allow retry
+    // Safety timeout: if the chooser/backend never responds, reset to allow retry.
+    const timeoutMs = transportMode === 'browser_ble' ? 45000 : 120000;
     setTimeout(() => {
       if (!connectPending) return;
       connectPending = false;
       updateConnectionUI(false);
       toast('Connection attempt timed out', 'error');
-      appendLog('Connection timed out after 120s — no response from backend', 'error');
-    }, 120000);
+      const source = transportMode === 'browser_ble' ? 'browser Bluetooth chooser/device' : 'backend';
+      appendLog(`Connection timed out after ${Math.round(timeoutMs / 1000)}s — no response from ${source}`, 'error');
+    }, timeoutMs);
   }
 
   function disconnectDevice() {
@@ -1587,6 +1779,8 @@ const app = (() => {
     const log = document.getElementById('activity-log');
     if (!log) return;
 
+    recordBrowserDebug(type, message);
+
     const empty = log.querySelector('.log-empty');
     if (empty) empty.remove();
 
@@ -1653,6 +1847,12 @@ const app = (() => {
 
   function rememberBackendMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
+    if (msg.type !== 'status') {
+      recordBrowserDebug(msg.type === 'error' ? 'error' : 'info', `Message: ${msg.type}`, {
+        message: msg.message || null,
+        data: msg.data ?? null,
+      });
+    }
     lastBackendMessage = {
       type: msg.type || 'unknown',
       message: msg.message || null,
@@ -2504,14 +2704,28 @@ const app = (() => {
 
   // ---- Init ----
 
+  function initServiceWorker() {
+    if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+    navigator.serviceWorker.register('./sw.js')
+      .then((registration) => {
+        recordBrowserDebug('info', 'App shell service worker ready', { scope: registration.scope });
+        registration.update().catch(() => {});
+      })
+      .catch((err) => {
+        recordBrowserDebug('warn', `Service worker registration failed: ${err?.message || err}`);
+      });
+  }
+
   function init() {
     // Restore saved values
+    restoreBrowserDebugLog();
     const savedName = localStorage.getItem('puffco_device_name');
     const savedMac = localStorage.getItem('puffco_device_mac');
     bridgeUrl = normalizeBridgeUrl(localStorage.getItem('puffco_bridge_url'));
     transportMode = normalizeTransportMode(localStorage.getItem('puffco_transport_mode') || defaultTransportMode());
     if (savedName) document.getElementById('device-name').value = savedName;
     if (savedMac) document.getElementById('device-mac').value = savedMac;
+    updateConnectionUI(false);
     renderBridgeUI();
 
     initColorControls();
@@ -2531,17 +2745,7 @@ const app = (() => {
     renderTimer = setInterval(() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
-
-    // Unregister any active service worker to avoid cache issues
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then((registrations) => {
-        for (let registration of registrations) {
-          registration.unregister();
-        }
-      }).catch(err => {
-        console.log('SW unregistration failed:', err);
-      });
-    }
+    initServiceWorker();
   }
 
   // Boot
@@ -2594,7 +2798,14 @@ const app = (() => {
     devSetTemperatureSource,
     devClearTemperatureSource,
     devRunLoraxAction,
+    exportBrowserDebugLog,
+    copyBrowserDebugLog,
+    downloadBrowserDebugLog,
   };
 })();
 
 window.app = app;
+window.puffcoDebug = {
+  export: () => app.exportBrowserDebugLog(),
+  print: () => console.table(app.exportBrowserDebugLog()),
+};
