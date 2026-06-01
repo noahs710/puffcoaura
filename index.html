@@ -33,7 +33,7 @@
       <a href="#status-card">Status</a>
       <a href="#heat-control-card" class="connected-only-nav">Heat</a>
       <a href="#profiles-card" class="connected-only-nav">Profiles</a>
-      <a href="#advanced-panel">Dev</a>
+      <a href="#advanced-panel">Advanced</a>
     </nav>
 
     <!-- Connection Card -->
@@ -71,33 +71,15 @@
           <div class="capability-tags" id="ble-capability-tags"></div>
         </div>
       </button>
-      <div class="session-debug-strip" id="session-debug-strip" aria-live="polite">
-        <div>
-          <span>Mode</span>
-          <strong id="debug-transport">Browser Bluetooth</strong>
-        </div>
-        <div>
-          <span>Platform</span>
-          <strong id="debug-platform">Checking</strong>
-        </div>
-        <div>
-          <span>Events</span>
-          <strong id="debug-event-count">0</strong>
-        </div>
-        <div>
-          <span>Last</span>
-          <strong id="debug-last-event">Ready</strong>
-        </div>
-      </div>
       <div class="connect-section">
         <div class="input-group">
           <label for="device-name">Device Name</label>
           <input type="text" id="device-name" placeholder="Peak" value="Peak" />
         </div>
-        <div class="input-group">
-          <label for="device-mac">MAC Address (optional)</label>
-          <input type="text" id="device-mac" placeholder="F0:AD:4E:..." />
-        </div>
+        <details class="input-group optional-device-field" id="device-mac-details">
+          <summary>Use MAC address</summary>
+          <input type="text" id="device-mac" placeholder="F0:AD:4E:..." aria-label="Optional MAC address" />
+        </details>
         <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
           Connect
         </button>
@@ -115,7 +97,7 @@
     <section class="card" id="status-card">
       <div class="card-header">
         <h2><span class="icon icon-status"></span> Device Status</h2>
-        <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Refresh</button>
+        <button class="btn btn-sm btn-secondary" data-device-command="status" onclick="app.refreshStatus()">Refresh</button>
       </div>
 
       <div class="disconnected-overlay visible" id="status-empty">
@@ -189,24 +171,6 @@
               </div>
             </div>
           </div>
-
-          <div class="metric-cards">
-            <div class="metric-card metric-primary">
-              <div class="stat-label">Dabs left</div>
-              <div class="metric-value" id="stat-drem">—</div>
-              <div class="metric-note">estimated remaining</div>
-            </div>
-            <div class="metric-card">
-              <div class="stat-label">Dabs/day</div>
-              <div class="metric-value" id="stat-dpd">—</div>
-              <div class="metric-note">usage pace</div>
-            </div>
-            <div class="metric-card">
-              <div class="stat-label">Total dabs</div>
-              <div class="metric-value" id="stat-total-dabs">—</div>
-              <div class="metric-note">lifetime count</div>
-            </div>
-          </div>
         </div>
 
         <div class="status-grid mt-md">
@@ -217,10 +181,6 @@
           <div class="stat-item">
             <div class="stat-label">Active Profile</div>
             <div class="stat-value" id="stat-profile">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Charge</div>
-            <div class="stat-value" id="stat-charge">—</div>
           </div>
           <div class="stat-item telemetry-stat">
             <div class="stat-label">Live Temp</div>
@@ -247,6 +207,7 @@
             <div class="stat-value" id="stat-chamber">—</div>
           </div>
         </div>
+        <div id="stat-charge" class="hidden" aria-hidden="true">—</div>
       </div>
     </section>
 
@@ -286,16 +247,15 @@
         </div>
         <div class="compact-control-stack">
           <div class="toggle-wrap">
-            <div class="toggle" id="toggle-lantern" onclick="app.toggleLantern()"></div>
+            <button class="toggle" id="toggle-lantern" type="button" onclick="app.toggleLantern()" aria-pressed="false" aria-label="Toggle lantern mode"></button>
             <span class="toggle-label">Lantern Mode</span>
           </div>
           <div class="toggle-wrap">
-            <div class="toggle" id="toggle-stealth" onclick="app.toggleStealth()"></div>
+            <button class="toggle" id="toggle-stealth" type="button" onclick="app.toggleStealth()" aria-pressed="false" aria-label="Toggle stealth mode"></button>
             <span class="toggle-label">Stealth Mode</span>
           </div>
           <div class="inline-actions">
             <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Show Battery</button>
-            <button class="btn btn-sm btn-secondary" onclick="app.showVersion()">Show Version</button>
           </div>
         </div>
       </section>
@@ -349,7 +309,6 @@
       <div class="power-controls">
         <button class="btn btn-secondary" onclick="app.power('sleep')">Sleep</button>
         <button class="btn btn-danger" onclick="app.power('off')">⏻ Power Off</button>
-        <button class="btn btn-danger" onclick="app.factoryReset()">Factory Reset</button>
       </div>
     </section>
 
@@ -440,6 +399,26 @@
           </div>
         </div>
         <div class="backend-json-grid mt-md">
+          <details class="backend-json-panel">
+            <summary>Usage Counters</summary>
+            <div class="metric-cards usage-metrics">
+              <div class="metric-card metric-primary">
+                <div class="stat-label">Dabs left</div>
+                <div class="metric-value" id="stat-drem">—</div>
+                <div class="metric-note">estimated remaining</div>
+              </div>
+              <div class="metric-card">
+                <div class="stat-label">Dabs/day</div>
+                <div class="metric-value" id="stat-dpd">—</div>
+                <div class="metric-note">usage pace</div>
+              </div>
+              <div class="metric-card">
+                <div class="stat-label">Total dabs</div>
+                <div class="metric-value" id="stat-total-dabs">—</div>
+                <div class="metric-note">lifetime count</div>
+              </div>
+            </div>
+          </details>
           <details open class="backend-json-panel">
             <summary>Device Snapshot</summary>
             <pre id="backend-snapshot-json">No snapshot yet</pre>
@@ -455,6 +434,28 @@
         </div>
       </section>
 
+      <section class="card" id="advanced-actions-card">
+        <div class="card-header">
+          <h2><span class="icon icon-power"></span> Device Actions</h2>
+        </div>
+        <div class="advanced-action-grid">
+          <div class="advanced-action">
+            <div>
+              <strong>Version flash</strong>
+              <span>Ask the device to display its firmware version pattern.</span>
+            </div>
+            <button class="btn btn-sm btn-secondary" onclick="app.showVersion()">Show Version</button>
+          </div>
+          <div class="advanced-action danger-zone">
+            <div>
+              <strong>Factory reset</strong>
+              <span>Clears device settings after confirmation.</span>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="app.factoryReset()">Factory Reset</button>
+          </div>
+        </div>
+      </section>
+
       <section class="card debug-console-card" id="browser-debug-card">
         <div class="card-header">
           <h2><span class="icon icon-activity"></span> Browser Debug Console</h2>
@@ -465,6 +466,24 @@
           </div>
         </div>
         <div class="debug-console-shell">
+          <div class="session-debug-strip" id="session-debug-strip" aria-live="polite">
+            <div>
+              <span>Mode</span>
+              <strong id="debug-transport">Browser Bluetooth</strong>
+            </div>
+            <div>
+              <span>Platform</span>
+              <strong id="debug-platform">Checking</strong>
+            </div>
+            <div>
+              <span>Events</span>
+              <strong id="debug-event-count">0</strong>
+            </div>
+            <div>
+              <span>Last</span>
+              <strong id="debug-last-event">Ready</strong>
+            </div>
+          </div>
           <div class="debug-console-meta">
             <div>
               <span>Transport</span>

@@ -825,6 +825,62 @@ const app = (() => {
         el.tabIndex = isConnected ? 0 : -1;
       }
     });
+    updateActiveNavLink();
+  }
+
+  function sectionIsReachable(section) {
+    if (!section) return false;
+    if (section.hidden || section.getAttribute('aria-hidden') === 'true') return false;
+    if (section.closest('[hidden], [aria-hidden="true"]')) return false;
+    return true;
+  }
+
+  function updateActiveNavLink(forcedHash = '') {
+    const links = [...document.querySelectorAll('.app-menu a[href^="#"]')];
+    if (!links.length) return;
+    const visibleLinks = links.filter((link) => !link.hidden && link.getAttribute('aria-hidden') !== 'true');
+    const viewportAnchor = Math.max(110, Math.round(window.innerHeight * 0.22));
+    let active = forcedHash;
+
+    if (!active) {
+      let best = null;
+      visibleLinks.forEach((link) => {
+        const section = document.querySelector(link.getAttribute('href'));
+        if (!sectionIsReachable(section)) return;
+        const rect = section.getBoundingClientRect();
+        if (rect.bottom < viewportAnchor) return;
+        const score = Math.abs(rect.top - viewportAnchor);
+        if (!best || score < best.score) best = { link, score };
+      });
+      active = best?.link?.getAttribute('href') || visibleLinks[0]?.getAttribute('href') || '';
+    }
+
+    links.forEach((link) => {
+      const isActive = link.getAttribute('href') === active;
+      link.classList.toggle('active', isActive);
+      if (isActive) link.setAttribute('aria-current', 'location');
+      else link.removeAttribute('aria-current');
+    });
+  }
+
+  function initAppNavigation() {
+    const nav = document.querySelector('.app-menu');
+    if (!nav) return;
+    nav.addEventListener('click', (event) => {
+      const link = event.target.closest('a[href^="#"]');
+      if (!link) return;
+      const hash = link.getAttribute('href');
+      const section = document.querySelector(hash);
+      if (hash === '#advanced-panel' && section) section.open = true;
+      updateActiveNavLink(hash);
+    });
+    window.addEventListener('scroll', () => updateActiveNavLink(), { passive: true });
+    window.addEventListener('hashchange', () => {
+      const section = document.querySelector(window.location.hash);
+      if (window.location.hash === '#advanced-panel' && section) section.open = true;
+      updateActiveNavLink(window.location.hash);
+    });
+    updateActiveNavLink(window.location.hash);
   }
 
   function updateConnectionUI(isConnected) {
@@ -1649,11 +1705,8 @@ const app = (() => {
   function updateToggle(id, state) {
     const el = document.getElementById(id);
     if (!el) return;
-    if (state) {
-      el.classList.add('on');
-    } else {
-      el.classList.remove('on');
-    }
+    el.classList.toggle('on', Boolean(state));
+    el.setAttribute('aria-pressed', String(Boolean(state)));
   }
 
   function toggleLantern() {
@@ -1792,6 +1845,7 @@ const app = (() => {
       const rssi = item.rssi == null ? '' : `<span>${escapeHtml(String(item.rssi))} dBm</span>`;
       return `
         <button class="scan-result" type="button" data-address="${address}" data-name="${name}">
+          <i aria-hidden="true"></i>
           <span>
             <strong>${name}</strong>
             <small>${address}</small>
@@ -1807,6 +1861,7 @@ const app = (() => {
         const address = button.dataset.address || '';
         document.getElementById('device-name').value = name;
         document.getElementById('device-mac').value = address;
+        revealMacFieldIfNeeded(address);
         localStorage.setItem('puffco_device_name', name);
         localStorage.setItem('puffco_device_mac', address);
         appendLog(`Selected ${name} (${address})`, 'success');
@@ -1819,6 +1874,11 @@ const app = (() => {
 
   function refreshStatus() {
     send('status');
+  }
+
+  function revealMacFieldIfNeeded(value) {
+    const details = document.getElementById('device-mac-details');
+    if (details && String(value || '').trim()) details.open = true;
   }
 
   function selectProfile(index) {
@@ -2951,10 +3011,14 @@ const app = (() => {
     bridgeUrl = normalizeBridgeUrl(localStorage.getItem('puffco_bridge_url'));
     transportMode = normalizeTransportMode(localStorage.getItem('puffco_transport_mode') || defaultTransportMode());
     if (savedName) document.getElementById('device-name').value = savedName;
-    if (savedMac) document.getElementById('device-mac').value = savedMac;
+    if (savedMac) {
+      document.getElementById('device-mac').value = savedMac;
+      revealMacFieldIfNeeded(savedMac);
+    }
     updateConnectionUI(false);
     renderBridgeUI();
 
+    initAppNavigation();
     initColorControls();
     if (transportMode === 'bridge') {
       initWebSocket(bridgeUrl);

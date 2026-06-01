@@ -3,8 +3,13 @@ const fs = require("fs");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  const tabs = await (await fetch("http://127.0.0.1:9222/json")).json();
-  const page = tabs.find((tab) => tab.type === "page");
+  let page = null;
+  try {
+    page = await (await fetch("http://127.0.0.1:9222/json/new?about:blank", { method: "PUT" })).json();
+  } catch {
+    const tabs = await (await fetch("http://127.0.0.1:9222/json")).json();
+    page = tabs.find((tab) => tab.type === "page" && tab.url === "about:blank") || tabs.find((tab) => tab.type === "page");
+  }
   if (!page) {
     throw new Error("No Chrome page found on the debugging port");
   }
@@ -40,16 +45,25 @@ async function main() {
   await send("Runtime.enable");
   await send("Page.enable");
   await send("Log.enable");
+  await send("Network.enable");
+  await send("Network.setBypassServiceWorker", { bypass: true });
+  await send("Network.setCacheDisabled", { cacheDisabled: true });
   const targetUrl = process.argv[2] || "http://127.0.0.1:8420";
   const viewport = process.argv[3] || "desktop";
   if (viewport === "mobile") {
+    await send("Emulation.setUserAgentOverride", {
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+      platform: "iPhone",
+    });
     await send("Emulation.setDeviceMetricsOverride", {
       width: 390,
       height: 844,
       deviceScaleFactor: 2,
       mobile: true,
     });
+    await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
   } else {
+    await send("Emulation.setTouchEmulationEnabled", { enabled: false });
     await send("Emulation.setDeviceMetricsOverride", {
       width: 1280,
       height: 900,
@@ -93,6 +107,7 @@ async function main() {
     const overlaps = (a, b) => !!(a && b && a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y);
     const toastRect = rect(".toast");
     const controlRects = [".app-header", "#controls-grid", "#connect-card", "#status-card"].map(rect);
+    const navRect = rect(".app-menu");
     return {
       title: document.title,
       url: location.href,
@@ -106,7 +121,13 @@ async function main() {
       hasProfiles: exists("#profiles-grid"),
       hasActivityLog: exists("#activity-log"),
       activityRows: document.querySelectorAll("#activity-log .log-row").length,
-      hasExtendedStats: ["#stat-bootloader", "#stat-serial", "#stat-total-dabs", "#stat-uptime"].every(exists),
+      statusLabels: [...document.querySelectorAll("#status-card .stat-label")].map((label) => label.textContent.trim()),
+      advancedOpen: document.querySelector("#advanced-panel")?.open || false,
+      hasAdvancedStats: ["#stat-bootloader", "#stat-serial", "#stat-total-dabs", "#stat-charge-eta", "#backend-temp-source"].every(exists),
+      usageCountersInAdvanced: !!document.querySelector("#advanced-panel #stat-total-dabs") && !document.querySelector("#status-card #stat-total-dabs"),
+      mobileShell: document.body.classList.contains("mobile-nav-shell"),
+      navPosition: getComputedStyle(document.querySelector(".app-menu")).position,
+      navRect,
       hasStatusEmpty: document.querySelector("#status-empty")?.classList.contains("visible"),
       toastText: [...document.querySelectorAll(".toast")].map((toast) => toast.textContent.trim()),
       disabledDeviceButtons: [...document.querySelectorAll("#controls-grid button, #color-card button, #brightness-card button, #power-card button")]
@@ -147,7 +168,17 @@ async function main() {
   if (pageData.overflowX) failures.push("Page has horizontal overflow");
   if (!pageData.hasActivityLog) failures.push("Activity log is missing");
   if (!pageData.activityRows) failures.push("Activity log did not record blocked commands");
-  if (!pageData.hasExtendedStats) failures.push("Extended status fields are missing");
+  if (!pageData.hasAdvancedStats) failures.push("Advanced status fields are missing");
+  if (!pageData.usageCountersInAdvanced) failures.push("Usage counters are not compacted into Advanced");
+  if (pageData.statusLabels.some((label) => /Dabs|Firmware|Bootloader|Serial|Backend|Raw|ETA/i.test(label))) {
+    failures.push("Main status card still contains advanced or usage-only labels");
+  }
+  if (viewport === "desktop" && (pageData.mobileShell || pageData.navPosition === "fixed")) {
+    failures.push("Desktop viewport is using the mobile hotbar");
+  }
+  if (viewport === "mobile" && (!pageData.mobileShell || pageData.navPosition !== "fixed")) {
+    failures.push("Mobile viewport is not using the mobile hotbar");
+  }
   if (!pageData.disabledDeviceButtons) failures.push("Device controls are enabled while disconnected");
   if (pageData.toastOverControls) failures.push("Toast overlaps the main control area");
 
