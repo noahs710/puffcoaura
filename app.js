@@ -28,6 +28,8 @@ const app = (() => {
   let browserBlePoll = null;
   let browserBleStatusInFlight = false;
   let browserBleDisconnectHandled = false;
+  let optimisticProfileIndex = null;
+  let bleCapabilityExpanded = false;
   const browserDebugEvents = [];
   const BROWSER_DEBUG_LIMIT = 300;
 
@@ -172,6 +174,16 @@ const app = (() => {
     return { browser, os, isIOS, isAndroid, isFirefox, isSafari, isChromium };
   }
 
+  function syncShellClasses() {
+    const platform = platformSummary();
+    const narrow = window.matchMedia?.('(max-width: 700px)').matches ?? window.innerWidth <= 700;
+    const coarseTouch = window.matchMedia?.('(pointer: coarse) and (hover: none)').matches ?? false;
+    const mobileOS = platform.isIOS || platform.isAndroid;
+    document.body.classList.toggle('mobile-nav-shell', Boolean(narrow && (mobileOS || coarseTouch)));
+    document.body.classList.toggle('ios-shell', platform.isIOS);
+    document.body.classList.toggle('non-chromium-shell', !platform.isChromium);
+  }
+
   async function updateBleCapabilityPanel() {
     const panel = document.getElementById('ble-capability');
     if (!panel) return;
@@ -195,6 +207,8 @@ const app = (() => {
     panel.classList.toggle('blocked', hardBlocked);
     panel.classList.toggle('limited', !hardBlocked && !directReady);
     panel.classList.toggle('online', directReady);
+    if (hardBlocked || (!directReady && available === false)) bleCapabilityExpanded = true;
+    renderBleCapabilityExpansion();
 
     const tagValues = [
       platform.browser,
@@ -207,17 +221,50 @@ const app = (() => {
 
     if (directReady) {
       setText('ble-capability-title', 'Direct web Bluetooth ready');
+      setText('ble-capability-hint', bleCapabilityExpanded ? 'Hide details' : 'Ready');
       setText('ble-capability-copy', 'This browser can connect from GitHub Pages or localhost. Press Connect and approve the browser Bluetooth chooser.');
+      panel.setAttribute('aria-label', 'Direct web Bluetooth ready. Click for details.');
     } else if (!secure) {
       setText('ble-capability-title', 'HTTPS is required for web Bluetooth');
+      setText('ble-capability-hint', 'Needs attention');
       setText('ble-capability-copy', 'Direct BLE only works from HTTPS, localhost, or 127.0.0.1. Use GitHub Pages or the local bridge.');
+      panel.setAttribute('aria-label', 'Web Bluetooth needs HTTPS or localhost. Click for details.');
     } else if (platform.isIOS || platform.isSafari || platform.isFirefox || !apiPresent) {
       setText('ble-capability-title', 'Direct BLE is not exposed by this browser');
+      setText('ble-capability-hint', 'Needs attention');
       setText('ble-capability-copy', 'Use Chrome or Edge on Windows, macOS, Linux, ChromeOS, or Android for direct web BLE. This browser can still view the app and use a local bridge where available.');
+      panel.setAttribute('aria-label', 'Direct Bluetooth is unavailable in this browser. Click for details.');
     } else {
       setText('ble-capability-title', 'Bluetooth availability needs attention');
+      setText('ble-capability-hint', 'Needs attention');
       setText('ble-capability-copy', 'The Web Bluetooth API exists, but the adapter may be off, blocked by browser policy, or unavailable to this page.');
+      panel.setAttribute('aria-label', 'Bluetooth availability needs attention. Click for details.');
     }
+  }
+
+  function toggleBleCapability() {
+    bleCapabilityExpanded = !bleCapabilityExpanded;
+    renderBleCapabilityExpansion();
+  }
+
+  function expandBleCapability() {
+    bleCapabilityExpanded = true;
+    renderBleCapabilityExpansion();
+  }
+
+  function renderBleCapabilityExpansion() {
+    const panel = document.getElementById('ble-capability');
+    if (!panel) return;
+    panel.classList.toggle('expanded', bleCapabilityExpanded);
+    panel.setAttribute('aria-expanded', String(bleCapabilityExpanded));
+    const hint = document.getElementById('ble-capability-hint');
+    if (hint && !panel.classList.contains('blocked') && !panel.classList.contains('limited')) {
+      hint.textContent = bleCapabilityExpanded ? 'Hide details' : 'Ready';
+    }
+  }
+
+  function isBluetoothRelatedMessage(message) {
+    return /bluetooth|ble|adapter|gatt|chooser|secure context|https|permission|device/i.test(String(message || ''));
   }
 
   function defaultTransportMode() {
@@ -249,6 +296,12 @@ const app = (() => {
     const input = document.getElementById('bridge-url');
     if (input && document.activeElement !== input) input.value = bridgeUrl || defaultBridgeUrl();
     const select = document.getElementById('transport-mode');
+    const browserOption = select?.querySelector('option[value="browser_ble"]');
+    const browserSupported = browserBleSupported();
+    if (browserOption) {
+      browserOption.disabled = !browserSupported;
+      browserOption.textContent = browserSupported ? 'Browser Bluetooth' : 'Browser Bluetooth (unsupported here)';
+    }
     if (select && select.value !== transportMode) select.value = transportMode;
     const bridgeGroup = document.getElementById('bridge-url-group');
     const bridgeButton = document.getElementById('btn-bridge');
@@ -256,12 +309,11 @@ const app = (() => {
     if (bridgeGroup) bridgeGroup.classList.toggle('hidden', browserMode);
     if (bridgeButton) bridgeButton.classList.toggle('hidden', browserMode);
     if (browserMode) {
-      const supported = browserBleSupported();
       setBridgeNote(
-        supported
+        browserSupported
           ? 'Browser Bluetooth is active. GitHub Pages can connect directly through the Chrome/Edge Bluetooth chooser.'
           : 'Browser Bluetooth is unavailable here. Use Chrome or Edge on HTTPS, localhost, or 127.0.0.1, or switch to the local bridge.',
-        supported ? 'online' : 'offline',
+        browserSupported ? 'online' : 'offline',
       );
     }
     updateBleCapabilityPanel();
@@ -275,6 +327,10 @@ const app = (() => {
     setText('debug-platform', `${platform.browser} / ${platform.os}`);
     setText('debug-event-count', String(browserDebugEvents.length));
     setText('debug-last-event', latest ? `${logLabel(latest.type)} ${latest.message || latest.type}` : 'Ready');
+    setText('debug-console-transport', transportMode === 'browser_ble' ? 'Browser Bluetooth' : 'Local bridge');
+    setText('debug-console-context', `${window.isSecureContext ? 'Secure' : 'Not secure'} / ${platform.browser}`);
+    setText('debug-console-count', String(browserDebugEvents.length));
+    renderBrowserDebugLog();
   }
 
   function recordBrowserDebug(type, message, data = null) {
@@ -303,6 +359,15 @@ const app = (() => {
         renderBrowserDebugSummary();
       }
     } catch {}
+  }
+
+  function clearBrowserDebugLog() {
+    browserDebugEvents.splice(0, browserDebugEvents.length);
+    try {
+      localStorage.removeItem('puffco_browser_debug_log');
+    } catch {}
+    renderBrowserDebugSummary();
+    appendLog('Browser debug log cleared', 'info', { skipDebug: true });
   }
 
   function exportBrowserDebugLog() {
@@ -349,6 +414,36 @@ const app = (() => {
     link.remove();
     URL.revokeObjectURL(url);
     appendLog('Browser debug log downloaded', 'success');
+  }
+
+  function renderBrowserDebugLog() {
+    const log = document.getElementById('browser-debug-log');
+    if (!log) return;
+    const events = browserDebugEvents.slice(-60).reverse();
+    if (!events.length) {
+      log.innerHTML = '<div class="log-empty">No browser events yet</div>';
+      return;
+    }
+    log.innerHTML = events.map((entry) => {
+      const time = new Date(entry.time || Date.now()).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      const detail = entry.data == null ? '' : `<small>${escHtml(compactDebugData(entry.data))}</small>`;
+      return `
+        <div class="log-row ${escAttr(entry.type)}">
+          <span class="log-time">${escHtml(time)}</span>
+          <span class="log-level">${escHtml(logLabel(entry.type))}</span>
+          <span class="log-message">${escHtml(entry.message || entry.type)}${detail}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function compactDebugData(data) {
+    const text = friendlyJsonStringify(data);
+    return text.length > 220 ? `${text.slice(0, 220)}...` : text;
   }
 
   function stopBrowserBlePolling() {
@@ -499,7 +594,10 @@ const app = (() => {
     } catch (err) {
       let detail = err?.message || String(err);
       if (err?.name === 'NotFoundError') detail = 'Bluetooth chooser was canceled.';
-      if (!options.quiet) handleMessage({ type: 'error', message: `Browser Bluetooth ${cmd} failed: ${detail}` });
+      if (!options.quiet) {
+        expandBleCapability();
+        handleMessage({ type: 'error', message: `Browser Bluetooth ${cmd} failed: ${detail}` });
+      }
     }
   }
 
@@ -508,6 +606,7 @@ const app = (() => {
       if (!browserBleSupported()) {
         toast('Browser Bluetooth is unavailable here', 'error');
         appendLog('Browser Bluetooth requires Chrome or Edge on HTTPS, localhost, or 127.0.0.1', 'error');
+        expandBleCapability();
         return false;
       }
       if (DEVICE_COMMANDS.has(cmd) && !connected) {
@@ -593,7 +692,10 @@ const app = (() => {
         case 'error':
           toast(msg.message, 'error');
           appendLog(msg.message, 'error');
+          if (isBluetoothRelatedMessage(msg.message)) expandBleCapability();
           renderConnectionAttempts(msg.data?.attempts);
+          optimisticProfileIndex = null;
+          if (deviceState?.profiles) updateProfilesUI(deviceState.profiles, deviceState.current_profile);
           if (scanPending) finishDeviceScan();
           if (connectPending) {
             connectPending = false;
@@ -675,10 +777,14 @@ const app = (() => {
     deviceState = data;
     lastDeviceSnapshot = data;
     connected = data.connected === true;
+    if (data.current_profile != null && Number(data.current_profile) === Number(optimisticProfileIndex)) {
+      optimisticProfileIndex = null;
+    }
+    document.body.classList.toggle('heat-active', connected && isHeatActive(data));
     updateConnectionUI(connected);
     if (connected) {
       updateStatusUI(data);
-      updateProfilesUI(data.profiles, data.current_profile);
+      updateProfilesUI(data.profiles, optimisticProfileIndex ?? data.current_profile);
       stealthOn = !!data.stealth;
       updateToggle('toggle-stealth', stealthOn);
       lanternOn = !!data.lantern;
@@ -724,6 +830,7 @@ const app = (() => {
   function updateConnectionUI(isConnected) {
     document.body.classList.toggle('device-connected', isConnected);
     document.body.classList.toggle('device-disconnected', !isConnected);
+    if (!isConnected) document.body.classList.remove('heat-active');
     setConnectedOnlyVisibility(isConnected);
     const badge = document.getElementById('connection-badge');
     const text = document.getElementById('connection-text');
@@ -1052,34 +1159,51 @@ const app = (() => {
     }
 
     profiles.forEach((p, i) => {
-      const isActive = p.active || p.index === currentIndex;
+      const profileIndex = Number(p.index ?? i);
+      const isPending = optimisticProfileIndex != null && Number(optimisticProfileIndex) === profileIndex;
+      const isActive = isPending || p.active || profileIndex === Number(currentIndex);
       const profileColor = extractProfileColor(p.color);
       const mood = extractProfileMood(p.color);
       const officialMood = isOfficialMoodPayload(p.color);
       const moodName = mood.name || activeMoodPreset().name;
+      const tempLabel = formatProfileTemperature(p.temp_f);
+      const timeLabel = formatProfileDuration(p.time_s);
 
       // Profile card
       const card = document.createElement('div');
-      card.className = 'profile-card' + (isActive ? ' active' : '');
+      card.className = 'profile-card' + (isActive ? ' active' : '') + (isPending ? ' pending' : '');
       card.style.setProperty('--profile-color', profileColor);
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+      card.setAttribute('aria-label', `Select ${p.name || `Profile ${profileIndex}`}`);
+      card.addEventListener('click', (event) => {
+        if (event.target.closest('button')) return;
+        selectProfile(profileIndex);
+      });
+      card.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          selectProfile(profileIndex);
+        }
+      });
 
       card.innerHTML = `
         <div class="profile-name">
           <span class="active-indicator"></span>
-          <span>${escHtml(p.name || `Profile ${p.index}`)}</span>
+          <span>${escHtml(p.name || `Profile ${profileIndex}`)}</span>
           <div class="profile-color-swatch" style="background:${profileColor};margin-left:auto;"></div>
         </div>
         <div class="profile-meta">
-          <span>${p.temp_f ?? '—'}°F</span>
-          <span>${p.time_s ?? '—'}s</span>
+          <span>${escHtml(tempLabel)}</span>
+          <span>${escHtml(timeLabel)}</span>
           <span>${escHtml(moodName)}</span>
           <span class="profile-sync-badge ${officialMood ? 'ok' : 'warn'}">${officialMood ? 'Official' : 'Legacy'}</span>
         </div>
         <div class="profile-actions">
-          <button class="btn btn-sm btn-secondary" onclick="app.selectProfile(${p.index})">
-            ${isActive ? 'Active' : 'Select'}
+          <button class="btn btn-sm ${isActive ? 'btn-primary' : 'btn-secondary'}" onclick="app.selectProfile(${profileIndex})">
+            ${isPending ? 'Switching...' : isActive ? 'Active' : 'Select'}
           </button>
-          <button class="btn btn-sm btn-secondary" onclick="app.editProfile(${p.index})">Edit</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.editProfile(${profileIndex})">Edit</button>
         </div>
       `;
       grid.appendChild(card);
@@ -1132,6 +1256,16 @@ const app = (() => {
       }
     } catch (e) {}
     return '#8b5cf6';
+  }
+
+  function formatProfileTemperature(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? `${Math.round(parsed)} F` : 'Temp not synced';
+  }
+
+  function formatProfileDuration(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? formatSecondsLabel(parsed) : 'Time not synced';
   }
 
   function extractProfileMood(colorObj) {
@@ -1455,7 +1589,7 @@ const app = (() => {
 
   function editProfile(index) {
     editingProfileIndex = index;
-    const profile = deviceState?.profiles?.[index];
+    const profile = findProfile(index);
     if (!profile) return;
 
     document.getElementById('modal-kicker').textContent = `Profile ${index}`;
@@ -1477,12 +1611,17 @@ const app = (() => {
     document.getElementById('profile-modal').classList.add('visible');
   }
 
+  function findProfile(index) {
+    const profiles = Array.isArray(deviceState?.profiles) ? deviceState.profiles : [];
+    return profiles.find((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(index));
+  }
+
   function closeModal() {
     document.getElementById('profile-modal').classList.remove('visible');
     editingProfileIndex = null;
   }
 
-  function saveProfile() {
+  function saveProfile(forceSelect = false) {
     const index = parseInt(document.getElementById('modal-index').value);
     const name = document.getElementById('modal-name').value.trim() || null;
     const tempStr = document.getElementById('modal-temp').value;
@@ -1495,9 +1634,13 @@ const app = (() => {
     const mood = moodParams();
     if (!mood) return;
     params.mood_light = mood;
-    if (document.getElementById('modal-select').checked) params.select = true;
+    if (forceSelect || document.getElementById('modal-select').checked) params.select = true;
 
     send('set_profile', params);
+    if (params.select) {
+      optimisticProfileIndex = index;
+      updateOptimisticProfile(index);
+    }
     closeModal();
   }
 
@@ -1679,7 +1822,33 @@ const app = (() => {
   }
 
   function selectProfile(index) {
-    send('select_profile', { index });
+    if (!connected || optimisticProfileIndex === Number(index)) return;
+    optimisticProfileIndex = Number(index);
+    updateOptimisticProfile(index);
+    if (!send('select_profile', { index })) {
+      optimisticProfileIndex = null;
+      if (deviceState?.profiles) updateProfilesUI(deviceState.profiles, deviceState.current_profile);
+    }
+  }
+
+  function updateOptimisticProfile(index) {
+    if (!deviceState || !Array.isArray(deviceState.profiles)) return;
+    const profile = findProfile(index);
+    deviceState = {
+      ...deviceState,
+      current_profile: Number(index),
+      active_profile_name: profile?.name || `Profile ${index}`,
+      active_profile_temp_f: Number.isFinite(Number(profile?.temp_f)) ? Number(profile.temp_f) : deviceState.active_profile_temp_f,
+      profiles: deviceState.profiles.map((item, fallbackIndex) => ({
+        ...item,
+        active: Number(item.index ?? fallbackIndex) === Number(index),
+      })),
+    };
+    lastDeviceSnapshot = deviceState;
+    updateProfilesUI(deviceState.profiles, index);
+    updateHeroTelemetry(deviceState);
+    updateTelemetryFields(deviceState);
+    appendLog(`Switching to ${profile?.name || `Profile ${index}`}`, 'info');
   }
 
   function heat() {
@@ -1775,11 +1944,11 @@ const app = (() => {
 
   // ---- Activity Log ----
 
-  function appendLog(message, type = 'info') {
+  function appendLog(message, type = 'info', options = {}) {
     const log = document.getElementById('activity-log');
     if (!log) return;
 
-    recordBrowserDebug(type, message);
+    if (!options.skipDebug) recordBrowserDebug(type, message);
 
     const empty = log.querySelector('.log-empty');
     if (empty) empty.remove();
@@ -1850,14 +2019,14 @@ const app = (() => {
     if (msg.type !== 'status') {
       recordBrowserDebug(msg.type === 'error' ? 'error' : 'info', `Message: ${msg.type}`, {
         message: msg.message || null,
-        data: msg.data ?? null,
+        data: msg.data ?? 'No data returned',
       });
     }
     lastBackendMessage = {
       type: msg.type || 'unknown',
-      message: msg.message || null,
+      message: msg.message || 'No message',
       received_at: new Date().toISOString(),
-      data: msg.data ?? null,
+      data: msg.data ?? 'No data returned',
     };
     renderBackendMirror();
   }
@@ -1929,13 +2098,25 @@ const app = (() => {
 
   function setPreText(id, value) {
     const el = document.getElementById(id);
-    if (el) el.textContent = value;
+    if (el) el.textContent = displayValue(value, 'No data yet');
   }
 
   function safeJsonStringify(value) {
     try {
       return JSON.stringify(value, (_key, raw) => {
         if (typeof raw === 'number' && !Number.isFinite(raw)) return null;
+        return raw;
+      }, 2);
+    } catch (err) {
+      return `Unable to render JSON: ${err.message}`;
+    }
+  }
+
+  function friendlyJsonStringify(value) {
+    try {
+      return JSON.stringify(value, (_key, raw) => {
+        if (raw === null || raw === undefined || raw === '') return 'Not available';
+        if (typeof raw === 'number' && !Number.isFinite(raw)) return 'Not available';
         return raw;
       }, 2);
     } catch (err) {
@@ -1980,7 +2161,14 @@ const app = (() => {
 
   function setText(id, value) {
     const el = document.getElementById(id);
-    if (el) el.textContent = value;
+    if (el) el.textContent = displayValue(value);
+  }
+
+  function displayValue(value, fallback = '—') {
+    if (value === null || value === undefined || value === '') return fallback;
+    if (typeof value === 'number' && !Number.isFinite(value)) return fallback;
+    if (typeof value === 'string' && /^(null|undefined|nan)$/i.test(value.trim())) return fallback;
+    return String(value);
   }
 
   function normalizePercent(value) {
@@ -2413,7 +2601,8 @@ const app = (() => {
           </div>
         `;
       } else {
-        const valueStr = readResult.value === null || readResult.value === undefined ? 'null' : readResult.value;
+        const parsedValue = readResult.value ?? readResult.decoded;
+        const valueStr = parsedValue === null || parsedValue === undefined || parsedValue === '' ? 'No value returned' : parsedValue;
         const rawHex = readResult.raw || '';
         const interpretations = readResult.interpretations || {};
 
@@ -2454,6 +2643,10 @@ const app = (() => {
       <div class="lorax-detail-header">
         <h3>${escHtml(entry.path)}</h3>
         <div class="lorax-detail-desc">${escHtml(entry.function || 'No description available')}</div>
+        <div class="inline-actions mt-sm">
+          <button class="btn btn-sm btn-secondary" onclick="app.useSelectedPathAsTemperatureSource()">Use as Temp Source</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.copySelectedLoraxPath()">Copy Path</button>
+        </div>
       </div>
 
       <div class="lorax-detail-grid">
@@ -2573,12 +2766,43 @@ const app = (() => {
     send('lorax_write', params);
   }
 
+  async function copySelectedLoraxPath() {
+    if (!selectedPathEntry) return;
+    try {
+      await navigator.clipboard.writeText(selectedPathEntry.path);
+      toast('Path copied', 'success');
+      appendLog(`Copied ${selectedPathEntry.path}`, 'success');
+    } catch (err) {
+      toast('Could not copy path', 'error');
+      appendLog(`Copy path failed: ${err?.message || err}`, 'error');
+    }
+  }
+
+  function useSelectedPathAsTemperatureSource() {
+    if (!selectedPathEntry) return;
+    const pathEl = document.getElementById('dev-temp-path');
+    const encodingEl = document.getElementById('dev-temp-encoding');
+    if (pathEl) pathEl.value = selectedPathEntry.path;
+    if (encodingEl) {
+      const type = String(selectedPathEntry.data_type || '').toLowerCase();
+      if (type.includes('float')) encodingEl.value = 'float32_c';
+      else if (type.includes('uint16')) encodingEl.value = 'uint16_c_x10';
+      else if (type.includes('uint8')) encodingEl.value = 'uint8_c';
+    }
+    toast('Temperature source fields filled', 'success');
+    appendLog(`Prepared temp source ${selectedPathEntry.path}`, 'info');
+  }
+
   function handleLoraxRead(data) {
     if (!data) return;
+    const normalized = {
+      ...data,
+      value: data.value ?? data.decoded,
+    };
     if (selectedPathEntry && selectedPathEntry.path === data.path) {
-      renderLoraxDetails(data);
+      renderLoraxDetails(normalized);
     }
-    appendLog(`Read ${data.path}: ${data.value !== null && data.value !== undefined ? data.value : 'bytes[' + data.size + ']'}`, 'info');
+    appendLog(`Read ${data.path}: ${normalized.value !== null && normalized.value !== undefined && normalized.value !== '' ? normalized.value : 'No parsed value'}`, 'info');
   }
 
   function renderDevResult(type, data) {
@@ -2587,9 +2811,9 @@ const app = (() => {
     const payload = {
       type,
       received_at: new Date().toISOString(),
-      data: data ?? null,
+      data: data ?? 'No data returned',
     };
-    output.textContent = safeJsonStringify(payload);
+    output.textContent = friendlyJsonStringify(payload);
   }
 
   function clearDevOutput() {
@@ -2718,6 +2942,9 @@ const app = (() => {
 
   function init() {
     // Restore saved values
+    syncShellClasses();
+    window.addEventListener('resize', syncShellClasses, { passive: true });
+    window.addEventListener('orientationchange', syncShellClasses, { passive: true });
     restoreBrowserDebugLog();
     const savedName = localStorage.getItem('puffco_device_name');
     const savedMac = localStorage.getItem('puffco_device_mac');
@@ -2755,6 +2982,7 @@ const app = (() => {
   return {
     setTransportMode,
     connectBridge,
+    toggleBleCapability,
     connect: connectDevice,
     disconnect: disconnectDevice,
     resyncDevice,
@@ -2789,7 +3017,10 @@ const app = (() => {
     selectLoraxPath,
     readSelectedLoraxPath,
     writeSelectedLoraxPath,
+    copySelectedLoraxPath,
+    useSelectedPathAsTemperatureSource,
     clearDevOutput,
+    clearBrowserDebugLog,
     devOfficialAttrs,
     devHeatProbe,
     devHeatObserve,

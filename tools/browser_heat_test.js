@@ -3,8 +3,13 @@ const fs = require("fs");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  const tabs = await (await fetch("http://127.0.0.1:9222/json")).json();
-  const page = tabs.find((tab) => tab.type === "page");
+  let page = null;
+  try {
+    page = await (await fetch("http://127.0.0.1:9222/json/new?about:blank", { method: "PUT" })).json();
+  } catch {
+    const tabs = await (await fetch("http://127.0.0.1:9222/json")).json();
+    page = tabs.find((tab) => tab.type === "page" && tab.url === "about:blank") || tabs.find((tab) => tab.type === "page");
+  }
   if (!page) throw new Error("No Chrome page found on the debugging port");
 
   const ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -36,6 +41,9 @@ async function main() {
   await send("Runtime.enable");
   await send("Page.enable");
   await send("Log.enable");
+  await send("Network.enable");
+  await send("Network.setBypassServiceWorker", { bypass: true });
+  await send("Network.setCacheDisabled", { cacheDisabled: true });
   await send("Emulation.setDeviceMetricsOverride", {
     width: 1280,
     height: 900,
@@ -46,6 +54,8 @@ async function main() {
   await send("Page.addScriptToEvaluateOnNewDocument", {
     source: `
       (() => {
+        localStorage.setItem('puffco_transport_mode', 'bridge');
+        localStorage.setItem('puffco_bridge_url', 'ws://127.0.0.1:8421/ws');
         const sockets = [];
         const baseState = {
           connected: true,
@@ -132,6 +142,10 @@ async function main() {
 
   async function evalPage(expression) {
     const result = await send("Runtime.evaluate", { expression, returnByValue: true });
+    if (result.result.exceptionDetails) {
+      const details = result.result.exceptionDetails;
+      throw new Error(details.exception?.description || details.text || "Runtime evaluation failed");
+    }
     return result.result.result.value;
   }
 
@@ -147,7 +161,24 @@ async function main() {
     chamber: document.querySelector("#stat-chamber")?.textContent?.trim(),
     dabsLeft: document.querySelector("#stat-drem")?.textContent?.trim(),
     dabsPerDay: document.querySelector("#stat-dpd")?.textContent?.trim(),
-    totalDabs: document.querySelector("#stat-total-dabs")?.textContent?.trim()
+    totalDabs: document.querySelector("#stat-total-dabs")?.textContent?.trim(),
+    bleExpanded: document.querySelector("#ble-capability")?.getAttribute("aria-expanded"),
+    bleDetailsDisplay: document.querySelector("#ble-capability-details") ? getComputedStyle(document.querySelector("#ble-capability-details")).display : "missing"
+  }))()`);
+
+  await evalPage(`document.querySelector("#ble-capability").click()`);
+  const afterBleExpand = await evalPage(`(() => ({
+    bleExpanded: document.querySelector("#ble-capability")?.getAttribute("aria-expanded"),
+    bleDetailsDisplay: document.querySelector("#ble-capability-details") ? getComputedStyle(document.querySelector("#ble-capability-details")).display : "missing",
+    bleTitle: document.querySelector("#ble-capability-title")?.textContent?.trim()
+  }))()`);
+
+  await evalPage(`app.selectProfile(1)`);
+  const afterProfileSelect = await evalPage(`(() => ({
+    activeProfile: document.querySelector(".profile-card.active .profile-name span:not(.active-indicator)")?.textContent?.trim(),
+    heroProfile: document.querySelector("#hero-profile")?.textContent?.trim(),
+    statProfile: document.querySelector("#stat-profile")?.textContent?.trim(),
+    sent: (window.__sentCommands || []).map((cmd) => cmd.cmd)
   }))()`);
 
   await evalPage(`app.heat()`);
@@ -158,7 +189,8 @@ async function main() {
     boostDisabled: document.querySelector("#btn-boost")?.disabled,
     stopDisabled: document.querySelector("#btn-stop")?.disabled,
     heatText: document.querySelector("#heat-status-text")?.textContent?.trim(),
-    statHeat: document.querySelector("#stat-heat")?.textContent?.trim()
+    statHeat: document.querySelector("#stat-state")?.textContent?.trim(),
+    bodyHeating: document.body.classList.contains("heat-active")
   }))()`);
 
   await evalPage(`app.boost()`);
@@ -176,7 +208,8 @@ async function main() {
     boostDisabled: document.querySelector("#btn-boost")?.disabled,
     stopDisabled: document.querySelector("#btn-stop")?.disabled,
     heatText: document.querySelector("#heat-status-text")?.textContent?.trim(),
-    statHeat: document.querySelector("#stat-heat")?.textContent?.trim()
+    statHeat: document.querySelector("#stat-state")?.textContent?.trim(),
+    bodyHeating: document.body.classList.contains("heat-active")
   }))()`);
 
   const screenshot = await send("Page.captureScreenshot", {
@@ -201,17 +234,27 @@ async function main() {
   if (initial.dabsLeft !== "28") failures.push("Dabs remaining did not render cleanly");
   if (initial.dabsPerDay !== "12.4") failures.push("Dabs/day did not render cleanly");
   if (initial.totalDabs !== "321") failures.push("Total dabs did not render cleanly");
+  if (initial.bleExpanded !== "false" || initial.bleDetailsDisplay !== "none") failures.push("Bluetooth readiness details were not compact by default");
+  if (afterBleExpand.bleExpanded !== "true" || afterBleExpand.bleDetailsDisplay === "none") failures.push("Bluetooth readiness details did not expand when clicked");
+  if (!/Bluetooth/i.test(afterBleExpand.bleTitle)) failures.push("Bluetooth readiness title did not render");
+  if (afterProfileSelect.activeProfile !== "Green") failures.push("Profile switching did not update the active card instantly");
+  if (afterProfileSelect.heroProfile !== "Green" || afterProfileSelect.statProfile !== "Green") failures.push("Profile switching did not update status/hero instantly");
+  if (!afterProfileSelect.sent.includes("select_profile")) failures.push("Profile switching did not send select_profile");
   if (!afterHeat.sent.includes("heat")) failures.push("Start Heat did not send the heat command");
   if (!afterHeat.startDisabled || afterHeat.boostDisabled || afterHeat.stopDisabled) failures.push("Heating state did not disable Start and enable Boost/Stop");
   if (afterHeat.statHeat !== "Preheating") failures.push("Status heat value did not update to Preheating");
+  if (!afterHeat.bodyHeating) failures.push("Heating state did not enable app heat animation class");
   if (!afterBoost.sent.includes("boost")) failures.push("Boost did not send the boost command while heating");
   if (!/Boost sent/.test(afterBoost.logText)) failures.push("Boost result was not logged");
   if (!afterStop.sent.includes("stop")) failures.push("Stop did not send the stop command");
   if (afterStop.startDisabled || !afterStop.boostDisabled || !afterStop.stopDisabled) failures.push("Stopped state did not restore idle heat buttons");
   if (afterStop.statHeat !== "Idle") failures.push("Status heat value did not return to Idle");
+  if (afterStop.bodyHeating) failures.push("Stopped state did not clear app heat animation class");
 
   console.log(JSON.stringify({
     initial,
+    afterBleExpand,
+    afterProfileSelect,
     afterHeat,
     afterBoost,
     afterStop,

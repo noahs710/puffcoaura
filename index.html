@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="description" content="Control your Puffco Peak Pro via Bluetooth: profiles, heat, lighting, brightness, power, and diagnostics." />
   <meta name="theme-color" content="#07070c" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -60,14 +60,17 @@
       <div class="bridge-note" id="bridge-note">
         Browser Bluetooth runs online from HTTPS, including GitHub Pages. Use the local bridge only as a fallback.
       </div>
-      <div class="ble-capability" id="ble-capability" role="status" aria-live="polite">
+      <button class="ble-capability" id="ble-capability" type="button" onclick="app.toggleBleCapability()" aria-expanded="false" aria-live="polite">
         <div class="capability-ring" id="ble-capability-ring"></div>
-        <div>
+        <div class="capability-summary">
           <div class="capability-title" id="ble-capability-title">Checking browser Bluetooth</div>
+          <div class="capability-hint" id="ble-capability-hint">Click for details</div>
+        </div>
+        <div class="capability-details" id="ble-capability-details">
           <div class="capability-copy" id="ble-capability-copy">Direct web BLE needs a supported browser and a secure page.</div>
           <div class="capability-tags" id="ble-capability-tags"></div>
         </div>
-      </div>
+      </button>
       <div class="session-debug-strip" id="session-debug-strip" aria-live="polite">
         <div>
           <span>Mode</span>
@@ -212,8 +215,8 @@
             <div class="stat-value" id="stat-state">—</div>
           </div>
           <div class="stat-item">
-            <div class="stat-label">Chamber</div>
-            <div class="stat-value" id="stat-chamber">—</div>
+            <div class="stat-label">Active Profile</div>
+            <div class="stat-value" id="stat-profile">—</div>
           </div>
           <div class="stat-item">
             <div class="stat-label">Charge</div>
@@ -231,53 +234,17 @@
             <div class="stat-label">Timer</div>
             <div class="stat-value" id="stat-heat-timer">—</div>
           </div>
-          <div class="stat-item">
-            <div class="stat-label">Active Profile</div>
-            <div class="stat-value" id="stat-profile">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Battery Source</div>
-            <div class="stat-value" id="stat-battery-source">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Charge ETA</div>
-            <div class="stat-value" id="stat-charge-eta">—</div>
-          </div>
           <div class="stat-item telemetry-stat">
             <div class="stat-label">Boost</div>
             <div class="stat-value" id="stat-boost">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Lantern</div>
-            <div class="stat-value" id="stat-lantern-time">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Low Battery</div>
-            <div class="stat-value" id="stat-low-battery">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Max Battery</div>
-            <div class="stat-value" id="stat-max-battery">—</div>
           </div>
           <div class="stat-item">
             <div class="stat-label">LED Brightness</div>
             <div class="stat-value" id="stat-led-brightness">—</div>
           </div>
           <div class="stat-item">
-            <div class="stat-label">Firmware</div>
-            <div class="stat-value" id="stat-firmware">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Bootloader</div>
-            <div class="stat-value" id="stat-bootloader">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Serial</div>
-            <div class="stat-value" id="stat-serial">—</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Device Name</div>
-            <div class="stat-value" id="stat-name">—</div>
+            <div class="stat-label">Chamber</div>
+            <div class="stat-value" id="stat-chamber">—</div>
           </div>
         </div>
       </div>
@@ -435,6 +402,42 @@
             <div class="stat-label">Temp Source</div>
             <div class="stat-value" id="backend-temp-source">—</div>
           </div>
+          <div class="stat-item">
+            <div class="stat-label">Firmware</div>
+            <div class="stat-value" id="stat-firmware">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Bootloader</div>
+            <div class="stat-value" id="stat-bootloader">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Serial</div>
+            <div class="stat-value" id="stat-serial">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Device Name</div>
+            <div class="stat-value" id="stat-name">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Source</div>
+            <div class="stat-value" id="stat-battery-source">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge ETA</div>
+            <div class="stat-value" id="stat-charge-eta">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Lantern</div>
+            <div class="stat-value" id="stat-lantern-time">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Low Battery</div>
+            <div class="stat-value" id="stat-low-battery">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Max Battery</div>
+            <div class="stat-value" id="stat-max-battery">—</div>
+          </div>
         </div>
         <div class="backend-json-grid mt-md">
           <details open class="backend-json-panel">
@@ -449,6 +452,36 @@
             <summary>Latest Backend Message</summary>
             <pre id="backend-message-json">No backend message yet</pre>
           </details>
+        </div>
+      </section>
+
+      <section class="card debug-console-card" id="browser-debug-card">
+        <div class="card-header">
+          <h2><span class="icon icon-activity"></span> Browser Debug Console</h2>
+          <div class="inline-actions">
+            <button class="btn btn-sm btn-secondary" onclick="app.copyBrowserDebugLog()">Copy</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.downloadBrowserDebugLog()">Download</button>
+            <button class="btn btn-sm btn-danger" onclick="app.clearBrowserDebugLog()">Clear</button>
+          </div>
+        </div>
+        <div class="debug-console-shell">
+          <div class="debug-console-meta">
+            <div>
+              <span>Transport</span>
+              <strong id="debug-console-transport">Browser Bluetooth</strong>
+            </div>
+            <div>
+              <span>Context</span>
+              <strong id="debug-console-context">Checking</strong>
+            </div>
+            <div>
+              <span>Events</span>
+              <strong id="debug-console-count">0</strong>
+            </div>
+          </div>
+          <div class="browser-debug-log" id="browser-debug-log" aria-live="polite">
+            <div class="log-empty">No browser events yet</div>
+          </div>
         </div>
       </section>
 
@@ -691,6 +724,7 @@
       <input type="hidden" id="modal-index" />
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+        <button class="btn btn-secondary" data-device-command="set_profile" onclick="app.saveProfile(true)">Save & Activate</button>
         <button class="btn btn-primary" data-device-command="set_profile" onclick="app.saveProfile()">Save</button>
       </div>
     </div>
