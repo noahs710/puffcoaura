@@ -146,8 +146,8 @@ KNOWN_PATHS: tuple[LoraxPath, ...] = (
     LoraxPath("/p/app/thc/name", "active_profile_name", "Selected profile name", "read", "text", 32, "profile"),
     LoraxPath("/p/app/thc/temp", "active_profile_temperature", "Selected profile target temperature, Celsius float32", "read", "float32", 4, "profile"),
     LoraxPath("/p/app/thc/time", "active_profile_duration", "Selected profile heat duration in seconds", "read", "float32", 4, "profile"),
-    LoraxPath("/p/app/thc/btmp", "active_profile_boost_temperature_delta", "Selected profile boost temperature delta, Celsius float32", "read", "float32", 4, "profile"),
-    LoraxPath("/p/app/thc/btim", "active_profile_boost_time_delta", "Selected profile boost time delta, seconds float32", "read", "float32", 4, "profile"),
+    LoraxPath("/p/app/thc/btmp", "active_profile_boost_temperature_delta", "Selected profile boost temperature delta, Celsius float32", "read_write", "float32", 4, "profile", command="set_boost_options"),
+    LoraxPath("/p/app/thc/btim", "active_profile_boost_time_delta", "Selected profile boost time delta, seconds float32", "read_write", "float32", 4, "profile", command="set_boost_options"),
     LoraxPath("/p/app/thc/colr", "active_profile_color_animation", "Selected profile color/animation CBOR payload", "read", "bytes", 125, "profile"),
     *_profile_paths(),
 )

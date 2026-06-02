@@ -65,8 +65,16 @@ class PuffcoBrowserBleClient {
     4: 'On battery',
   };
 
+  static CHAMBER_LABELS = {
+    0: 'No chamber',
+    1: 'Classic chamber',
+    2: 'XL chamber',
+    3: '3D chamber',
+    4: 'Toad chamber',
+  };
+
   static MOOD_PRESETS = {
-    no_animation: { name: 'No animation', desc: 'Split your Peak into different color regions', tag: 'pikaled2-no-animation-mood-light', minColors: 1, maxColors: 6, defaults: ['#ff0000'], anim: 1 },
+    no_animation: { name: 'Static color', desc: 'Split your Peak into different color regions', tag: 'pikaled2-no-animation-mood-light', minColors: 1, maxColors: 6, defaults: ['#ff0000'], anim: 1 },
     fade: { name: 'Fade', desc: 'Smooth transitions', tag: 'pikaled2-fade-mood-light', minColors: 2, maxColors: 6, defaults: ['#ff0000', '#00ff00'], anim: 1 },
     disco: { name: 'Disco', desc: 'A spiraling color cycle', tag: 'pikaled2-disco-mood-light', minColors: 2, maxColors: 6, defaults: ['#ff0000', '#00ff00', '#0000ff'], anim: 1 },
     spin: { name: 'Spin', desc: 'A lighthouse to guide you', tag: 'pikaled2-spin-mood-light', minColors: 1, maxColors: 6, defaults: ['#ff0000'], anim: 7 },
@@ -122,6 +130,7 @@ class PuffcoBrowserBleClient {
     if (cmd === 'heat') return this.modeCommand('heat', 'Heat cycle started');
     if (cmd === 'stop') return this.modeCommand('stop', 'Heat cycle stopped');
     if (cmd === 'boost') return this.modeCommand('boost', 'Boost sent');
+    if (cmd === 'set_boost_options') return this.setBoostOptions(params);
     if (cmd === 'power') return this.power(params);
     if (cmd === 'official_attributes') return this.officialAttributes();
     if (cmd === 'temperature_source') return this.temperatureSource(params);
@@ -244,6 +253,8 @@ class PuffcoBrowserBleClient {
           { path: '/p/app/stat/tott', name: 'state_total_time', category: 'state', access: 'read', data_type: 'float32', size: 4, status: 'known' },
           { path: '/p/app/htr/temp', name: 'current_temperature', category: 'heater', access: 'read', data_type: 'float32', size: 4, status: 'known' },
           { path: '/p/app/htr/tcmd', name: 'target_temperature', category: 'heater', access: 'read', data_type: 'float32', size: 4, status: 'known' },
+          { path: '/p/app/thc/btmp', name: 'active_profile_boost_temperature_delta', category: 'profile', access: 'read_write', data_type: 'float32', size: 4, status: 'known' },
+          { path: '/p/app/thc/btim', name: 'active_profile_boost_time_delta', category: 'profile', access: 'read_write', data_type: 'float32', size: 4, status: 'known' },
           { path: '/p/bat/soc', name: 'battery_soc', category: 'battery', access: 'read', data_type: 'float32', size: 4, status: 'known' },
           { path: '/p/bat/chg/stat', name: 'battery_charge_state', category: 'battery', access: 'read', data_type: 'uint8', size: 1, status: 'known' },
           { path: '/p/app/hcs', name: 'current_profile', category: 'profile', access: 'read_write', data_type: 'int8', size: 1, status: 'known' },
@@ -382,6 +393,16 @@ class PuffcoBrowserBleClient {
     }
   }
 
+  async readUint32(path, fallback = null) {
+    try {
+      const bytes = await this.readShort(path, 0, 4);
+      if (bytes.length < 4) return fallback;
+      return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
+    } catch {
+      return fallback;
+    }
+  }
+
   async readInt8(path, fallback = null) {
     const value = await this.readUint8(path, null);
     if (value == null) return fallback;
@@ -402,6 +423,134 @@ class PuffcoBrowserBleClient {
     return Math.round((Number(value) * 1.8) + 32);
   }
 
+  versionBytesLabel(bytes) {
+    const parts = Array.from(bytes || []).slice(0, 4);
+    while (parts.length > 2 && parts[parts.length - 1] === 0) parts.pop();
+    return parts.length ? parts.join('.') : null;
+  }
+
+  async readVersionPath(path) {
+    try {
+      return this.versionBytesLabel(await this.readShort(path, 0, 4));
+    } catch {
+      return null;
+    }
+  }
+
+  async readVersionCharacteristic() {
+    try {
+      const value = await this.versionChar?.readValue();
+      if (!value) return null;
+      return this.versionBytesLabel(new Uint8Array(value.buffer.slice(0)));
+    } catch {
+      return null;
+    }
+  }
+
+  brightnessLabel(value) {
+    if (value == null) return null;
+    const bytes = Array.from(value);
+    if (!bytes.length) return null;
+    if (bytes.length >= 4) {
+      const names = ['base', 'front', 'glass', 'logo'];
+      return bytes.slice(0, 4).map((byte, index) => `${names[index]} ${byte}/255`).join(', ');
+    }
+    return `${bytes[0]}/255`;
+  }
+
+  chamberLabel(value) {
+    return PuffcoBrowserBleClient.CHAMBER_LABELS[value] || null;
+  }
+
+  applySelectedProfileDefaults(data) {
+    const profiles = Array.isArray(data?.profiles) ? data.profiles : [];
+    const selected = Number(data?.current_profile);
+    const profile = profiles.find((item, fallbackIndex) => Number(item.index ?? fallbackIndex) === selected)
+      || profiles.find((item) => item.active);
+    if (!profile) return;
+    if (profile.name) data.active_profile_name = profile.name;
+    if (profile.temp_f != null) data.active_profile_temp_f = profile.temp_f;
+    if (profile.time_s != null) data.active_profile_time_s = profile.time_s;
+  }
+
+  decodeCbor(bytes) {
+    const data = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || []);
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    let offset = 0;
+    const readLength = (additional) => {
+      if (additional < 24) return additional;
+      if (additional === 24) return data[offset++];
+      if (additional === 25) {
+        const value = view.getUint16(offset, false);
+        offset += 2;
+        return value;
+      }
+      if (additional === 26) {
+        const value = view.getUint32(offset, false);
+        offset += 4;
+        return value;
+      }
+      if (additional === 27) {
+        const high = view.getUint32(offset, false);
+        const low = view.getUint32(offset + 4, false);
+        offset += 8;
+        return high * 4294967296 + low;
+      }
+      throw new Error('Unsupported indefinite CBOR length');
+    };
+    const readItem = () => {
+      if (offset >= data.length) return null;
+      const header = data[offset++];
+      const major = header >> 5;
+      const additional = header & 31;
+      if (major === 0) return readLength(additional);
+      if (major === 1) return -1 - readLength(additional);
+      if (major === 2) {
+        const length = readLength(additional);
+        const value = Array.from(data.slice(offset, offset + length));
+        offset += length;
+        return value;
+      }
+      if (major === 3) {
+        const length = readLength(additional);
+        const value = new TextDecoder().decode(data.slice(offset, offset + length));
+        offset += length;
+        return value;
+      }
+      if (major === 4) {
+        const length = readLength(additional);
+        return Array.from({ length }, () => readItem());
+      }
+      if (major === 5) {
+        const length = readLength(additional);
+        const object = {};
+        for (let i = 0; i < length; i += 1) object[String(readItem())] = readItem();
+        return object;
+      }
+      if (major === 7) {
+        if (additional === 20) return false;
+        if (additional === 21) return true;
+        if (additional === 22 || additional === 23) return null;
+        if (additional === 26) {
+          const value = view.getFloat32(offset, false);
+          offset += 4;
+          return value;
+        }
+        if (additional === 27) {
+          const value = view.getFloat64(offset, false);
+          offset += 8;
+          return value;
+        }
+      }
+      throw new Error(`Unsupported CBOR major ${major}`);
+    };
+    return readItem();
+  }
+
+  async readCbor(path, size = 125) {
+    return this.decodeCbor(await this.readShort(path, 0, size));
+  }
+
   async safe(call, fallback = null) {
     try {
       const value = await call();
@@ -417,6 +566,7 @@ class PuffcoBrowserBleClient {
     const state = await this.safe(() => this.readUint8('/p/app/stat/id'), null);
     const stateName = PuffcoBrowserBleClient.STATE_NAMES[state] || null;
     const charge = await this.safe(() => this.readUint8('/p/bat/chg/stat'), null);
+    const chamber = await this.safe(() => this.readUint8('/p/htr/chmt'), null);
     const currentTempC = await this.safe(() => this.readFloat32('/p/app/htr/temp'), null);
     const targetTempC = await this.safe(() => this.readFloat32('/p/app/htr/tcmd'), null);
     const elapsed = await this.safe(() => this.readFloat32('/p/app/stat/elap'), null);
@@ -428,14 +578,32 @@ class PuffcoBrowserBleClient {
     const dabsPerDay = await this.safe(() => this.readFloat32('/p/app/info/dpd'), null);
     const dabsLeft = await this.safe(() => this.readFloat32('/p/app/info/drem'), null);
     const totalDabs = await this.safe(() => this.readFloat32('/p/app/odom/0/nc'), null);
+    const firmware = await this.safe(() => this.readVersionPath('/p/sys/fw/ver'), null)
+      || await this.safe(() => this.readVersionCharacteristic(), null);
+    const bootloader = await this.safe(() => this.readVersionPath('/p/sys/fw/bver'), null);
+    const apiVersion = await this.safe(() => this.readUint32('/p/sys/fw/api'), null);
+    const serial = await this.safe(() => this.readText('/p/sys/hw/ser', 64), null);
+    const brightnessBytes = await this.safe(() => this.readShort('/u/app/ui/lbrt', 0, 4), null);
+    const chargeEta = await this.safe(() => this.readFloat32('/p/bat/chg/etf'), null);
+    const maxBattery = await this.safe(() => this.readFloat32('/u/bat/msoc'), null);
+    const lanternTime = await this.safe(() => this.readFloat32('/p/app/ltrn/time'), null);
+    const lanternRemaining = await this.safe(() => this.readFloat32('/p/app/ltrn/remt'), null);
+    const boostTempC = await this.safe(() => this.readFloat32('/p/app/thc/btmp'), null);
+    const boostTime = await this.safe(() => this.readFloat32('/p/app/thc/btim'), null);
 
     const data = {
       connected: true,
       transport: 'browser_ble',
       name: this.device?.name || activeName || 'Puffco',
+      firmware,
+      software_version: firmware,
+      bootloader,
+      api_version: apiVersion,
+      serial,
       state: stateName,
       heat: ['HEAT_CYCLE_PREHEAT', 'HEAT_CYCLE_ACTIVE', 'HEAT_CYCLE_FADE'].includes(stateName) ? 'HEATING' : 'idle',
       charge,
+      chamber,
       battery: battery == null ? null : Math.max(0, Math.min(100, Math.round(battery))),
       battery_source: '/p/bat/soc',
       current_profile: currentProfile,
@@ -444,18 +612,40 @@ class PuffcoBrowserBleClient {
       active_profile_time_s: activeTime == null ? null : Math.round(activeTime),
       current_temperature_c: currentTempC,
       current_temperature_f: currentTempC == null ? null : this.cToF(currentTempC),
+      live_temperature_source: { path: '/p/app/htr/temp', encoding: 'float32_c', transport: 'browser_ble' },
       target_temperature_c: targetTempC,
-      target_temperature_f: targetTempC == null ? null : this.cToF(targetTempC),
+      target_temperature_f: targetTempC == null || Number(targetTempC) < 80 ? null : this.cToF(targetTempC),
       state_elapsed_time: elapsed,
       state_total_time: total,
+      state_elapsed_time_s: elapsed,
+      state_total_time_s: total,
+      led_brightness: brightnessBytes ? Array.from(brightnessBytes) : null,
+      charge_estimated_time_to_full_s: chargeEta,
+      max_battery_level: maxBattery,
+      lantern_time_s: lanternTime,
+      lantern_remaining_time_s: lanternRemaining,
+      lantern: lanternRemaining == null ? null : lanternRemaining > 0,
+      boost_temperature_delta_c: boostTempC,
+      boost_temperature_delta_f: boostTempC == null ? null : Math.round(boostTempC * 1.8),
+      boost_time_s: boostTime,
       dabs_per_day: dabsPerDay,
       dabs_left: dabsLeft,
       total_dabs: totalDabs,
+      official_readable: {
+        brightness: this.brightnessLabel(brightnessBytes),
+        chargeEstimatedTimeToFull: chargeEta == null ? null : `${Math.round(chargeEta)}s`,
+        maxBatteryLevel: maxBattery == null ? null : `${Math.round(maxBattery)}%`,
+        lanternTime: lanternTime == null ? null : `${Math.round(lanternTime)}s`,
+        lanternRemainingTime: lanternRemaining == null ? null : `${Math.round(lanternRemaining)}s`,
+        boostTemperature: boostTempC == null ? null : `+${Math.round(boostTempC * 1.8)}°F`,
+        boostTime: boostTime == null ? null : `${Math.round(boostTime)}s`,
+      },
       labels: {
         state: this.labelState(stateName),
         heat: ['HEAT_CYCLE_PREHEAT', 'HEAT_CYCLE_ACTIVE', 'HEAT_CYCLE_FADE'].includes(stateName) ? 'Heating' : 'Idle',
         battery: battery == null ? '—' : `${Math.round(battery)}%`,
         charge: PuffcoBrowserBleClient.CHARGE_LABELS[charge] || '—',
+        chamber: this.chamberLabel(chamber) || '—',
         dabs_per_day: dabsPerDay == null ? '—' : dabsPerDay.toFixed(2),
         dabs_left: dabsLeft == null ? '—' : String(Math.round(dabsLeft)),
         total_dabs: totalDabs == null ? '—' : String(Math.round(totalDabs)),
@@ -473,6 +663,7 @@ class PuffcoBrowserBleClient {
     } else {
       data.profiles = this.lastProfiles.map((profile) => ({ ...profile, active: profile.index === currentProfile }));
     }
+    this.applySelectedProfileDefaults(data);
     return data;
   }
 
@@ -496,13 +687,14 @@ class PuffcoBrowserBleClient {
       const name = await this.safe(() => this.readText(`/u/app/hc/${index}/name`, 32), `Profile ${index}`);
       const tempC = await this.safe(() => this.readFloat32(`/u/app/hc/${index}/temp`), null);
       const time = await this.safe(() => this.readFloat32(`/u/app/hc/${index}/time`), null);
+      const color = await this.safe(() => this.readCbor(`/u/app/hc/${index}/colr`, 125), null);
       profiles.push({
         index,
         active: index === currentProfile,
         name,
         temp_f: tempC == null ? null : this.cToF(tempC),
         time_s: time == null ? null : Math.round(time),
-        color: null,
+        color,
         labels: {
           status: index === currentProfile ? 'Active' : 'Inactive',
           temperature: tempC == null ? '—' : `${this.cToF(tempC)}°F`,
@@ -840,6 +1032,16 @@ class PuffcoBrowserBleClient {
     await this.writeCborFull(`/u/app/hc/${index}/colr`, payload);
     this.lastProfiles = null;
     return { type: 'ok', message: `Applied ${payload.meta.moodName} mood light to profile ${index}`, data: await this.snapshot(true) };
+  }
+
+  async setBoostOptions(params) {
+    const tempF = Number(params.temp_delta_f ?? params.temp_f);
+    const timeS = Number(params.time_s ?? params.seconds);
+    if (!Number.isFinite(tempF) || tempF < 0 || tempF > 120) throw new Error('Boost temperature must be 0-120 F');
+    if (!Number.isFinite(timeS) || timeS < 0 || timeS > 180) throw new Error('Boost time must be 0-180 seconds');
+    await this.writeShort('/p/app/thc/btmp', 0, 0, this.packFloat32(tempF / 1.8));
+    await this.writeShort('/p/app/thc/btim', 0, 0, this.packFloat32(timeS));
+    return { type: 'ok', message: `Boost options set to +${Math.round(tempF)} F / +${Math.round(timeS)}s`, data: await this.snapshot(false) };
   }
 
   async setLanternColor(params) {

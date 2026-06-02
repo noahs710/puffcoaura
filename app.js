@@ -30,8 +30,18 @@ const app = (() => {
   let browserBleDisconnectHandled = false;
   let optimisticProfileIndex = null;
   let bleCapabilityExpanded = false;
+  let localMoodPresets = [];
   const browserDebugEvents = [];
   const BROWSER_DEBUG_LIMIT = 300;
+  const PROFILE_ORDER_KEY = 'puffco_profile_order';
+  const LOCAL_PROFILES_KEY = 'puffco_local_profiles';
+  const PROFILE_BACKUP_KEY = 'puffco_profile_backups_v1';
+  const MOOD_LIBRARY_KEY = 'puffco_mood_library_v1';
+  const LAST_CONNECTED_KEY = 'puffco_last_connected';
+  const VISIBLE_BLE_POLL_MS = 1000;
+  const HIDDEN_BLE_POLL_MS = 8000;
+  const VISIBLE_RECONNECT_MS = 2000;
+  const HIDDEN_RECONNECT_MS = 10000;
 
   // Lorax Path Explorer State
   let loraxPaths = [];
@@ -49,7 +59,7 @@ const app = (() => {
   const MOOD_PRESETS = [
     {
       id: 'no_animation',
-      name: 'No animation',
+      name: 'Static color',
       desc: 'Split your Peak into color regions',
       min: 1,
       max: 6,
@@ -111,7 +121,7 @@ const app = (() => {
   const DEVICE_COMMANDS = new Set([
     'select_profile', 'set_profile', 'set_color', 'mood_light', 'lantern', 'lantern_color',
     'stealth', 'brightness', 'show_battery', 'show_version', 'heat', 'stop',
-    'boost', 'power', 'temperature_observe', 'temperature_source',
+    'boost', 'set_boost_options', 'power', 'temperature_observe', 'temperature_source',
     'lorax_read', 'lorax_write', 'lorax_action', 'lorax_probe',
     'lorax_observe', 'heat_probe', 'heat_observe', 'official_attributes',
   ]);
@@ -473,7 +483,13 @@ const app = (() => {
   function startBrowserBlePolling() {
     if (transportMode !== 'browser_ble' || browserBlePoll) return;
     pollBrowserBleStatus();
-    browserBlePoll = setInterval(pollBrowserBleStatus, 1000);
+    browserBlePoll = setInterval(pollBrowserBleStatus, document.hidden ? HIDDEN_BLE_POLL_MS : VISIBLE_BLE_POLL_MS);
+  }
+
+  function restartBrowserBlePolling() {
+    if (transportMode !== 'browser_ble' || !connected) return;
+    stopBrowserBlePolling();
+    startBrowserBlePolling();
   }
 
   function closeBridgeSocket() {
@@ -540,14 +556,16 @@ const app = (() => {
         suppressSocketReconnect = false;
         return;
       }
-      console.log('WebSocket closed, reconnecting in 2s...');
+      const backgrounded = document.hidden;
+      const reconnectDelay = backgrounded ? HIDDEN_RECONNECT_MS : VISIBLE_RECONNECT_MS;
+      console.log(`WebSocket closed, reconnecting in ${Math.round(reconnectDelay / 1000)}s...`);
       lastConnectionStatus = {
         stage: 'socket_closed',
         message: `Browser socket disconnected from local backend at ${bridgeUrl || url}.`,
         timestamp: new Date().toISOString(),
       };
       setBridgeNote(`Bridge disconnected. Retrying ${bridgeUrl || url}...`, 'offline');
-      if (connected || connectPending) {
+      if ((connected || connectPending) && !backgrounded) {
         connected = false;
         connectPending = false;
         deviceState = null;
@@ -555,9 +573,11 @@ const app = (() => {
         updateConnectionUI(false);
         updateStatusUI(null);
         toast('Server connection lost', 'error');
+      } else if (backgrounded && connected) {
+        setBridgeNote(`Bridge paused in background. Reconnecting quietly to ${bridgeUrl || url}...`, 'offline');
       }
       renderBackendMirror();
-      reconnectTimer = setTimeout(() => initWebSocket(), 2000);
+      reconnectTimer = setTimeout(() => initWebSocket(), reconnectDelay);
     };
 
     ws.onerror = (err) => {
@@ -690,9 +710,12 @@ const app = (() => {
           }
           break;
         case 'error':
-          toast(msg.message, 'error');
-          appendLog(msg.message, 'error');
-          if (isBluetoothRelatedMessage(msg.message)) expandBleCapability();
+          {
+            const friendly = friendlyErrorMessage(msg.message);
+            toast(friendly, 'error');
+            appendLog(friendly, 'error');
+            if (isBluetoothRelatedMessage(msg.message)) expandBleCapability();
+          }
           renderConnectionAttempts(msg.data?.attempts);
           optimisticProfileIndex = null;
           if (deviceState?.profiles) updateProfilesUI(deviceState.profiles, deviceState.current_profile);
@@ -774,9 +797,11 @@ const app = (() => {
 
   function updateDeviceState(data) {
     if (!data) return;
+    data = normalizeSnapshotForUi(data);
     deviceState = data;
     lastDeviceSnapshot = data;
     connected = data.connected === true;
+    if (connected) rememberLastConnected(data);
     if (data.current_profile != null && Number(data.current_profile) === Number(optimisticProfileIndex)) {
       optimisticProfileIndex = null;
     }
@@ -785,6 +810,8 @@ const app = (() => {
     if (connected) {
       updateStatusUI(data);
       updateProfilesUI(data.profiles, optimisticProfileIndex ?? data.current_profile);
+      renderProfileLibrary();
+      renderBackendMirror();
       stealthOn = !!data.stealth;
       updateToggle('toggle-stealth', stealthOn);
       lanternOn = !!data.lantern;
@@ -803,6 +830,7 @@ const app = (() => {
     } else {
       updateStatusUI(null);
       updateProfilesUI([], null);
+      renderProfileLibrary();
       closeModal();
       const loraxEmpty = document.getElementById('lorax-empty');
       const loraxContent = document.getElementById('lorax-content');
@@ -863,6 +891,72 @@ const app = (() => {
     });
   }
 
+  const LABEL_HELP = {
+    Power: 'Battery charge state and current battery level.',
+    Device: 'Connected device name, model, and serial when available.',
+    State: 'Current firmware operating state reported by the device.',
+    'Active Profile': 'Selected heat profile slot and profile name.',
+    'Live Temp': 'Current chamber temperature from the official live temperature path.',
+    Target: 'Target heater temperature for the active profile or heat cycle.',
+    Timer: 'Firmware heat-cycle countdown when active, otherwise selected profile duration.',
+    Boost: 'Selected profile boost settings from /p/app/thc/btmp and /p/app/thc/btim.',
+    'LED Brightness': 'Per-zone LED brightness read from /u/app/ui/lbrt.',
+    Chamber: 'Detected chamber type reported by firmware.',
+    Firmware: 'Application firmware version from package helpers or /p/sys/fw/ver.',
+    'Last Connected': 'Most recent successful local connection remembered by this browser.',
+    Remaining: 'Time remaining until the active heat cycle ends automatically.',
+    'Backend Stage': 'Most recent backend connection stage.',
+    'Last Message': 'Most recent WebSocket or command message.',
+    Updated: 'Timestamp of the latest status snapshot.',
+    'BLE Link': 'Whether the backend still sees the Bluetooth link as connected.',
+    'Backend Connected': 'Backend device-connected flag.',
+    Polling: 'Backend background status polling state.',
+    'Battery Raw': 'Raw battery telemetry used to derive the displayed battery percent.',
+    'Temp Source': 'Lorax path used for live chamber temperature.',
+    Bootloader: 'Bootloader firmware version from package helpers or /p/sys/fw/bver.',
+    Serial: 'Hardware serial number from /p/sys/hw/ser when available.',
+    Lantern: 'Lantern state or remaining lantern duration.',
+    'Low Battery': 'Low-battery warning or threshold telemetry.',
+    'Max Battery': 'Configured maximum battery charge level.',
+  };
+
+  function initLabelTooltips() {
+    document.querySelectorAll('.stat-label').forEach((label) => {
+      const text = label.textContent.trim();
+      label.title = LABEL_HELP[text] || `${text} telemetry from the current device snapshot.`;
+      label.tabIndex = 0;
+      label.setAttribute('role', 'button');
+    });
+    document.addEventListener('click', (event) => {
+      const label = event.target.closest('.stat-label');
+      if (!label) return;
+      const text = label.textContent.trim();
+      showLabelTooltip(label, LABEL_HELP[text] || `${text} telemetry from the current device snapshot.`);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const label = event.target.closest('.stat-label');
+      if (!label) return;
+      event.preventDefault();
+      const text = label.textContent.trim();
+      showLabelTooltip(label, LABEL_HELP[text] || `${text} telemetry from the current device snapshot.`);
+    });
+  }
+
+  function showLabelTooltip(anchor, message) {
+    document.querySelectorAll('.label-tooltip').forEach((node) => node.remove());
+    const tip = document.createElement('div');
+    tip.className = 'label-tooltip';
+    tip.textContent = message;
+    document.body.appendChild(tip);
+    const rect = anchor.getBoundingClientRect();
+    const left = Math.min(window.innerWidth - tip.offsetWidth - 12, Math.max(12, rect.left));
+    const top = Math.min(window.innerHeight - tip.offsetHeight - 12, rect.bottom + 8);
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+    setTimeout(() => tip.remove(), 2800);
+  }
+
   function initAppNavigation() {
     const nav = document.querySelector('.app-menu');
     if (!nav) return;
@@ -894,7 +988,7 @@ const app = (() => {
     const btnDisconnect = document.getElementById('btn-disconnect');
     const btnScan = document.getElementById('btn-scan');
     const nameInput = document.getElementById('device-name');
-    const macInput = document.getElementById('device-mac');
+    const macToggle = document.getElementById('use-mac-address');
     const scanResults = document.getElementById('device-scan-results');
 
     if (isConnected) {
@@ -912,8 +1006,8 @@ const app = (() => {
         const group = nameInput.closest('.input-group');
         if (group) group.classList.add('hidden');
       }
-      if (macInput) {
-        const group = macInput.closest('.input-group');
+      if (macToggle) {
+        const group = macToggle.closest('.optional-device-field');
         if (group) group.classList.add('hidden');
       }
       if (scanResults) {
@@ -943,8 +1037,8 @@ const app = (() => {
         const group = nameInput.closest('.input-group');
         if (group) group.classList.remove('hidden');
       }
-      if (macInput) {
-        const group = macInput.closest('.input-group');
+      if (macToggle) {
+        const group = macToggle.closest('.optional-device-field');
         if (group) group.classList.remove('hidden');
       }
       if (scanResults) {
@@ -955,6 +1049,35 @@ const app = (() => {
       heatCommandPending = null;
       updateControlAvailability(false);
     }
+    syncIdentityModeUI();
+  }
+
+  function usingMacAddress() {
+    return Boolean(document.getElementById('use-mac-address')?.checked);
+  }
+
+  function syncIdentityModeUI() {
+    const macMode = usingMacAddress();
+    const label = document.getElementById('device-identity-label');
+    const input = document.getElementById('device-name');
+    if (label) label.textContent = macMode ? 'MAC Address' : 'Device Name';
+    if (input) {
+      input.placeholder = macMode ? 'F0:AD:4E:00:00:00' : 'Peak';
+      input.setAttribute('aria-label', macMode ? 'Device MAC address' : 'Device name');
+    }
+  }
+
+  function toggleMacAddressMode() {
+    syncIdentityModeUI();
+    localStorage.setItem('puffco_use_mac_address', usingMacAddress() ? '1' : '0');
+  }
+
+  function currentDeviceIdentity() {
+    const value = document.getElementById('device-name')?.value.trim() || '';
+    if (usingMacAddress()) {
+      return { device: 'Peak', mac: value || undefined, display: value || 'MAC address' };
+    }
+    return { device: value || 'Peak', mac: undefined, display: value || 'Peak' };
   }
 
   function updateControlAvailability(isConnected) {
@@ -969,7 +1092,109 @@ const app = (() => {
     document.querySelectorAll(selectors.join(',')).forEach((el) => {
       el.disabled = !isConnected;
     });
+    applyCapabilityGates(deviceState);
     updateHeatControls();
+  }
+
+  function rememberLastConnected(data) {
+    const stamp = {
+      timestamp: new Date().toISOString(),
+      name: data?.name || null,
+      serial: data?.serial || null,
+      transport: data?.transport || data?.backend?.transport || transportMode,
+    };
+    try {
+      localStorage.setItem(LAST_CONNECTED_KEY, JSON.stringify(stamp));
+    } catch {}
+  }
+
+  function lastConnectedLabel() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LAST_CONNECTED_KEY) || 'null');
+      if (!saved?.timestamp) return '—';
+      const when = formatTimestamp(saved.timestamp);
+      return saved.name ? `${when} · ${saved.name}` : when;
+    } catch {
+      return '—';
+    }
+  }
+
+  function detectCapabilities(data) {
+    const hasProfiles = Array.isArray(data?.profiles) && data.profiles.length > 0;
+    const official = data?.official_attributes || {};
+    const errors = data?.official_errors || {};
+    const chamber = formatChamber(data?.chamber);
+    const noChamber = /no chamber|not detected|missing|none/i.test(`${chamber} ${data?.error || ''}`);
+    const officialErrorCount = errors && typeof errors === 'object' ? Object.keys(errors).length : 0;
+    return {
+      heat: {
+        ok: Boolean(data?.connected && !noChamber),
+        reason: noChamber ? 'Chamber not ready' : !data?.connected ? 'Device disconnected' : '',
+      },
+      boost: {
+        ok: Boolean(data?.connected && !noChamber && (data.boost_time_s != null || data.boost_temperature_delta_f != null || data.official_readable?.boostTime || data.official_readable?.boostTemperature || isHeatActive(data))),
+        reason: noChamber ? 'Chamber not ready' : 'Boost settings not exposed yet',
+      },
+      mood: {
+        ok: Boolean(data?.connected && hasProfiles),
+        reason: hasProfiles ? '' : 'Profile color slots not available',
+      },
+      lantern: {
+        ok: Boolean(data?.connected && (data.lantern != null || official.lanternRemainingTime != null || data.lantern_remaining_time_s != null)),
+        reason: 'Lantern state not exposed by this firmware',
+      },
+      stealth: {
+        ok: Boolean(data?.connected && data.stealth != null),
+        reason: 'Stealth state not exposed by this firmware',
+      },
+      brightness: {
+        ok: Boolean(data?.connected && (data.led_brightness != null || data.official_readable?.brightness)),
+        reason: 'LED brightness readback not exposed yet',
+      },
+      official: {
+        ok: officialErrorCount === 0,
+        reason: officialErrorCount ? `${officialErrorCount} official attribute read issue${officialErrorCount === 1 ? '' : 's'}` : '',
+      },
+    };
+  }
+
+  function applyCapabilityGates(data) {
+    const caps = detectCapabilities(data || {});
+    const setGate = (selector, cap) => {
+      document.querySelectorAll(selector).forEach((el) => {
+        const disabled = !connected || !cap.ok;
+        el.disabled = disabled;
+        if (disabled && cap.reason) el.title = cap.reason;
+        else el.removeAttribute('title');
+      });
+    };
+    setGate('#toggle-lantern, button[onclick="app.applyMoodToLantern()"]', caps.lantern);
+    setGate('#toggle-stealth', caps.stealth);
+    setGate('#brightness-card button, #brightness-card input', caps.brightness);
+    setGate('button[data-device-command="mood_light"]', caps.mood);
+    const extend = document.getElementById('btn-extend');
+    if (extend) {
+      extend.disabled = true;
+      extend.title = 'Extend is not exposed by this BLE bridge yet';
+    }
+    renderCapabilityStrip(caps);
+  }
+
+  function renderCapabilityStrip(caps) {
+    const strip = document.getElementById('capability-strip');
+    if (!strip) return;
+    const items = [
+      ['Heat', caps.heat],
+      ['Mood', caps.mood],
+      ['Lantern', caps.lantern],
+      ['Stealth', caps.stealth],
+      ['Brightness', caps.brightness],
+      ['Official attrs', caps.official],
+    ];
+    strip.innerHTML = items.map(([label, cap]) => {
+      const title = cap.ok ? `${label} supported` : cap.reason;
+      return `<span class="capability-pill ${cap.ok ? 'ok' : 'warn'}" title="${escAttr(title)}">${escHtml(label)} ${cap.ok ? 'OK' : 'Limited'}</span>`;
+    }).join('');
   }
 
   function updateStatusUI(data) {
@@ -982,6 +1207,8 @@ const app = (() => {
       updateTelemetryFields(null);
       updateHeroTelemetry(null);
       updateHeatLiveUI(data);
+      applyCapabilityGates(null);
+      document.getElementById('boost-options-panel')?.classList.add('hidden');
       return;
     }
 
@@ -1018,6 +1245,9 @@ const app = (() => {
     // Stats
     setText('stat-state', labels.state ?? formatDeviceState(data.state));
     setText('stat-chamber', labels.chamber ?? formatChamber(data.chamber));
+    setText('stat-device-model', formatDeviceIdentity(data));
+    setText('stat-firmware-inline', data.firmware || data.software_version || '—');
+    setText('stat-last-connected', lastConnectedLabel());
     setText('stat-charge', chargeLabel);
     updateTelemetryFields(data);
     setText('stat-firmware', data.firmware ?? '—');
@@ -1040,6 +1270,7 @@ const app = (() => {
       heatStatusText.textContent = heatStatusLabel(data);
     }
     updateHeatLiveUI(data);
+    applyCapabilityGates(data);
     updateHeatControls();
   }
 
@@ -1054,21 +1285,20 @@ const app = (() => {
       return;
     }
 
-    const report = data.heat_report || {};
+    const report = getHeatReport(data);
     const readable = data.official_readable || {};
+    const selectedProfile = getSelectedProfile(data);
     const current = report.current_temp_label || data.live_temperature?.label || readable.currentTemperature || formatTemperatureF(data.current_temperature_f) || '—';
-    const target = report.target_temp_label || readable.targetTemperature || formatTemperatureF(data.target_temperature_f) || formatTemperatureF(data.active_profile_temp_f) || '—';
+    const target = formatTargetTemperature(data, report, readable, selectedProfile) || '—';
     const remaining = getDynamicRemainingSeconds(report);
-    let timer = '—';
+    let timer = report.duration_label || formatSecondsLabel(selectedProfile?.time_s) || '—';
     if (remaining != null) {
       timer = formatSecondsClock(remaining);
     } else if (report.timer_confidence === 'preheating') {
       timer = 'Preheating';
-    } else if (report.duration_label) {
-      timer = report.duration_label;
     }
 
-    const profileName = data.active_profile_name || (data.current_profile != null ? `Profile ${data.current_profile}` : '—');
+    const profileName = data.active_profile_name || selectedProfile?.name || (data.current_profile != null ? `Profile ${data.current_profile}` : '—');
     setText('hero-device-name', data.name || 'Puffco');
     setText('hero-state-chip', heatStatusLabel(data));
     setText('hero-current-temp', current);
@@ -1087,27 +1317,29 @@ const app = (() => {
     if (!countdownEl || !phaseEl || !currentEl || !targetEl || !metaEl || !panel) return;
 
     if (!data || !data.connected) {
-      countdownEl.textContent = '--';
+      countdownEl.textContent = 'Idle';
       phaseEl.textContent = 'Disconnected';
-      currentEl.textContent = 'Current --';
-      targetEl.textContent = 'Target --';
-      metaEl.textContent = 'Waiting for device';
+      currentEl.textContent = 'Current unavailable';
+      targetEl.textContent = 'Target unavailable';
+      metaEl.textContent = 'Connect to read live heat state';
       panel.className = 'heat-live-panel';
       return;
     }
 
-    const report = data.heat_report || {};
+    const report = getHeatReport(data);
+    const readable = data.official_readable || {};
     const heating = isHeatActive(data);
-    const current = report.current_temp_label || data.live_temperature?.label || data.official_readable?.currentTemperature || null;
-    const target = report.target_temp_label || (data.active_profile_temp_f != null ? `${Math.round(data.active_profile_temp_f)} F` : null);
-    let countdown = '--';
-    let meta = report.duration_label ? `${report.duration_label} profile` : 'Profile duration unknown';
+    const selectedProfile = getSelectedProfile(data);
+    const current = report.current_temp_label || data.live_temperature?.label || readable.currentTemperature || formatTemperatureF(data.current_temperature_f);
+    const target = formatTargetTemperature(data, report, readable, selectedProfile);
+    let countdown = heating ? 'Syncing' : report.duration_label || formatSecondsLabel(selectedProfile?.time_s) || 'Idle';
+    let meta = report.duration_label ? `${report.duration_label} profile` : 'Waiting for heat cycle';
 
     const dynamicRemaining = getDynamicRemainingSeconds(report);
     if (dynamicRemaining != null) {
       countdown = formatSecondsClock(dynamicRemaining);
       const prefix = report.timer_confidence === 'firmware' ? 'Firmware timer' : 'Timer';
-      meta = report.timer_elapsed_label ? `${prefix}, ${report.timer_elapsed_label} elapsed` : `${prefix} running`;
+      meta = `${prefix} running until automatic end`;
     } else if (heating && report.timer_confidence === 'syncing') {
       countdown = 'Sync';
       meta = 'Timer starts after an observed preheat-to-active transition';
@@ -1118,13 +1350,24 @@ const app = (() => {
 
     countdownEl.textContent = countdown;
     phaseEl.textContent = report.phase || heatStatusLabel(data);
-    currentEl.textContent = current ? `Current ${current}` : 'Current --';
-    targetEl.textContent = target ? `Target ${target}` : 'Target --';
+    currentEl.textContent = current ? `Current ${current}` : 'Current unavailable';
+    targetEl.textContent = target ? `Target ${target}` : 'Target unavailable';
     metaEl.textContent = meta;
+    updateSessionMetrics(data, dynamicRemaining);
     const hasTimer = ['observed', 'firmware'].includes(report.timer_confidence);
     panel.className = 'heat-live-panel' + (heating ? ' active' : '') + (hasTimer ? ' timer-running' : '');
     updateHeroTelemetry(data);
     updateTelemetryFields(data);
+  }
+
+  function updateSessionMetrics(data, remaining = null) {
+    const report = getHeatReport(data);
+    const rem = remaining != null
+      ? formatSecondsClock(remaining)
+      : report.timer_remaining_label || formatSecondsLabel(report.timer_remaining_s) || report.duration_label || '—';
+    setText('session-remaining', rem);
+    setText('session-boost', data?.connected ? formatBoostSetting(data, data.official_readable || {}) : '—');
+    setText('session-chamber', data?.connected ? formatChamber(data.chamber) : '—');
   }
 
   function updateTelemetryFields(data) {
@@ -1143,40 +1386,43 @@ const app = (() => {
     ];
     if (!data || !data.connected) {
       telemetryIds.forEach((id) => setText(id, '—'));
+      updateSessionMetrics(null);
       return;
     }
-    const report = data.heat_report || {};
+    const report = getHeatReport(data);
     const readable = data.official_readable || {};
+    const selectedProfile = getSelectedProfile(data);
     const current = report.current_temp_label || data.live_temperature?.label || data.official_readable?.currentTemperature || formatTemperatureF(data.current_temperature_f);
-    const target = report.target_temp_label || data.official_readable?.targetTemperature || formatTemperatureF(data.target_temperature_f) || formatTemperatureF(data.active_profile_temp_f);
+    const target = formatTargetTemperature(data, report, readable, selectedProfile);
     const remaining = getDynamicRemainingSeconds(report);
-    let timer = '—';
+    let timer = report.duration_label || formatSecondsLabel(selectedProfile?.time_s) || '—';
     if (remaining != null) {
       timer = formatSecondsClock(remaining);
     } else if (report.timer_confidence === 'preheating') {
       timer = 'Preheating';
-    } else if (report.duration_label) {
-      timer = `${report.duration_label} profile`;
     }
 
-    const profileName = data.active_profile_name || (data.current_profile != null ? `Profile ${data.current_profile}` : '—');
+    const profileName = data.active_profile_name || selectedProfile?.name || (data.current_profile != null ? `Profile ${data.current_profile}` : '—');
     setText('stat-current-temp', current || '—');
     setText('stat-target-temp', target || '—');
     setText('stat-heat-timer', timer);
     setText('stat-profile', profileName);
     setText('stat-battery-source', formatBatterySource(data.battery_source, data.battery_source_type));
-    setText('stat-charge-eta', readable.chargeEstimatedTimeToFull || '—');
+    setText('stat-charge-eta', readable.chargeEstimatedTimeToFull || formatSecondsLabel(data.charge_estimated_time_to_full_s) || 'Not reported');
     setText('stat-boost', formatBoostSetting(data, readable));
     setText('stat-lantern-time', formatLanternStatus(data, readable));
     setText('stat-low-battery', readable.lowBatteryIndicator || formatBooleanLabel(data.low_battery_indicator) || '—');
-    setText('stat-max-battery', readable.maxBatteryLevel || formatPercentLabel(data.max_battery_level) || '—');
+    setText('stat-max-battery', readable.maxBatteryLevel || formatPercentLabel(data.max_battery_level) || 'Not reported');
     setText('stat-led-brightness', readable.brightness || formatBrightness(data.led_brightness) || '—');
+    syncBoostOptionInputs(data);
   }
 
   function updateHeatControls() {
     const startBtn = document.getElementById('btn-heat');
     const boostBtn = document.getElementById('btn-boost');
+    const extendBtn = document.getElementById('btn-extend');
     const stopBtn = document.getElementById('btn-stop');
+    const boostOptionsBtn = document.getElementById('btn-boost-options');
     const statusText = document.getElementById('heat-status-text');
     if (!startBtn || !boostBtn || !stopBtn) return;
 
@@ -1184,14 +1430,20 @@ const app = (() => {
     const pending = !!heatCommandPending;
     startBtn.disabled = !connected || heating || pending;
     boostBtn.disabled = !connected || !heating || pending;
+    if (extendBtn) extendBtn.disabled = true;
     stopBtn.disabled = !connected || (!heating && heatCommandPending !== 'heat') || pending;
+    if (boostOptionsBtn) boostOptionsBtn.disabled = !connected || pending;
+    boostBtn.classList.toggle('hidden', !heating);
+    if (extendBtn) extendBtn.classList.add('hidden');
+    stopBtn.classList.toggle('hidden', !heating);
 
     startBtn.classList.toggle('loading', heatCommandPending === 'heat');
     boostBtn.classList.toggle('loading', heatCommandPending === 'boost');
     stopBtn.classList.toggle('loading', heatCommandPending === 'stop');
 
     startBtn.textContent = heatCommandPending === 'heat' ? 'Starting…' : 'Start Heat';
-    boostBtn.textContent = heatCommandPending === 'boost' ? 'Boosting…' : 'Boost';
+    boostBtn.textContent = heatCommandPending === 'boost' ? 'Boosting…' : (isBoostActive(deviceState) ? 'Boost Active' : 'Boost');
+    if (boostOptionsBtn) boostOptionsBtn.textContent = formatBoostSetting(deviceState || {}, deviceState?.official_readable || {});
     stopBtn.textContent = heatCommandPending === 'stop' ? 'Stopping…' : 'Stop';
 
     if (statusText && heatCommandPending) {
@@ -1214,14 +1466,17 @@ const app = (() => {
       return;
     }
 
-    profiles.forEach((p, i) => {
+    const orderedProfiles = applySavedProfileOrder(profiles);
+    orderedProfiles.forEach((p, i) => {
       const profileIndex = Number(p.index ?? i);
       const isPending = optimisticProfileIndex != null && Number(optimisticProfileIndex) === profileIndex;
       const isActive = isPending || p.active || profileIndex === Number(currentIndex);
-      const profileColor = extractProfileColor(p.color);
+      const profileColors = extractProfileColors(p.color);
+      const profileColor = profileColors[0] || extractProfileColor(p.color);
+      const profileSwatch = profileColorBackground(profileColors);
       const mood = extractProfileMood(p.color);
       const officialMood = isOfficialMoodPayload(p.color);
-      const moodName = mood.name || activeMoodPreset().name;
+      const moodName = mood.name;
       const tempLabel = formatProfileTemperature(p.temp_f);
       const timeLabel = formatProfileDuration(p.time_s);
 
@@ -1230,6 +1485,8 @@ const app = (() => {
       card.className = 'profile-card' + (isActive ? ' active' : '') + (isPending ? ' pending' : '');
       card.style.setProperty('--profile-color', profileColor);
       card.tabIndex = 0;
+      card.draggable = true;
+      card.dataset.profileIndex = String(profileIndex);
       card.setAttribute('role', 'button');
       card.setAttribute('aria-label', `Select ${p.name || `Profile ${profileIndex}`}`);
       card.addEventListener('click', (event) => {
@@ -1242,12 +1499,28 @@ const app = (() => {
           selectProfile(profileIndex);
         }
       });
+      card.addEventListener('dragstart', (event) => {
+        card.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/profile-index', String(profileIndex));
+      });
+      card.addEventListener('dragend', () => card.classList.remove('dragging'));
+      card.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+      });
+      card.addEventListener('drop', (event) => {
+        event.preventDefault();
+        const from = event.dataTransfer.getData('text/profile-index');
+        if (from !== '') reorderProfiles(Number(from), profileIndex);
+      });
 
       card.innerHTML = `
         <div class="profile-name">
+          <span class="profile-drag-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
           <span class="active-indicator"></span>
           <span>${escHtml(p.name || `Profile ${profileIndex}`)}</span>
-          <div class="profile-color-swatch" style="background:${profileColor};margin-left:auto;"></div>
+          <div class="profile-color-swatch" style="background:${escAttr(profileSwatch)};margin-left:auto;"></div>
         </div>
         <div class="profile-meta">
           <span>${escHtml(tempLabel)}</span>
@@ -1260,6 +1533,7 @@ const app = (() => {
             ${isPending ? 'Switching...' : isActive ? 'Active' : 'Select'}
           </button>
           <button class="btn btn-sm btn-secondary" onclick="app.editProfile(${profileIndex})">Edit</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.saveDeviceProfileToLibrary(${profileIndex})">Save Local</button>
         </div>
       `;
       grid.appendChild(card);
@@ -1274,10 +1548,47 @@ const app = (() => {
         colorBtns.appendChild(btn);
       }
     });
+    renderProfileLibrary();
   }
 
-  function extractProfileColor(colorObj) {
-    if (!colorObj) return '#8b5cf6';
+  function applySavedProfileOrder(profiles) {
+    const items = Array.isArray(profiles) ? profiles.slice() : [];
+    let order = [];
+    try {
+      order = JSON.parse(localStorage.getItem(PROFILE_ORDER_KEY) || '[]');
+    } catch {
+      order = [];
+    }
+    if (!Array.isArray(order) || !order.length) return items;
+    const rank = new Map(order.map((value, index) => [Number(value), index]));
+    return items.sort((a, b) => {
+      const aIndex = Number(a.index ?? items.indexOf(a));
+      const bIndex = Number(b.index ?? items.indexOf(b));
+      const aRank = rank.has(aIndex) ? rank.get(aIndex) : Number.MAX_SAFE_INTEGER;
+      const bRank = rank.has(bIndex) ? rank.get(bIndex) : Number.MAX_SAFE_INTEGER;
+      return aRank - bRank || aIndex - bIndex;
+    });
+  }
+
+  function reorderProfiles(fromIndex, toIndex) {
+    if (!deviceState || !Array.isArray(deviceState.profiles) || fromIndex === toIndex) return;
+    const profiles = applySavedProfileOrder(deviceState.profiles);
+    const fromPos = profiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(fromIndex));
+    const toPos = profiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(toIndex));
+    if (fromPos < 0 || toPos < 0) return;
+    const [moved] = profiles.splice(fromPos, 1);
+    profiles.splice(toPos, 0, moved);
+    const order = profiles.map((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex));
+    try {
+      localStorage.setItem(PROFILE_ORDER_KEY, JSON.stringify(order));
+    } catch {}
+    deviceState.profiles = profiles;
+    updateProfilesUI(deviceState.profiles, optimisticProfileIndex ?? deviceState.current_profile);
+    toast('Profile order saved locally', 'success');
+  }
+
+  function extractProfileColors(colorObj) {
+    if (!colorObj) return ['#8b5cf6'];
     const normalize = (raw) => {
       if (!raw) return null;
       if (typeof raw === 'string') {
@@ -1297,21 +1608,51 @@ const app = (() => {
       }
       return null;
     };
+    const collect = (raw) => {
+      if (!raw) return [];
+      if (typeof raw === 'string') {
+        const color = normalize(raw);
+        return color ? [color] : [];
+      }
+      if (Array.isArray(raw)) {
+        if (raw.length >= 3 && raw.slice(0, 3).every(v => Number.isFinite(Number(v)))) {
+          const color = normalize(raw);
+          return color ? [color] : [];
+        }
+        return raw.flatMap(item => collect(item));
+      }
+      return [];
+    };
     // Navigate the nested color structure from the Puffco CBOR response
     try {
-      const metaColor = normalize(colorObj.meta?.userColors || colorObj.meta?.arrayColors);
-      if (metaColor) return metaColor;
+      const metaColors = collect(colorObj.meta?.userColors || colorObj.meta?.arrayColors);
+      if (metaColors.length) return [...new Set(metaColors)];
       if (colorObj.lamp?.param?.color) {
-        const paramColor = normalize(colorObj.lamp.param.color);
-        if (paramColor) return paramColor;
+        const paramColors = collect(colorObj.lamp.param.color);
+        if (paramColors.length) return [...new Set(paramColors)];
       }
       // Try flat "color" key
       if (colorObj.color) {
-        const flatColor = normalize(colorObj.color);
-        if (flatColor) return flatColor;
+        const flatColors = collect(colorObj.color);
+        if (flatColors.length) return [...new Set(flatColors)];
       }
     } catch (e) {}
-    return '#8b5cf6';
+    return ['#8b5cf6'];
+  }
+
+  function extractProfileColor(colorObj) {
+    return extractProfileColors(colorObj)[0] || '#8b5cf6';
+  }
+
+  function profileColorBackground(colors) {
+    const unique = [...new Set((colors || []).filter(color => /^#[0-9a-f]{6}$/i.test(color)))];
+    if (unique.length <= 1) return unique[0] || '#8b5cf6';
+    const stops = unique.map((color, index) => {
+      const start = Math.round((index / unique.length) * 100);
+      const end = Math.round(((index + 1) / unique.length) * 100);
+      return `${color} ${start}% ${end}%`;
+    });
+    return `linear-gradient(90deg, ${stops.join(', ')})`;
   }
 
   function formatProfileTemperature(value) {
@@ -1325,30 +1666,265 @@ const app = (() => {
   }
 
   function extractProfileMood(colorObj) {
-    const fallbackColor = extractProfileColor(colorObj);
+    const profileColors = extractProfileColors(colorObj);
+    const fallbackColor = profileColors[0] || extractProfileColor(colorObj);
     const meta = colorObj?.meta || {};
-    const preset = MOOD_PRESETS.some(item => item.id === meta.moodType) ? meta.moodType : 'no_animation';
-    const rawColors = Array.isArray(meta.userColors) ? meta.userColors : [fallbackColor];
+    const preset = inferMoodPreset(colorObj);
+    const presetName = MOOD_PRESETS.find(item => item.id === preset)?.name ?? 'Static color';
+    const rawName = meta.moodName || meta.led3Name || presetName;
+    const rawColors = Array.isArray(meta.userColors) ? meta.userColors : profileColors;
     const colors = rawColors
-      .map(color => extractProfileColor({ color }))
+      .flatMap(color => extractProfileColors({ color }))
       .filter(color => /^#[0-9a-f]{6}$/i.test(color));
     return {
-      preset,
-      name: meta.moodName || meta.led3Name || (MOOD_PRESETS.find(item => item.id === preset)?.name ?? 'No animation'),
+      preset: preset || 'no_animation',
+      name: normalizeMoodDisplayName(rawName),
       colors: colors.length ? colors : [fallbackColor],
       tempoFrac: Number.isFinite(Number(meta.tempoFrac)) ? Math.max(0, Math.min(1, Number(meta.tempoFrac))) : 0.5,
       dynamicInhale: !!Number(meta.dynamicInhale || 0),
+      sourcePreset: preset,
     };
+  }
+
+  function inferMoodPreset(colorObj) {
+    const meta = colorObj?.meta || {};
+    const lamp = colorObj?.lamp || {};
+    const param = lamp?.param || {};
+    const candidates = [
+      meta.moodType,
+      meta.led3Tag,
+      meta.moodName,
+      meta.led3Name,
+      lamp.tag,
+      lamp.name,
+    ].map(value => String(value || '').trim().toLowerCase().replace(/-/g, '_'));
+    for (const candidate of candidates) {
+      const preset = MOOD_PRESETS.find(item => (
+        candidate === item.id
+        || candidate.includes(item.id)
+        || candidate.includes(String(item.name).toLowerCase().replace(/[\s-]+/g, '_'))
+      ));
+      if (preset) return preset.id;
+    }
+    const offset = Array.isArray(param.offset) ? param.offset.map(value => Number(value)) : [];
+    if (Number(param.anim) === 7) return 'spin';
+    if (Number(param.colorLen) === 32) return 'no_animation';
+    if (offset.length) {
+      if (offset.every(value => value === 0)) return 'fade';
+      if (offset.includes(20480) && offset.includes(15930)) return 'vertical_slideshow';
+      if (offset.includes(7680) && offset.some(value => value >= 25600)) return 'split_gradient';
+      if (offset[0] === 15360 || offset.includes(18773)) return 'disco';
+    }
+    if (lamp.name === 'pikaled2' || Array.isArray(param.color)) return 'no_animation';
+    return null;
+  }
+
+  function normalizeMoodDisplayName(name) {
+    return String(name || '').trim().toLowerCase() === 'no animation' ? 'Static color' : displayValue(name, 'Static color');
   }
 
   function isOfficialMoodPayload(colorObj) {
     const meta = colorObj?.meta || {};
     const lamp = colorObj?.lamp || {};
-    const preset = String(meta.moodType || '').replace(/-/g, '_');
+    const preset = inferMoodPreset(colorObj);
     return lamp.name === 'pikaled2'
-      && MOOD_PRESETS.some(item => item.id === preset)
-      && Array.isArray(meta.userColors)
-      && meta.userColors.length > 0;
+      && MOOD_PRESETS.some(item => item.id === preset);
+  }
+
+  function readJsonStorage(key, fallback) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key) || 'null');
+      return value == null ? fallback : value;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeJsonStorage(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function validateProfile(profile) {
+    if (!profile || typeof profile !== 'object') return { ok: false, reason: 'Profile is not an object' };
+    const temp = Number(profile.temp_f);
+    const time = Number(profile.time_s);
+    if (!profile.name && profile.name !== '') return { ok: false, reason: 'Profile name is missing' };
+    if (!Number.isFinite(temp) || temp < 250 || temp > 700) return { ok: false, reason: 'Temperature must be 250-700 F' };
+    if (!Number.isFinite(time) || time < 5 || time > 300) return { ok: false, reason: 'Duration must be 5-300 seconds' };
+    return { ok: true };
+  }
+
+  function profileForStorage(profile, source = 'device') {
+    const mood = isOfficialMoodPayload(profile.color) ? extractProfileMood(profile.color) : null;
+    return {
+      id: profile.id || `${source}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      source,
+      archived: Boolean(profile.archived),
+      index: Number.isFinite(Number(profile.index)) ? Number(profile.index) : null,
+      name: profile.name || 'Profile',
+      temp_f: Number(profile.temp_f),
+      time_s: Number(profile.time_s),
+      boost_temperature_delta_f: profile.boost_temperature_delta_f ?? deviceState?.boost_temperature_delta_f ?? null,
+      boost_time_s: profile.boost_time_s ?? deviceState?.boost_time_s ?? null,
+      vapor: profile.vapor ?? profile.xl_vapor ?? null,
+      chamber: profile.chamber ?? deviceState?.chamber ?? null,
+      color: profile.color || null,
+      mood,
+      saved_at: new Date().toISOString(),
+    };
+  }
+
+  function readProfileLibrary() {
+    const payload = readJsonStorage(LOCAL_PROFILES_KEY, { version: 1, profiles: [] });
+    const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
+    return { version: Number(payload?.version) || 1, profiles };
+  }
+
+  function writeProfileLibrary(profiles) {
+    writeJsonStorage(LOCAL_PROFILES_KEY, {
+      version: 1,
+      updated_at: new Date().toISOString(),
+      profiles,
+    });
+  }
+
+  function saveProfileBackup(reason = 'manual') {
+    const profiles = Array.isArray(deviceState?.profiles) ? applySavedProfileOrder(deviceState.profiles) : [];
+    if (!profiles.length) return null;
+    const backups = readJsonStorage(PROFILE_BACKUP_KEY, []);
+    const snapshot = {
+      version: 1,
+      reason,
+      saved_at: new Date().toISOString(),
+      device: { name: deviceState?.name || null, serial: deviceState?.serial || null },
+      current_profile: deviceState?.current_profile ?? null,
+      profiles,
+    };
+    backups.unshift(snapshot);
+    writeJsonStorage(PROFILE_BACKUP_KEY, backups.slice(0, 10));
+    return snapshot;
+  }
+
+  function saveDeviceProfileToLibrary(index) {
+    const profile = findProfile(index);
+    if (!profile) return;
+    const stored = profileForStorage(profile, 'device');
+    const validation = validateProfile(stored);
+    if (!validation.ok) {
+      toast(validation.reason, 'error');
+      return;
+    }
+    const library = readProfileLibrary().profiles;
+    library.unshift(stored);
+    writeProfileLibrary(library);
+    renderProfileLibrary();
+    toast('Profile saved to local library', 'success');
+  }
+
+  function renderProfileLibrary() {
+    const grid = document.getElementById('profile-library-grid');
+    if (!grid) return;
+    const library = readProfileLibrary().profiles;
+    const visible = library.filter((profile) => !profile.archived);
+    if (!visible.length) {
+      grid.innerHTML = '';
+      return;
+    }
+    grid.innerHTML = visible.map((profile) => {
+      const color = extractProfileColor(profile.color || { color: profile.mood?.colors?.[0] });
+      const moodName = profile.mood?.name || profile.mood?.preset || 'Static color';
+      return `
+        <div class="profile-card" style="--profile-color:${escAttr(color)}">
+          <div class="profile-name">
+            <span class="active-indicator"></span>
+            <span>${escHtml(profile.name || 'Local profile')}</span>
+            <div class="profile-color-swatch" style="background:${escAttr(color)};margin-left:auto;"></div>
+          </div>
+          <div class="profile-meta">
+            <span>${escHtml(formatProfileTemperature(profile.temp_f))}</span>
+            <span>${escHtml(formatProfileDuration(profile.time_s))}</span>
+            <span>${escHtml(moodName)}</span>
+            <span class="profile-sync-badge warn">Local</span>
+          </div>
+          <div class="profile-actions">
+            <button class="btn btn-sm btn-secondary" onclick="app.copyLocalProfileToDevice('${escAttr(profile.id)}')">Copy to Slot</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.duplicateLocalProfile('${escAttr(profile.id)}')">Duplicate</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.archiveLocalProfile('${escAttr(profile.id)}')">Archive</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function duplicateLocalProfile(id) {
+    const library = readProfileLibrary().profiles;
+    const source = library.find((profile) => profile.id === id);
+    if (!source) return;
+    library.unshift({ ...source, id: `local-${Date.now()}`, name: `${source.name || 'Profile'} Copy`, archived: false, saved_at: new Date().toISOString() });
+    writeProfileLibrary(library);
+    renderProfileLibrary();
+  }
+
+  function archiveLocalProfile(id) {
+    const library = readProfileLibrary().profiles.map((profile) => (
+      profile.id === id ? { ...profile, archived: true, archived_at: new Date().toISOString() } : profile
+    ));
+    writeProfileLibrary(library);
+    renderProfileLibrary();
+  }
+
+  function copyLocalProfileToDevice(id) {
+    const library = readProfileLibrary().profiles;
+    const profile = library.find((item) => item.id === id);
+    if (!profile) return;
+    const validation = validateProfile(profile);
+    if (!validation.ok) {
+      toast(validation.reason, 'error');
+      return;
+    }
+    const slot = prompt('Copy to device slot 0-3', String(deviceState?.current_profile ?? 0));
+    if (slot == null) return;
+    const index = Number(slot);
+    if (!Number.isInteger(index) || index < 0 || index > 3) {
+      toast('Device slot must be 0-3', 'error');
+      return;
+    }
+    saveProfileBackup('before_copy_local_to_device');
+    const params = {
+      index,
+      name: profile.name,
+      temp_f: Number(profile.temp_f),
+      time_s: Number(profile.time_s),
+    };
+    if (profile.mood) {
+      params.mood_light = {
+        preset: profile.mood.sourcePreset || profile.mood.preset,
+        colors: profile.mood.colors,
+        tempo_frac: profile.mood.tempoFrac ?? profile.mood.tempo_frac ?? 0.5,
+        dynamic_inhale: profile.mood.dynamicInhale ?? profile.mood.dynamic_inhale ?? false,
+      };
+    }
+    send('set_profile', params);
+  }
+
+  function restoreProfileBackup() {
+    const backups = readJsonStorage(PROFILE_BACKUP_KEY, []);
+    const latest = Array.isArray(backups) ? backups[0] : null;
+    if (!latest?.profiles?.length) {
+      toast('No profile backup available', 'warn');
+      return;
+    }
+    writeProfileLibrary(latest.profiles.map((profile) => profileForStorage(profile, 'backup')));
+    renderProfileLibrary();
+    toast('Backup restored into local library', 'success');
+  }
+
+  function restoreDefaultProfiles() {
+    try {
+      localStorage.removeItem(PROFILE_ORDER_KEY);
+    } catch {}
+    if (deviceState?.profiles) updateProfilesUI(deviceState.profiles, deviceState.current_profile);
+    toast('Local profile order reset', 'success');
   }
 
   // ---- Color Controls ----
@@ -1434,7 +2010,7 @@ const app = (() => {
   }
 
   function activeMoodPreset() {
-    return MOOD_PRESETS.find(preset => preset.id === moodEditor.preset) || MOOD_PRESETS[0];
+    return [...MOOD_PRESETS, ...localMoodPresets].find(preset => preset.id === moodEditor.preset) || MOOD_PRESETS[0];
   }
 
   function setMoodPreview(color) {
@@ -1451,10 +2027,15 @@ const app = (() => {
 
   function setMoodPreset(id) {
     const preset = MOOD_PRESETS.find(item => item.id === id) || MOOD_PRESETS[0];
-    moodEditor.preset = preset.id;
-    moodEditor.colors = preset.colors.slice();
-    moodEditor.dynamicInhale = false;
-    if (!preset.tempo) moodEditor.tempoFrac = 0.5;
+    const custom = localMoodPresets.find(item => item.id === id);
+    const selected = custom || preset;
+    moodEditor.preset = selected.id;
+    moodEditor.colors = selected.colors.slice();
+    moodEditor.dynamicInhale = Boolean(selected.dynamicInhale);
+    moodEditor.tempoFrac = Number.isFinite(Number(selected.tempoFrac)) ? Number(selected.tempoFrac) : 0.5;
+    if (!selected.tempo) moodEditor.tempoFrac = 0.5;
+    const nameInput = document.getElementById('mood-name');
+    if (nameInput) nameInput.value = selected.local ? selected.name : '';
     syncPickerToMoodColor();
     renderMoodControls();
     renderModalSummary();
@@ -1497,11 +2078,11 @@ const app = (() => {
     const presetWrap = document.getElementById('mood-presets');
     if (presetWrap) {
       presetWrap.innerHTML = '';
-      MOOD_PRESETS.forEach(preset => {
+      [...MOOD_PRESETS, ...localMoodPresets].forEach(preset => {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'mood-preset' + (preset.id === moodEditor.preset ? ' active' : '');
-        btn.innerHTML = `<strong>${escHtml(preset.name)}</strong><span>${escHtml(preset.desc)}</span>`;
+        btn.innerHTML = `<strong>${escHtml(preset.name)}</strong><span>${escHtml(preset.local ? 'Local mood' : preset.desc)}</span>`;
         btn.onclick = () => setMoodPreset(preset.id);
         presetWrap.appendChild(btn);
       });
@@ -1518,7 +2099,10 @@ const app = (() => {
     moodEditor.colors.forEach((color, index) => {
       const slot = document.createElement('div');
       slot.className = 'mood-color-slot';
+      slot.draggable = true;
+      slot.dataset.colorIndex = String(index);
       slot.innerHTML = `
+        <span class="mood-drag-handle" title="Drag to reorder" aria-hidden="true">⋮</span>
         <span>${index + 1}</span>
         <input type="color" value="${escHtml(color)}" aria-label="Mood color ${index + 1}" />
         <input type="text" class="hex-input" value="${escHtml(color.toUpperCase())}" maxlength="7" />
@@ -1526,7 +2110,7 @@ const app = (() => {
       `;
       const colorInput = slot.querySelector('input[type="color"]');
       const textInput = slot.querySelector('input[type="text"]');
-      const removeBtn = slot.querySelector('button');
+      const removeBtn = slot.querySelector('button.mood-remove');
       const update = (value) => {
         let next = value.trim();
         if (!next.startsWith('#')) next = '#' + next;
@@ -1543,6 +2127,26 @@ const app = (() => {
       removeBtn.addEventListener('click', () => {
         if (moodEditor.colors.length <= preset.min) return;
         moodEditor.colors.splice(index, 1);
+        renderMoodColors();
+        renderModalSummary();
+      });
+      slot.addEventListener('dragstart', (event) => {
+        slot.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/mood-color-index', String(index));
+      });
+      slot.addEventListener('dragend', () => slot.classList.remove('dragging'));
+      slot.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+      });
+      slot.addEventListener('drop', (event) => {
+        event.preventDefault();
+        const from = Number(event.dataTransfer.getData('text/mood-color-index'));
+        if (!Number.isInteger(from) || from === index) return;
+        const [moved] = moodEditor.colors.splice(from, 1);
+        moodEditor.colors.splice(index, 0, moved);
+        syncPickerToMoodColor();
         renderMoodColors();
         renderModalSummary();
       });
@@ -1585,12 +2189,151 @@ const app = (() => {
       return null;
     }
     return {
-      preset: moodEditor.preset,
+      preset: preset.sourcePreset || moodEditor.preset,
       colors: moodEditor.colors.slice(),
       tempo_frac: moodEditor.tempoFrac,
       dynamic_inhale: moodEditor.dynamicInhale,
       ...extra,
     };
+  }
+
+  function validateMoodPreset(preset) {
+    if (!preset || typeof preset !== 'object') return { ok: false, reason: 'Mood is not an object' };
+    if (!preset.name || typeof preset.name !== 'string') return { ok: false, reason: 'Mood name is required' };
+    const colors = Array.isArray(preset.colors) ? preset.colors : [];
+    if (colors.length < 1 || colors.length > 6) return { ok: false, reason: 'Mood needs 1-6 colors' };
+    if (!colors.every((color) => /^#[0-9a-f]{6}$/i.test(String(color)))) return { ok: false, reason: 'Mood colors must use #RRGGBB' };
+    return { ok: true };
+  }
+
+  function readMoodLibrary() {
+    const payload = readJsonStorage(MOOD_LIBRARY_KEY, { version: 1, moods: [] });
+    return Array.isArray(payload?.moods) ? payload.moods : [];
+  }
+
+  function writeMoodLibrary(moods) {
+    writeJsonStorage(MOOD_LIBRARY_KEY, {
+      version: 1,
+      updated_at: new Date().toISOString(),
+      moods,
+    });
+    localMoodPresets = moods;
+  }
+
+  function currentMoodPresetPayload(nameOverride = '') {
+    const base = activeMoodPreset();
+    const name = String(nameOverride || document.getElementById('mood-name')?.value || base.name || 'Mood').trim();
+    return {
+      id: base.local ? base.id : `local-mood-${Date.now()}`,
+      local: true,
+      name,
+      desc: 'Local mood',
+      min: Math.max(1, Math.min(6, Number(base.min) || 1)),
+      max: Math.max(1, Math.min(6, Number(base.max) || 6)),
+      colors: moodEditor.colors.slice(),
+      tempo: Boolean(base.tempo),
+      tempoFrac: moodEditor.tempoFrac,
+      dynamicInhale: moodEditor.dynamicInhale,
+      sourcePreset: base.local ? base.sourcePreset : base.id,
+      saved_at: new Date().toISOString(),
+    };
+  }
+
+  function saveMoodPreset() {
+    const preset = currentMoodPresetPayload();
+    const validation = validateMoodPreset(preset);
+    if (!validation.ok) {
+      toast(validation.reason, 'error');
+      return;
+    }
+    const moods = readMoodLibrary();
+    const index = moods.findIndex((item) => item.id === preset.id);
+    if (index >= 0) moods[index] = preset;
+    else moods.unshift(preset);
+    writeMoodLibrary(moods);
+    localMoodPresets = moods;
+    moodEditor.preset = preset.id;
+    renderMoodControls();
+    toast('Mood saved locally', 'success');
+  }
+
+  function duplicateMoodPreset() {
+    const preset = currentMoodPresetPayload(`${activeMoodPreset().name || 'Mood'} Copy`);
+    preset.id = `local-mood-${Date.now()}`;
+    const validation = validateMoodPreset(preset);
+    if (!validation.ok) {
+      toast(validation.reason, 'error');
+      return;
+    }
+    const moods = readMoodLibrary();
+    moods.unshift(preset);
+    writeMoodLibrary(moods);
+    moodEditor.preset = preset.id;
+    renderMoodControls();
+    toast('Mood duplicated', 'success');
+  }
+
+  function deleteMoodPreset() {
+    const active = activeMoodPreset();
+    if (!active.local) {
+      toast('Built-in moods cannot be deleted', 'warn');
+      return;
+    }
+    writeMoodLibrary(readMoodLibrary().filter((item) => item.id !== active.id));
+    moodEditor.preset = 'no_animation';
+    syncPickerToMoodColor();
+    renderMoodControls();
+    toast('Mood deleted', 'success');
+  }
+
+  function exportMoods() {
+    const moods = readMoodLibrary();
+    const payload = { version: 1, exported_at: new Date().toISOString(), moods };
+    const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `puffco-moods-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function openMoodImport() {
+    document.getElementById('mood-import-file')?.click();
+  }
+
+  async function importMoodFile(file) {
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      const incoming = Array.isArray(payload?.moods) ? payload.moods : Array.isArray(payload) ? payload : [];
+      const normalized = incoming.map((item, index) => ({
+        ...item,
+        id: item.id || `imported-mood-${Date.now()}-${index}`,
+        local: true,
+        min: Number(item.min) || 1,
+        max: Number(item.max) || 6,
+      }));
+      const invalid = normalized.map(validateMoodPreset).find((result) => !result.ok);
+      if (invalid) throw new Error(invalid.reason);
+      writeMoodLibrary([...normalized, ...readMoodLibrary()]);
+      renderMoodControls();
+      toast('Moods imported', 'success');
+    } catch (err) {
+      toast(`Mood import failed: ${err?.message || err}`, 'error');
+    } finally {
+      const input = document.getElementById('mood-import-file');
+      if (input) input.value = '';
+    }
+  }
+
+  function restoreDefaultMoods() {
+    writeMoodLibrary([]);
+    moodEditor.preset = 'no_animation';
+    setMoodPreset('no_animation');
+    toast('Local moods cleared', 'success');
   }
 
   function applyMoodToProfile() {
@@ -1687,17 +2430,92 @@ const app = (() => {
     if (name) params.name = name;
     if (tempStr) params.temp_f = parseFloat(tempStr);
     if (timeStr) params.time_s = parseFloat(timeStr);
+    const validation = validateProfile({
+      name: name || findProfile(index)?.name || `Profile ${index}`,
+      temp_f: params.temp_f ?? findProfile(index)?.temp_f,
+      time_s: params.time_s ?? findProfile(index)?.time_s,
+    });
+    if (!validation.ok) {
+      toast(validation.reason, 'error');
+      return;
+    }
     const mood = moodParams();
     if (!mood) return;
     params.mood_light = mood;
     if (forceSelect || document.getElementById('modal-select').checked) params.select = true;
 
+    saveProfileBackup('before_set_profile');
     send('set_profile', params);
     if (params.select) {
       optimisticProfileIndex = index;
       updateOptimisticProfile(index);
     }
     closeModal();
+  }
+
+  function currentProfilesPayload() {
+    return {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      device: {
+        name: deviceState?.name || null,
+        serial: deviceState?.serial || null,
+      },
+      current_profile: deviceState?.current_profile ?? null,
+      profiles: Array.isArray(deviceState?.profiles) ? applySavedProfileOrder(deviceState.profiles) : [],
+    };
+  }
+
+  function exportProfiles() {
+    const payload = currentProfilesPayload();
+    if (!payload.profiles.length) {
+      toast('No profiles available to export', 'warn');
+      return;
+    }
+    try {
+      localStorage.setItem(LOCAL_PROFILES_KEY, JSON.stringify(payload));
+    } catch {}
+    const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `puffco-profiles-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast('Profiles exported', 'success');
+  }
+
+  function openProfileImport() {
+    document.getElementById('profile-import-file')?.click();
+  }
+
+  async function importProfileFile(file) {
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      const profiles = Array.isArray(payload?.profiles) ? payload.profiles : Array.isArray(payload) ? payload : [];
+      if (!profiles.length) throw new Error('No profiles found');
+      const normalized = profiles.map((profile, fallbackIndex) => ({
+        ...profile,
+        id: profile.id || `imported-profile-${Date.now()}-${fallbackIndex}`,
+        source: profile.source || 'import',
+        index: Number.isFinite(Number(profile.index)) ? Number(profile.index) : fallbackIndex,
+      }));
+      const invalid = normalized.map(validateProfile).find((result) => !result.ok);
+      if (invalid) throw new Error(invalid.reason);
+      const mode = confirm('Replace local profile library? Press Cancel to merge.') ? 'replace' : 'merge';
+      const next = mode === 'replace' ? normalized : [...normalized, ...readProfileLibrary().profiles];
+      writeProfileLibrary(next);
+      renderProfileLibrary();
+      toast(`Profiles imported (${mode})`, 'success');
+    } catch (err) {
+      toast(`Profile import failed: ${err?.message || err}`, 'error');
+    } finally {
+      const input = document.getElementById('profile-import-file');
+      if (input) input.value = '';
+    }
   }
 
   // ---- Toggle Helpers ----
@@ -1756,23 +2574,56 @@ const app = (() => {
     });
   }
 
+  function syncBoostOptionInputs(data) {
+    const tempInput = document.getElementById('boost-temp-delta');
+    const timeInput = document.getElementById('boost-time-delta');
+    if (!tempInput || !timeInput) return;
+    if (document.activeElement === tempInput || document.activeElement === timeInput) return;
+    const temp = Number(data?.boost_temperature_delta_f);
+    const time = Number(data?.boost_time_s);
+    tempInput.value = Number.isFinite(temp) ? String(Math.round(temp)) : '';
+    timeInput.value = Number.isFinite(time) ? String(Math.round(time)) : '';
+  }
+
+  function toggleBoostOptions() {
+    const panel = document.getElementById('boost-options-panel');
+    if (!panel) return;
+    syncBoostOptionInputs(deviceState);
+    panel.classList.toggle('hidden');
+  }
+
+  function saveBoostOptions() {
+    const tempInput = document.getElementById('boost-temp-delta');
+    const timeInput = document.getElementById('boost-time-delta');
+    const temp = Number(tempInput?.value);
+    const time = Number(timeInput?.value);
+    if (!Number.isFinite(temp) || temp < 0 || temp > 120) {
+      toast('Boost temperature must be 0-120 F', 'error');
+      return;
+    }
+    if (!Number.isFinite(time) || time < 0 || time > 180) {
+      toast('Boost time must be 0-180 seconds', 'error');
+      return;
+    }
+    send('set_boost_options', { temp_delta_f: temp, time_s: time });
+  }
+
   // ---- Commands ----
 
   function connectDevice() {
     if (connectPending) return;
-    const name = document.getElementById('device-name').value.trim() || 'Peak';
-    const mac = document.getElementById('device-mac').value.trim() || undefined;
+    const identity = currentDeviceIdentity();
 
     // Save to localStorage
-    localStorage.setItem('puffco_device_name', name);
-    if (mac) localStorage.setItem('puffco_device_mac', mac);
+    if (identity.mac) localStorage.setItem('puffco_device_mac', identity.mac);
+    else localStorage.setItem('puffco_device_name', identity.device);
 
     const btn = document.getElementById('btn-connect');
     connectPending = true;
     btn.innerHTML = '<span class="spinner"></span> Connecting…';
     btn.disabled = true;
 
-    if (!send('connect', { device: name, mac })) {
+    if (!send('connect', { device: identity.device, mac: identity.mac })) {
       connectPending = false;
       updateConnectionUI(false);
       return;
@@ -1795,10 +2646,9 @@ const app = (() => {
   }
 
   function resyncDevice() {
-    const name = document.getElementById('device-name').value.trim() || 'Peak';
-    const mac = document.getElementById('device-mac').value.trim();
+    const identity = currentDeviceIdentity();
     appendLog('Requesting backend BLE resync', 'info');
-    send('connect', { device: name, mac });
+    send('connect', { device: identity.device, mac: identity.mac });
   }
 
   function scanDevices() {
@@ -1859,11 +2709,13 @@ const app = (() => {
       button.addEventListener('click', () => {
         const name = button.dataset.name || 'Peak';
         const address = button.dataset.address || '';
-        document.getElementById('device-name').value = name;
-        document.getElementById('device-mac').value = address;
-        revealMacFieldIfNeeded(address);
+        document.getElementById('device-name').value = address || name;
+        const macToggle = document.getElementById('use-mac-address');
+        if (macToggle) macToggle.checked = Boolean(address);
+        syncIdentityModeUI();
         localStorage.setItem('puffco_device_name', name);
         localStorage.setItem('puffco_device_mac', address);
+        localStorage.setItem('puffco_use_mac_address', address ? '1' : '0');
         appendLog(`Selected ${name} (${address})`, 'success');
         results.classList.remove('active');
         results.innerHTML = '';
@@ -1874,11 +2726,6 @@ const app = (() => {
 
   function refreshStatus() {
     send('status');
-  }
-
-  function revealMacFieldIfNeeded(value) {
-    const details = document.getElementById('device-mac-details');
-    if (details && String(value || '').trim()) details.open = true;
   }
 
   function selectProfile(index) {
@@ -2127,6 +2974,19 @@ const app = (() => {
     });
   }
 
+  function friendlyErrorMessage(message) {
+    const text = String(message || 'Unknown error');
+    const lower = text.toLowerCase();
+    if (/no chamber|chamber.*(missing|not detected|error|fault)/i.test(text)) return 'Chamber needs attention: check that it is installed and seated.';
+    if (/overheat|over.?temp|too hot/i.test(text)) return 'Device is too hot. Let it cool before starting another session.';
+    if (/low battery|battery.*low|soc/i.test(text)) return 'Battery is too low for this action.';
+    if (/disconnected|gatt.*disconnect|link lost/i.test(text)) return 'Bluetooth disconnected. Wake the device and reconnect.';
+    if (/write.*fail|ble write|gatt.*write|not permitted/i.test(text)) return 'BLE write failed. The feature may be locked, unsupported, or the device may be busy.';
+    if (/unsupported|not implemented|not exposed|unknown command/i.test(text)) return 'Unsupported feature on this firmware or transport.';
+    if (lower.includes('chooser was canceled')) return 'Bluetooth chooser was canceled.';
+    return text;
+  }
+
   function renderBackendMirror() {
     const snapshot = lastDeviceSnapshot || deviceState || null;
     const backend = snapshot?.backend || {};
@@ -2142,9 +3002,9 @@ const app = (() => {
     setText('backend-updated', updated ? formatTimestamp(updated) : '—');
     setText('backend-ble-link', formatBooleanLabel(backend.ble_link_connected));
     setText('backend-connected', formatBooleanLabel(backend.device_connected_flag ?? snapshot?.connected));
-    setText('backend-poll', formatPollingStatus(backend));
+    setText('backend-poll', formatPollingStatus(backend, snapshot));
     setText('backend-battery-raw', formatBackendValue(snapshot?.battery_raw || snapshot?.battery_source || snapshot?.battery));
-    setText('backend-temp-source', formatBackendValue(snapshot?.live_temperature_source?.path || snapshot?.live_temperature?.source || sources.currentTemperature));
+    setText('backend-temp-source', formatTemperatureSource(snapshot, sources));
 
     setPreText('backend-snapshot-json', snapshot ? safeJsonStringify(snapshot) : 'No snapshot yet');
     setPreText(
@@ -2200,8 +3060,27 @@ const app = (() => {
     });
   }
 
-  function formatPollingStatus(backend) {
-    if (!backend || typeof backend !== 'object') return '—';
+  function formatTemperatureSource(snapshot, sources = {}) {
+    return formatBackendValue(
+      snapshot?.live_temperature_source?.path
+      || snapshot?.live_temperature?.path
+      || snapshot?.live_temperature?.source
+      || sources.currentTemperature
+      || snapshot?.current_temperature_source
+      || (snapshot?.transport === 'browser_ble' ? '/p/app/htr/temp' : null)
+    );
+  }
+
+  function formatPollingStatus(backend, snapshot = null) {
+    if (!backend || typeof backend !== 'object') {
+      if (snapshot?.transport === 'browser_ble' || transportMode === 'browser_ble') {
+        return connected ? `Browser poll, ${document.hidden ? HIDDEN_BLE_POLL_MS : VISIBLE_BLE_POLL_MS}ms` : 'Browser poll idle';
+      }
+      return '—';
+    }
+    if (backend.transport === 'browser_ble' || snapshot?.transport === 'browser_ble') {
+      return connected ? `Browser poll, ${document.hidden ? HIDDEN_BLE_POLL_MS : VISIBLE_BLE_POLL_MS}ms` : 'Browser poll idle';
+    }
     const enabled = formatBooleanLabel(backend.polling);
     const interval = Number(backend.poll_interval_s);
     const staleIgnored = Number(backend.ignored_disconnect_callbacks);
@@ -2259,6 +3138,20 @@ const app = (() => {
     return `${Math.round(parsed)} F`;
   }
 
+  function validHeatTargetF(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 200 ? parsed : null;
+  }
+
+  function formatTargetTemperature(data, report = getHeatReport(data), readable = data?.official_readable || {}, selectedProfile = getSelectedProfile(data)) {
+    const firmwareTarget = validHeatTargetF(report?.target_temp_f)
+      ?? validHeatTargetF(readable?.targetTemperatureF)
+      ?? validHeatTargetF(data?.target_temperature_f);
+    const profileTarget = validHeatTargetF(selectedProfile?.temp_f) ?? validHeatTargetF(data?.active_profile_temp_f);
+    const target = firmwareTarget ?? profileTarget;
+    return formatTemperatureF(target);
+  }
+
   function formatTemperatureDeltaF(value) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return null;
@@ -2311,10 +3204,98 @@ const app = (() => {
   }
 
   function formatBoostSetting(data, readable) {
-    const temp = readable.boostTemperature || formatTemperatureDeltaF(data.boost_temperature_delta_f);
-    const time = readable.boostTime || formatSecondsLabel(data.boost_time_s);
+    const temp = formatTemperatureDeltaF(data.boost_temperature_delta_f) || readable.boostTemperature;
+    const time = formatBoostTimeDelta(data.boost_time_s) || readable.boostTime;
+    const active = isBoostActive(data);
+    if (active && temp && time) return `Boosting ${temp} / ${time}`;
+    if (active) return 'Boosting';
     if (temp && time) return `${temp} / ${time}`;
-    return temp || time || '—';
+    return temp || time || 'Boost options unavailable';
+  }
+
+  function formatBoostTimeDelta(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return null;
+    return `+${Math.round(parsed)}s`;
+  }
+
+  function formatDeviceIdentity(data) {
+    const model = data?.model || data?.device_model || data?.product_name || null;
+    const name = data?.name || null;
+    const serial = data?.serial ? ` · ${data.serial}` : '';
+    if (model && name && model !== name) return `${name} · ${model}${serial}`;
+    return `${name || model || 'Puffco'}${serial}`;
+  }
+
+  function formatRssi(data) {
+    const value = data?.rssi ?? data?.last_rssi ?? data?.backend?.rssi;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 'Not reported';
+    return `${Math.round(parsed)} dBm`;
+  }
+
+  function normalizeSnapshotForUi(data) {
+    if (!data || typeof data !== 'object') return data;
+    const payload = { ...data };
+    if (payload.state_elapsed_time_s == null && payload.state_elapsed_time != null) {
+      payload.state_elapsed_time_s = payload.state_elapsed_time;
+    }
+    if (payload.state_total_time_s == null && payload.state_total_time != null) {
+      payload.state_total_time_s = payload.state_total_time;
+    }
+    if (!payload.heat_report) {
+      payload.heat_report = buildClientHeatReport(payload);
+    }
+    return payload;
+  }
+
+  function buildClientHeatReport(data) {
+    const stateKey = normalizeStateKey(data?.state);
+    const active = Boolean(data?.heat === 'HEATING' || ['HEAT_CYCLE_PREHEAT', 'HEAT_CYCLE_ACTIVE', 'HEAT_CYCLE_FADE'].includes(stateKey));
+    const elapsed = secondsNumber(data?.state_elapsed_time_s);
+    const total = secondsNumber(data?.state_total_time_s);
+    const selectedProfile = getSelectedProfile(data);
+    const profileDuration = secondsNumber(selectedProfile?.time_s) ?? secondsNumber(data?.active_profile_time_s);
+    const duration = profileDuration ?? (active ? total : null);
+    const activeTimer = active && stateKey === 'HEAT_CYCLE_ACTIVE';
+    const remaining = activeTimer && elapsed != null && duration != null ? Math.max(0, duration - elapsed) : null;
+    const timerConfidence = activeTimer && remaining != null ? 'firmware' : active ? 'preheating' : 'inactive';
+    const current = data?.current_temperature_f;
+    const target = validHeatTargetF(data?.target_temperature_f)
+      ?? validHeatTargetF(selectedProfile?.temp_f)
+      ?? validHeatTargetF(data?.active_profile_temp_f);
+    return {
+      active,
+      phase: data?.labels?.heat || (active ? 'Heating' : 'Idle'),
+      state: data?.state,
+      selected_profile: data?.current_profile,
+      target_temp_f: target,
+      target_temp_label: formatTemperatureF(target),
+      duration_s: duration,
+      duration_label: formatSecondsLabel(duration),
+      timer_active: activeTimer,
+      firmware_elapsed_s: elapsed,
+      firmware_total_s: total,
+      timer_elapsed_s: activeTimer ? elapsed : null,
+      timer_elapsed_label: activeTimer ? formatSecondsLabel(elapsed) : null,
+      timer_remaining_s: remaining,
+      timer_remaining_label: formatSecondsLabel(remaining),
+      timer_confidence: timerConfidence,
+      timer_source: remaining != null ? 'browser_ble_firmware_state_elapsed_and_total_time' : 'browser_ble_state',
+      current_temp_f: current,
+      current_temp_label: formatTemperatureF(current),
+    };
+  }
+
+  function secondsNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, number) : null;
+  }
+
+  function isBoostActive(data) {
+    const state = normalizeStateKey(data?.state);
+    const reportPhase = normalizeStateKey(getHeatReport(data)?.phase);
+    return Boolean(data?.boost_active || state.includes('BOOST') || reportPhase.includes('BOOST'));
   }
 
   function formatLanternStatus(data, readable) {
@@ -2432,9 +3413,33 @@ const app = (() => {
     return Math.max(0, duration - elapsed);
   }
 
+  function getHeatReport(data) {
+    if (!data || typeof data !== 'object') return {};
+    return data.heat_report || buildClientHeatReport(data);
+  }
+
+  function getSelectedProfile(data = deviceState) {
+    const profiles = Array.isArray(data?.profiles) ? data.profiles : [];
+    if (!profiles.length) return null;
+    const selected = data?.current_profile;
+    return profiles.find((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(selected))
+      || profiles.find((profile) => profile?.active)
+      || null;
+  }
+
   function formatChamber(value) {
+    const code = numericCode(value);
+    const codeLabels = {
+      0: 'No chamber',
+      1: 'Classic chamber',
+      2: 'XL chamber',
+      3: '3D chamber',
+      4: 'Toad chamber',
+    };
+    if (codeLabels[code]) return codeLabels[code];
     const normalized = String(value || '').toUpperCase();
     if (!value) return '—';
+    if (normalized.includes('3D') && normalized.includes('XL')) return '3D XL chamber';
     if (normalized.includes('3D')) return '3D chamber';
     if (normalized.includes('XL')) return 'XL chamber';
     return humanizeEnum(value);
@@ -3005,21 +4010,46 @@ const app = (() => {
     syncShellClasses();
     window.addEventListener('resize', syncShellClasses, { passive: true });
     window.addEventListener('orientationchange', syncShellClasses, { passive: true });
+    document.addEventListener('visibilitychange', () => {
+      restartBrowserBlePolling();
+      if (!document.hidden && connected) {
+        if (transportMode === 'bridge' && ws?.readyState === WebSocket.OPEN) {
+          send('status');
+        } else if (transportMode === 'browser_ble') {
+          pollBrowserBleStatus();
+        }
+      }
+    });
     restoreBrowserDebugLog();
     const savedName = localStorage.getItem('puffco_device_name');
     const savedMac = localStorage.getItem('puffco_device_mac');
     bridgeUrl = normalizeBridgeUrl(localStorage.getItem('puffco_bridge_url'));
     transportMode = normalizeTransportMode(localStorage.getItem('puffco_transport_mode') || defaultTransportMode());
-    if (savedName) document.getElementById('device-name').value = savedName;
-    if (savedMac) {
-      document.getElementById('device-mac').value = savedMac;
-      revealMacFieldIfNeeded(savedMac);
+    const savedMacMode = localStorage.getItem('puffco_use_mac_address') === '1';
+    const macToggle = document.getElementById('use-mac-address');
+    if (macToggle) macToggle.checked = savedMacMode;
+    if (macToggle) macToggle.addEventListener('change', toggleMacAddressMode);
+    const identityInput = document.getElementById('device-name');
+    if (identityInput) {
+      identityInput.value = savedMacMode ? (savedMac || '') : (savedName || 'Peak');
     }
+    syncIdentityModeUI();
+    localMoodPresets = readMoodLibrary();
     updateConnectionUI(false);
     renderBridgeUI();
+    renderProfileLibrary();
 
     initAppNavigation();
+    initLabelTooltips();
     initColorControls();
+    const profileImport = document.getElementById('profile-import-file');
+    if (profileImport) {
+      profileImport.addEventListener('change', () => importProfileFile(profileImport.files?.[0]));
+    }
+    const moodImport = document.getElementById('mood-import-file');
+    if (moodImport) {
+      moodImport.addEventListener('change', () => importMoodFile(moodImport.files?.[0]));
+    }
     if (transportMode === 'bridge') {
       initWebSocket(bridgeUrl);
     } else {
@@ -3047,6 +4077,7 @@ const app = (() => {
     setTransportMode,
     connectBridge,
     toggleBleCapability,
+    toggleMacAddressMode,
     connect: connectDevice,
     disconnect: disconnectDevice,
     resyncDevice,
@@ -3056,17 +4087,33 @@ const app = (() => {
     editProfile,
     closeModal,
     saveProfile,
+    exportProfiles,
+    openProfileImport,
+    saveDeviceProfileToLibrary,
+    duplicateLocalProfile,
+    archiveLocalProfile,
+    copyLocalProfileToDevice,
+    restoreProfileBackup,
+    restoreDefaultProfiles,
     toggleLantern,
     toggleStealth,
     applyColorToProfile,
     applyLanternColor,
     setMoodPreset,
     addMoodColor,
+    saveMoodPreset,
+    duplicateMoodPreset,
+    deleteMoodPreset,
+    exportMoods,
+    openMoodImport,
+    restoreDefaultMoods,
     applyMoodToProfile,
     applyMoodToLantern,
     applyBrightness,
     updateSliderLabel,
     updateAllBrightness,
+    toggleBoostOptions,
+    saveBoostOptions,
     heat,
     stop,
     boost,

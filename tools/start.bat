@@ -1,7 +1,8 @@
 @echo off
 setlocal
 title Puffco BLE Controller
-set "ROOT=%~dp0"
+set "TOOLS_DIR=%~dp0"
+for %%I in ("%TOOLS_DIR%..") do set "ROOT=%%~fI\"
 set "APP_URL=http://127.0.0.1:8420"
 set "EMBED_PY=%ROOT%.python311\python.exe"
 set "LOCAL_PY=%ROOT%.venv-puffco\Scripts\python.exe"
@@ -54,9 +55,9 @@ if not defined PYTHON_EXE (
   exit /b 1
 )
 
-if not exist "%ROOT%web\index.html" (
-  echo  Missing web files under "%ROOT%web".
-  echo  Run this file from the PuffcoBLE folder.
+if not exist "%ROOT%index.html" (
+  echo  Missing web files under "%ROOT%".
+  echo  Run this file from the PuffcoBLE tools folder.
   echo.
   pause
   exit /b 1
@@ -98,11 +99,11 @@ start "" /B cmd /c "timeout /t 2 /nobreak >nul && start %APP_URL%"
 
 :: Start the server
 if /i "%PYTHON_EXE%"=="py" (
-  py -X utf8 "%ROOT%server.py"
+  py -X utf8 "%TOOLS_DIR%server.py"
 ) else if /i "%PYTHON_EXE%"=="py -3" (
-  py -3 -X utf8 "%ROOT%server.py"
+  py -3 -X utf8 "%TOOLS_DIR%server.py"
 ) else (
-  "%PYTHON_EXE%" -X utf8 "%ROOT%server.py"
+  "%PYTHON_EXE%" -X utf8 "%TOOLS_DIR%server.py"
 )
 
 echo.

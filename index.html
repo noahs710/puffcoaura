@@ -12,6 +12,9 @@
   <title>Puffco Controller</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="style.css" />
+  <style>
+    @media (min-width: 701px) { .app-menu { display: none !important; } }
+  </style>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2307070c'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2300d6b4' stroke-width='7'/%3E%3Cpath d='M22 36c8 8 22 3 22-8' fill='none' stroke='%23f6a623' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E" />
 </head>
 <body>
@@ -25,14 +28,25 @@
       <div class="connection-badge" id="connection-badge">
         <span class="dot"></span>
         <span id="connection-text">Disconnected</span>
+        <button class="ble-capability" id="ble-capability" type="button" onclick="app.toggleBleCapability()" aria-expanded="false" aria-live="polite">
+          <div class="capability-ring" id="ble-capability-ring"></div>
+          <div class="capability-summary">
+            <div class="capability-title" id="ble-capability-title">Checking browser Bluetooth</div>
+            <div class="capability-hint" id="ble-capability-hint">Click for details</div>
+          </div>
+          <div class="capability-details" id="ble-capability-details">
+            <div class="capability-copy" id="ble-capability-copy">Direct web BLE needs a supported browser and a secure page.</div>
+            <div class="capability-tags" id="ble-capability-tags"></div>
+          </div>
+        </button>
       </div>
     </header>
 
     <nav class="app-menu" aria-label="App sections">
       <a href="#connect-card">Connect</a>
       <a href="#status-card">Status</a>
-      <a href="#heat-control-card" class="connected-only-nav">Heat</a>
       <a href="#profiles-card" class="connected-only-nav">Profiles</a>
+      <a href="#heat-control-card" class="connected-only-nav">Heat</a>
       <a href="#advanced-panel">Advanced</a>
     </nav>
 
@@ -60,26 +74,15 @@
       <div class="bridge-note" id="bridge-note">
         Browser Bluetooth runs online from HTTPS, including GitHub Pages. Use the local bridge only as a fallback.
       </div>
-      <button class="ble-capability" id="ble-capability" type="button" onclick="app.toggleBleCapability()" aria-expanded="false" aria-live="polite">
-        <div class="capability-ring" id="ble-capability-ring"></div>
-        <div class="capability-summary">
-          <div class="capability-title" id="ble-capability-title">Checking browser Bluetooth</div>
-          <div class="capability-hint" id="ble-capability-hint">Click for details</div>
-        </div>
-        <div class="capability-details" id="ble-capability-details">
-          <div class="capability-copy" id="ble-capability-copy">Direct web BLE needs a supported browser and a secure page.</div>
-          <div class="capability-tags" id="ble-capability-tags"></div>
-        </div>
-      </button>
       <div class="connect-section">
-        <div class="input-group">
-          <label for="device-name">Device Name</label>
+        <div class="input-group" id="device-identity-group">
+          <label for="device-name" id="device-identity-label">Device Name</label>
           <input type="text" id="device-name" placeholder="Peak" value="Peak" />
         </div>
-        <details class="input-group optional-device-field" id="device-mac-details">
-          <summary>Use MAC address</summary>
-          <input type="text" id="device-mac" placeholder="F0:AD:4E:..." aria-label="Optional MAC address" />
-        </details>
+        <label class="checkbox-row optional-device-field" id="device-mac-row">
+          <input type="checkbox" id="use-mac-address" onclick="app.toggleMacAddressMode()" onchange="app.toggleMacAddressMode()" />
+          <span>Use MAC address</span>
+        </label>
         <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
           Connect
         </button>
@@ -175,6 +178,10 @@
 
         <div class="status-grid mt-md">
           <div class="stat-item">
+            <div class="stat-label">Device</div>
+            <div class="stat-value" id="stat-device-model">—</div>
+          </div>
+          <div class="stat-item">
             <div class="stat-label">State</div>
             <div class="stat-value" id="stat-state">—</div>
           </div>
@@ -206,9 +213,40 @@
             <div class="stat-label">Chamber</div>
             <div class="stat-value" id="stat-chamber">—</div>
           </div>
+          <div class="stat-item">
+            <div class="stat-label">Firmware</div>
+            <div class="stat-value" id="stat-firmware-inline">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Last Connected</div>
+            <div class="stat-value" id="stat-last-connected">—</div>
+          </div>
         </div>
+        <div class="capability-strip" id="capability-strip" aria-live="polite"></div>
         <div id="stat-charge" class="hidden" aria-hidden="true">—</div>
       </div>
+    </section>
+
+    <!-- Profiles -->
+    <section class="card connected-only" id="profiles-card">
+      <div class="card-header">
+        <h2><span class="icon icon-profile"></span> Profiles</h2>
+        <div class="inline-actions">
+          <button class="btn btn-sm btn-secondary" onclick="app.exportProfiles()">Export</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.openProfileImport()">Import</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.restoreProfileBackup()">Restore Backup</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.restoreDefaultProfiles()">Defaults</button>
+          <input class="hidden" id="profile-import-file" type="file" accept="application/json,.json" />
+        </div>
+      </div>
+      <div class="library-toolbar">
+        <span class="stat-label">Device slots</span>
+        <span class="stat-label">Local library</span>
+      </div>
+      <div class="profiles-grid" id="profiles-grid">
+        <!-- Populated by JS -->
+      </div>
+      <div class="profile-library-grid" id="profile-library-grid"></div>
     </section>
 
     <div class="section-grid connected-only" id="controls-grid">
@@ -219,8 +257,21 @@
         </div>
         <div class="heat-controls">
           <button class="btn btn-heat" id="btn-heat" onclick="app.heat()">Start Heat</button>
-          <button class="btn btn-secondary" id="btn-boost" onclick="app.boost()">Boost</button>
-          <button class="btn btn-danger" id="btn-stop" onclick="app.stop()">Stop</button>
+          <button class="btn btn-secondary hidden" id="btn-boost" onclick="app.boost()">Boost</button>
+          <button class="btn btn-secondary hidden" id="btn-extend" disabled title="Extend is not exposed by this BLE bridge yet">Extend</button>
+          <button class="btn btn-danger hidden" id="btn-stop" onclick="app.stop()">Stop</button>
+          <button class="btn btn-secondary" id="btn-boost-options" onclick="app.toggleBoostOptions()">Boost Options</button>
+        </div>
+        <div class="boost-options hidden" id="boost-options-panel">
+          <div class="input-group">
+            <label for="boost-temp-delta">Boost Temp</label>
+            <input type="number" id="boost-temp-delta" min="0" max="120" step="1" placeholder="+10" />
+          </div>
+          <div class="input-group">
+            <label for="boost-time-delta">Boost Time</label>
+            <input type="number" id="boost-time-delta" min="0" max="180" step="1" placeholder="+30" />
+          </div>
+          <button class="btn btn-primary" id="btn-save-boost-options" onclick="app.saveBoostOptions()">Save Boost</button>
         </div>
         <div class="heat-indicator mt-sm" id="heat-indicator" aria-live="polite">
           <span class="heat-dot"></span>
@@ -229,14 +280,19 @@
         <div class="heat-live-panel" id="heat-live-panel" aria-live="polite">
           <div>
             <span class="heat-live-label">Timer</span>
-            <strong id="heat-countdown">--</strong>
+            <strong id="heat-countdown">Idle</strong>
           </div>
           <div class="heat-live-details">
             <span id="heat-live-phase">Idle</span>
-            <span id="heat-live-current">Current --</span>
-            <span id="heat-live-target">Target --</span>
+            <span id="heat-live-current">Current unavailable</span>
+            <span id="heat-live-target">Target unavailable</span>
             <span id="heat-live-meta">Waiting for device</span>
           </div>
+        </div>
+        <div class="session-metrics" id="session-metrics">
+          <span><b>Remaining</b><i id="session-remaining">—</i></span>
+          <span><b>Boost</b><i id="session-boost">—</i></span>
+          <span><b>Chamber</b><i id="session-chamber">—</i></span>
         </div>
       </section>
 
@@ -256,20 +312,11 @@
           </div>
           <div class="inline-actions">
             <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Show Battery</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.applyMoodToLantern()">Apply Mood</button>
           </div>
         </div>
       </section>
     </div>
-
-    <!-- Profiles -->
-    <section class="card connected-only" id="profiles-card">
-      <div class="card-header">
-        <h2><span class="icon icon-profile"></span> Profiles</h2>
-      </div>
-      <div class="profiles-grid" id="profiles-grid">
-        <!-- Populated by JS -->
-      </div>
-    </section>
 
     <!-- Brightness -->
     <section class="card connected-only" id="brightness-card">
@@ -667,7 +714,7 @@
         <div class="profile-editor-title">
           <span id="modal-kicker">Profile 0</span>
           <input type="text" id="modal-name" placeholder="Profile name" maxlength="31" />
-          <p id="modal-summary">520°F · 60s · No animation</p>
+          <p id="modal-summary">Profile details</p>
         </div>
       </div>
 
@@ -702,6 +749,16 @@
               <div class="stat-label">Mood Light</div>
               <p>Official-style preset controls saved with this profile.</p>
             </div>
+          </div>
+          <div class="mood-library-actions">
+            <input type="text" id="mood-name" placeholder="Mood preset name" maxlength="40" />
+            <button class="btn btn-sm btn-secondary" onclick="app.saveMoodPreset()">Save Mood</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.duplicateMoodPreset()">Duplicate</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.deleteMoodPreset()">Delete</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.exportMoods()">Export</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.openMoodImport()">Import</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.restoreDefaultMoods()">Defaults</button>
+            <input class="hidden" id="mood-import-file" type="file" accept="application/json,.json" />
           </div>
           <div class="mood-presets" id="mood-presets"></div>
           <div class="mood-editor-grid">

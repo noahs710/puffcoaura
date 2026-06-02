@@ -1,7 +1,7 @@
 // Puffco BLE Controller — GitHub Pages app shell cache
 // Keeps the static UI available and avoids stale assets by versioning the cache.
 
-const CACHE_NAME = 'puffco-ble-shell-v2026-06-01-23';
+const CACHE_NAME = 'puffco-ble-shell-v2026-06-02-07';
 const APP_SHELL = [
   './',
   './index.html',

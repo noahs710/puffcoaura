@@ -6,7 +6,8 @@ Run with:
 
 The server intentionally avoids FastAPI/Pydantic so it can run from the
 installed Python on this machine while reusing the existing PuffcoBLE package.
-It serves ./web over HTTP and exposes a WebSocket control channel.
+It serves the repository root web assets over HTTP and exposes a WebSocket
+control channel.
 """
 
 from __future__ import annotations
@@ -29,9 +30,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-ROOT = Path(__file__).resolve().parent
-WEB_DIR = ROOT / "web"
+TOOLS_DIR = Path(__file__).resolve().parent
+ROOT = TOOLS_DIR.parent
+WEB_DIR = ROOT
 VENDORED_SITE = ROOT / ".venv-puffco" / "Lib" / "site-packages"
+sys.path.insert(0, str(TOOLS_DIR))
 if VENDORED_SITE.exists():
     sys.path.insert(0, str(VENDORED_SITE))
 
@@ -156,6 +159,7 @@ FAST_OFFICIAL_ATTRIBUTES = (
     "chargeState",
     "currentTemperature",
     "targetTemperature",
+    "chamberType",
     "operatingState",
     "stateElapsedTime",
     "stateTotalTime",
@@ -164,6 +168,11 @@ FAST_OFFICIAL_ATTRIBUTES = (
     "stealth",
     "approxDabsRemaining",
     "dabsPerDay",
+    "brightness",
+    "boostTemperature",
+    "boostTime",
+    "lanternTime",
+    "maxBatteryLevel",
 )
 
 
@@ -806,6 +815,16 @@ def seconds_value(value: Any) -> int | None:
     return seconds if seconds >= 0 else None
 
 
+def valid_heat_target_f(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        target = float(value)
+    except (TypeError, ValueError):
+        return None
+    return target if target >= 200 else None
+
+
 def display_value(value: Any) -> str:
     if value is None or value == "":
         return "Unknown"
@@ -863,7 +882,7 @@ def profile_name_bytes(value: str) -> bytes:
 
 MOOD_PRESETS: dict[str, dict[str, Any]] = {
     "no_animation": {
-        "name": "No animation",
+        "name": "Static color",
         "desc": "Split your Peak into different color regions",
         "tag": "pikaled2-no-animation-mood-light",
         "min_colors": 1,
@@ -1286,6 +1305,36 @@ def decode_lorax_bytes(raw: bytes, data_type: str) -> Any:
     return value
 
 
+def version_bytes_label(raw: bytes | bytearray | None) -> str | None:
+    if not raw:
+        return None
+    parts = list(bytes(raw)[:4])
+    while len(parts) > 2 and parts[-1] == 0:
+        parts.pop()
+    return ".".join(str(part) for part in parts) if parts else None
+
+
+async def read_version_label(path: str) -> str | None:
+    if not device:
+        return None
+    try:
+        raw = bytes(await device.read_short(path, 0, 4))
+    except Exception:
+        return None
+    return version_bytes_label(raw)
+
+
+async def read_text_label(path: str, size: int = 64) -> str | None:
+    if not device:
+        return None
+    try:
+        raw = bytes(await device.read_short(path, 0, size))
+    except Exception:
+        return None
+    value = decode_lorax_bytes(raw, "text")
+    return str(value).strip() or None
+
+
 def nested_assign(target: dict[str, Any], key: str, value: Any) -> None:
     if "." not in key:
         target[key] = value
@@ -1351,7 +1400,7 @@ def official_attribute_readable(attributes: dict[str, Any]) -> dict[str, Any]:
     current_f = fahrenheit_from_celsius(float(current_c)) if isinstance(current_c, (int, float)) else None
     target_f = (
         fahrenheit_from_celsius(float(target_c))
-        if isinstance(target_c, (int, float)) and float(target_c) > 0
+        if isinstance(target_c, (int, float)) and float(target_c) >= 80
         else None
     )
     return {
@@ -2003,16 +2052,17 @@ def build_heat_report(data: dict[str, Any]) -> dict[str, Any]:
 
     firmware_elapsed = seconds_value(data.get("state_elapsed_time_s"))
     firmware_total = seconds_value(data.get("state_total_time_s"))
-    duration = firmware_total if firmware_total is not None else seconds_value(data.get("active_profile_time_s"))
+    profile_duration = seconds_value(data.get("active_profile_time_s"))
+    duration = profile_duration if profile_duration is not None else (firmware_total if active else None)
     started_at = heat_session.get("started_at")
     timer_started_at = heat_session.get("timer_started_at")
     timer_elapsed = None
     timer_remaining = None
     timer_confidence = "inactive"
     if active and state_key == "HEAT_CYCLE_ACTIVE":
-        if firmware_elapsed is not None and firmware_total is not None:
+        if firmware_elapsed is not None and duration is not None:
             timer_elapsed = max(0, firmware_elapsed)
-            timer_remaining = max(0, firmware_total - firmware_elapsed)
+            timer_remaining = max(0, duration - firmware_elapsed)
             timer_confidence = "firmware"
         elif timer_started_at and duration is not None:
             timer_elapsed = max(0, int((now - timer_started_at).total_seconds()))
@@ -2030,7 +2080,7 @@ def build_heat_report(data: dict[str, Any]) -> dict[str, Any]:
         if live_temp.get("ok")
         else data.get("current_temperature_f")
     )
-    target_temp_f = data.get("target_temperature_f") or data.get("active_profile_temp_f")
+    target_temp_f = valid_heat_target_f(data.get("target_temperature_f")) or valid_heat_target_f(data.get("active_profile_temp_f"))
     return {
         "active": active,
         "phase": phase or "Idle",
@@ -2070,6 +2120,40 @@ def build_heat_report(data: dict[str, Any]) -> dict[str, Any]:
             "when available: /p/app/htr/temp, /p/app/htr/tcmd, /p/app/stat/elap, and /p/app/stat/tott."
         ),
     }
+
+
+def apply_selected_profile_defaults(data: dict[str, Any]) -> None:
+    profiles = data.get("profiles")
+    if not isinstance(profiles, list):
+        return
+    try:
+        selected = int(data.get("current_profile"))
+    except (TypeError, ValueError):
+        selected = None
+    selected_profile = None
+    for fallback_index, profile in enumerate(profiles):
+        if not isinstance(profile, dict):
+            continue
+        try:
+            profile_index = int(profile.get("index", fallback_index))
+        except (TypeError, ValueError):
+            profile_index = fallback_index
+        if profile_index == selected:
+            selected_profile = profile
+            break
+    if selected_profile is None:
+        selected_profile = next(
+            (profile for profile in profiles if isinstance(profile, dict) and profile.get("active")),
+            None,
+        )
+    if not isinstance(selected_profile, dict):
+        return
+    if selected_profile.get("name"):
+        data["active_profile_name"] = selected_profile.get("name")
+    if selected_profile.get("temp_f") is not None:
+        data["active_profile_temp_f"] = selected_profile.get("temp_f")
+    if selected_profile.get("time_s") is not None:
+        data["active_profile_time_s"] = selected_profile.get("time_s")
 
 
 async def send_json(ws: Any, msg: dict[str, Any]) -> None:
@@ -2126,10 +2210,16 @@ async def device_snapshot(*, full: bool = True) -> dict[str, Any]:
             data["name"] = fmt(await safe(device.get_device_name))
         if full or not data.get("firmware"):
             data["firmware"] = fmt(await safe(device.get_software_version))
+        if not data.get("firmware"):
+            data["firmware"] = await read_version_label("/p/sys/fw/ver")
         if full or not data.get("bootloader"):
             data["bootloader"] = fmt(await safe(device.get_bootloader_version))
+        if not data.get("bootloader"):
+            data["bootloader"] = await read_version_label("/p/sys/fw/bver")
         if full or not data.get("serial"):
             data["serial"] = fmt(await safe(device.get_serial_number))
+        if not data.get("serial"):
+            data["serial"] = await read_text_label("/p/sys/hw/ser")
 
         battery_status = await read_battery_status()
         data["battery"] = battery_status.get("percent")
@@ -2177,6 +2267,8 @@ async def device_snapshot(*, full: bool = True) -> dict[str, Any]:
             data["battery_source_type"] = "official_battSoc_float32"
         if official_attrs.get("chargeState") is not None:
             data["charge"] = official_attrs.get("chargeState")
+        if official_attrs.get("chamberType") is not None:
+            data["chamber"] = official_attrs.get("chamberType")
         if official_attrs.get("operatingState") and not data.get("state"):
             data["state"] = official_attrs.get("operatingState")
             data["heat"] = heat_status(data["state"])
@@ -2205,7 +2297,7 @@ async def device_snapshot(*, full: bool = True) -> dict[str, Any]:
         data["target_temperature_c"] = official_attrs.get("targetTemperature")
         if isinstance(data.get("current_temperature_c"), (int, float)):
             data["current_temperature_f"] = round(fahrenheit_from_celsius(float(data["current_temperature_c"])), 1)
-        if isinstance(data.get("target_temperature_c"), (int, float)) and float(data["target_temperature_c"]) > 0:
+        if isinstance(data.get("target_temperature_c"), (int, float)) and float(data["target_temperature_c"]) >= 80:
             data["target_temperature_f"] = round(fahrenheit_from_celsius(float(data["target_temperature_c"])), 1)
         else:
             data["target_temperature_f"] = None
@@ -2253,7 +2345,6 @@ async def device_snapshot(*, full: bool = True) -> dict[str, Any]:
             data["active_profile_time_s"] = await safe(device.get_profile_time)
         data["live_temperature_source"] = live_temperature_source if live_temperature_source.get("path") else None
         data["live_temperature"] = await read_live_temperature()
-        data["heat_report"] = build_heat_report(data)
 
         if full or not data.get("profiles"):
             profiles = []
@@ -2275,6 +2366,8 @@ async def device_snapshot(*, full: bool = True) -> dict[str, Any]:
                 profile["active"] = profile.get("index") == data.get("current_profile")
                 labels = profile.setdefault("labels", {})
                 labels["status"] = "Active" if profile["active"] else "Inactive"
+        apply_selected_profile_defaults(data)
+        data["heat_report"] = build_heat_report(data)
     except Exception as exc:
         data["error"] = f"{type(exc).__name__}: {exc}"
 
@@ -2893,6 +2986,26 @@ async def handle_boost(_params: dict[str, Any]) -> dict[str, Any]:
     return {"type": "ok", "message": "Boost sent", "data": await device_snapshot(full=False)}
 
 
+async def handle_set_boost_options(params: dict[str, Any]) -> dict[str, Any]:
+    if not device or not device_connected:
+        return {"type": "error", "message": "Device is not connected"}
+    temp_f = params.get("temp_delta_f", params.get("temp_f"))
+    time_s = params.get("time_s", params.get("seconds"))
+    try:
+        temp_f_value = float(temp_f)
+        time_value = float(time_s)
+    except (TypeError, ValueError):
+        return {"type": "error", "message": "Boost options require temp_delta_f and time_s numbers"}
+    if not 0 <= temp_f_value <= 120:
+        return {"type": "error", "message": "Boost temperature must be 0-120 F"}
+    if not 0 <= time_value <= 180:
+        return {"type": "error", "message": "Boost time must be 0-180 seconds"}
+    await device.write_short("/p/app/thc/btmp", 0, 0, struct.pack("<f", temp_f_value / 1.8))
+    await device.write_short("/p/app/thc/btim", 0, 0, struct.pack("<f", time_value))
+    snapshot = await device_snapshot(full=False)
+    return {"type": "ok", "message": f"Boost options set to +{round(temp_f_value)} F / +{round(time_value)}s", "data": snapshot}
+
+
 async def handle_power(params: dict[str, Any]) -> dict[str, Any]:
     cmd = params.get("cmd", "sleep")
     if cmd == "sleep":
@@ -2943,6 +3056,7 @@ COMMANDS = {
     "heat": handle_heat,
     "stop": handle_stop,
     "boost": handle_boost,
+    "set_boost_options": handle_set_boost_options,
     "power": handle_power,
 }
 NO_DEVICE_COMMANDS = {"connect", "disconnect", "scan_devices", "status", "lorax_registry"}
