@@ -2689,6 +2689,8 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .debug-console-meta {
+  grid-auto-flow: column;
+  justify-items: end;
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
