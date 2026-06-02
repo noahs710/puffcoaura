@@ -16,6 +16,7 @@ const app = (() => {
   let connectPending = false;
   let scanPending = false;
   let editingProfileIndex = null;
+  let editingLocalProfileId = null;
   let heatCommandPending = null;
   let renderTimer = null;
   let lastDeviceSnapshot = null;
@@ -47,6 +48,7 @@ const app = (() => {
   let loraxPaths = [];
   let selectedPathEntry = null;
   let registryLoaded = false;
+  let registryRequestInFlight = false;
   let loraxActions = {};
 
   // Preset color palette
@@ -328,6 +330,18 @@ const app = (() => {
     }
     updateBleCapabilityPanel();
     renderBrowserDebugSummary();
+    updateScanButtonVisibility();
+  }
+
+  function scanAvailableInCurrentMode() {
+    return transportMode === 'browser_ble';
+  }
+
+  function updateScanButtonVisibility() {
+    const btnScan = document.getElementById('btn-scan');
+    if (!btnScan) return;
+    btnScan.classList.toggle('hidden', connected || !scanAvailableInCurrentMode());
+    btnScan.disabled = connected || !scanAvailableInCurrentMode() || scanPending;
   }
 
   function renderBrowserDebugSummary() {
@@ -823,10 +837,7 @@ const app = (() => {
       if (loraxEmpty) loraxEmpty.classList.add('hidden');
       if (loraxContent) loraxContent.classList.remove('hidden');
 
-      const advancedPanel = document.getElementById('advanced-panel');
-      if (!registryLoaded && advancedPanel?.open) {
-        send('lorax_registry');
-      }
+      requestLoraxRegistry();
     } else {
       updateStatusUI(null);
       updateProfilesUI([], null);
@@ -999,7 +1010,7 @@ const app = (() => {
         btnConnect.innerHTML = 'Connect';
         btnConnect.disabled = false;
       }
-      if (btnScan) btnScan.classList.add('hidden');
+      updateScanButtonVisibility();
       if (btnDisconnect) btnDisconnect.classList.remove('hidden');
 
       if (nameInput) {
@@ -1027,10 +1038,9 @@ const app = (() => {
         btnConnect.disabled = false;
       }
       if (btnScan) {
-        btnScan.classList.remove('hidden');
         btnScan.textContent = 'Scan';
-        btnScan.disabled = false;
       }
+      updateScanButtonVisibility();
       if (btnDisconnect) btnDisconnect.classList.add('hidden');
 
       if (nameInput) {
@@ -1056,6 +1066,10 @@ const app = (() => {
     return Boolean(document.getElementById('use-mac-address')?.checked);
   }
 
+  function isMacAddressString(value) {
+    return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(value || '').trim());
+  }
+
   function syncIdentityModeUI() {
     const macMode = usingMacAddress();
     const label = document.getElementById('device-identity-label');
@@ -1068,8 +1082,18 @@ const app = (() => {
   }
 
   function toggleMacAddressMode() {
+    const input = document.getElementById('device-name');
+    const macMode = usingMacAddress();
+    const current = input?.value.trim() || '';
+    if (macMode) {
+      if (current && !isMacAddressString(current)) localStorage.setItem('puffco_device_name', current);
+      if (input) input.value = localStorage.getItem('puffco_device_mac') || '';
+    } else {
+      if (isMacAddressString(current)) localStorage.setItem('puffco_device_mac', current);
+      if (input) input.value = localStorage.getItem('puffco_device_name') || 'Peak';
+    }
+    localStorage.setItem('puffco_use_mac_address', macMode ? '1' : '0');
     syncIdentityModeUI();
-    localStorage.setItem('puffco_use_mac_address', usingMacAddress() ? '1' : '0');
   }
 
   function currentDeviceIdentity() {
@@ -1408,7 +1432,7 @@ const app = (() => {
     setText('stat-heat-timer', timer);
     setText('stat-profile', profileName);
     setText('stat-battery-source', formatBatterySource(data.battery_source, data.battery_source_type));
-    setText('stat-charge-eta', readable.chargeEstimatedTimeToFull || formatSecondsLabel(data.charge_estimated_time_to_full_s) || 'Not reported');
+    setText('stat-charge-eta', formatChargeEta(data, readable));
     setText('stat-boost', formatBoostSetting(data, readable));
     setText('stat-lantern-time', formatLanternStatus(data, readable));
     setText('stat-low-battery', readable.lowBatteryIndicator || formatBooleanLabel(data.low_battery_indicator) || '—');
@@ -1754,8 +1778,31 @@ const app = (() => {
     return { ok: true };
   }
 
+  function normalizeProfileMood(profile) {
+    const source = profile?.mood || (profile?.color ? extractProfileMood(profile.color) : null);
+    if (!source) return null;
+    const colors = (Array.isArray(source.colors) ? source.colors : [])
+      .flatMap(color => extractProfileColors({ color }))
+      .filter(color => /^#[0-9a-f]{6}$/i.test(color));
+    const preset = source.sourcePreset || source.preset || 'no_animation';
+    const tempo = Number(source.tempoFrac ?? source.tempo_frac);
+    const tempoFrac = Number.isFinite(tempo) ? Math.max(0, Math.min(1, tempo)) : 0.5;
+    const dynamicInhale = Boolean(source.dynamicInhale ?? source.dynamic_inhale);
+    const presetName = MOOD_PRESETS.find(item => item.id === preset)?.name || source.name || 'Static color';
+    return {
+      preset,
+      name: normalizeMoodDisplayName(presetName),
+      colors: colors.length ? [...new Set(colors)] : ['#ff0000'],
+      tempoFrac,
+      tempo_frac: tempoFrac,
+      dynamicInhale,
+      dynamic_inhale: dynamicInhale,
+      sourcePreset: preset,
+    };
+  }
+
   function profileForStorage(profile, source = 'device') {
-    const mood = isOfficialMoodPayload(profile.color) ? extractProfileMood(profile.color) : null;
+    const mood = normalizeProfileMood(profile);
     return {
       id: profile.id || `${source}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       source,
@@ -1831,14 +1878,18 @@ const app = (() => {
       return;
     }
     grid.innerHTML = visible.map((profile) => {
-      const color = extractProfileColor(profile.color || { color: profile.mood?.colors?.[0] });
-      const moodName = profile.mood?.name || profile.mood?.preset || 'Static color';
+      const mood = normalizeProfileMood(profile);
+      const colors = mood?.colors?.length ? mood.colors : extractProfileColors(profile.color);
+      const color = extractProfileColor({ color: colors[0] });
+      const background = profileColorBackground(colors);
+      const moodName = mood?.name || mood?.preset || 'Static color';
       return `
-        <div class="profile-card" style="--profile-color:${escAttr(color)}">
+        <div class="profile-card local-profile-card" data-local-profile-id="${escAttr(profile.id)}" draggable="true" style="--profile-color:${escAttr(color)}">
           <div class="profile-name">
             <span class="active-indicator"></span>
+            <span class="profile-drag-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
             <span>${escHtml(profile.name || 'Local profile')}</span>
-            <div class="profile-color-swatch" style="background:${escAttr(color)};margin-left:auto;"></div>
+            <div class="profile-color-swatch" style="background:${escAttr(background)};margin-left:auto;"></div>
           </div>
           <div class="profile-meta">
             <span>${escHtml(formatProfileTemperature(profile.temp_f))}</span>
@@ -1847,13 +1898,57 @@ const app = (() => {
             <span class="profile-sync-badge warn">Local</span>
           </div>
           <div class="profile-actions">
-            <button class="btn btn-sm btn-secondary" onclick="app.copyLocalProfileToDevice('${escAttr(profile.id)}')">Copy to Slot</button>
-            <button class="btn btn-sm btn-secondary" onclick="app.duplicateLocalProfile('${escAttr(profile.id)}')">Duplicate</button>
-            <button class="btn btn-sm btn-secondary" onclick="app.archiveLocalProfile('${escAttr(profile.id)}')">Archive</button>
+            <button class="btn btn-sm btn-secondary" data-action="copy" data-profile-id="${escAttr(profile.id)}">Copy to Slot</button>
+            <button class="btn btn-sm btn-secondary" data-action="archive" data-profile-id="${escAttr(profile.id)}">Archive</button>
           </div>
         </div>
       `;
     }).join('');
+    bindProfileLibraryCards(grid);
+  }
+
+  function bindProfileLibraryCards(grid) {
+    grid.querySelectorAll('.local-profile-card').forEach((card) => {
+      card.addEventListener('click', (event) => {
+        const button = event.target.closest('button');
+        if (button) {
+          const id = button.dataset.profileId;
+          if (button.dataset.action === 'copy') copyLocalProfileToDevice(id);
+          if (button.dataset.action === 'archive') archiveLocalProfile(id);
+          return;
+        }
+        editLocalProfile(card.dataset.localProfileId);
+      });
+      card.addEventListener('dragstart', (event) => {
+        card.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', card.dataset.localProfileId);
+      });
+      card.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+      });
+      card.addEventListener('drop', (event) => {
+        event.preventDefault();
+        const fromId = event.dataTransfer.getData('text/plain');
+        const toId = card.dataset.localProfileId;
+        reorderLocalProfiles(fromId, toId);
+      });
+      card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    });
+  }
+
+  function reorderLocalProfiles(fromId, toId) {
+    if (!fromId || !toId || fromId === toId) return;
+    const library = readProfileLibrary().profiles;
+    const fromIndex = library.findIndex((profile) => profile.id === fromId);
+    if (fromIndex < 0) return;
+    const [moved] = library.splice(fromIndex, 1);
+    const toIndex = library.findIndex((profile) => profile.id === toId);
+    if (toIndex < 0) return;
+    library.splice(toIndex, 0, moved);
+    writeProfileLibrary(library);
+    renderProfileLibrary();
   }
 
   function duplicateLocalProfile(id) {
@@ -1871,6 +1966,62 @@ const app = (() => {
     ));
     writeProfileLibrary(library);
     renderProfileLibrary();
+  }
+
+  function editLocalProfile(id) {
+    const profile = readProfileLibrary().profiles.find((item) => item.id === id);
+    if (!profile) return;
+    editingProfileIndex = null;
+    editingLocalProfileId = id;
+    const modal = document.getElementById('profile-modal');
+    modal?.classList.add('local-profile-edit');
+    document.getElementById('modal-kicker').textContent = 'Local profile';
+    document.getElementById('modal-name').value = profile.name || '';
+    document.getElementById('modal-temp').value = profile.temp_f ?? '';
+    document.getElementById('modal-time').value = profile.time_s ?? '';
+    document.getElementById('modal-index').value = '';
+
+    const mood = normalizeProfileMood(profile) || extractProfileMood(profile.color);
+    moodEditor.preset = mood.preset || 'no_animation';
+    moodEditor.colors = mood.colors?.length ? mood.colors.slice() : ['#ff0000'];
+    moodEditor.tempoFrac = Number.isFinite(Number(mood.tempoFrac)) ? Number(mood.tempoFrac) : 0.5;
+    moodEditor.dynamicInhale = Boolean(mood.dynamicInhale);
+    syncPickerToMoodColor();
+    renderMoodControls();
+    renderModalSummary();
+    document.getElementById('modal-select').checked = false;
+
+    modal?.classList.add('visible');
+  }
+
+  function saveLocalProfileFromModal() {
+    const library = readProfileLibrary().profiles;
+    const index = library.findIndex((profile) => profile.id === editingLocalProfileId);
+    if (index < 0) return;
+    const name = document.getElementById('modal-name').value.trim() || 'Local profile';
+    const temp = parseFloat(document.getElementById('modal-temp').value);
+    const time = parseFloat(document.getElementById('modal-time').value);
+    const mood = moodParams();
+    if (!mood) return;
+    const profile = {
+      ...library[index],
+      name,
+      temp_f: temp,
+      time_s: time,
+      color: null,
+      mood: normalizeProfileMood({ mood }),
+      saved_at: new Date().toISOString(),
+    };
+    const validation = validateProfile(profile);
+    if (!validation.ok) {
+      toast(validation.reason, 'error');
+      return;
+    }
+    library[index] = profile;
+    writeProfileLibrary(library);
+    renderProfileLibrary();
+    closeModal();
+    toast('Local profile updated', 'success');
   }
 
   function copyLocalProfileToDevice(id) {
@@ -1896,12 +2047,13 @@ const app = (() => {
       temp_f: Number(profile.temp_f),
       time_s: Number(profile.time_s),
     };
-    if (profile.mood) {
+    const mood = normalizeProfileMood(profile);
+    if (mood) {
       params.mood_light = {
-        preset: profile.mood.sourcePreset || profile.mood.preset,
-        colors: profile.mood.colors,
-        tempo_frac: profile.mood.tempoFrac ?? profile.mood.tempo_frac ?? 0.5,
-        dynamic_inhale: profile.mood.dynamicInhale ?? profile.mood.dynamic_inhale ?? false,
+        preset: mood.sourcePreset || mood.preset,
+        colors: mood.colors,
+        tempo_frac: mood.tempoFrac ?? mood.tempo_frac ?? 0.5,
+        dynamic_inhale: mood.dynamicInhale ?? mood.dynamic_inhale ?? false,
       };
     }
     send('set_profile', params);
@@ -2388,9 +2540,11 @@ const app = (() => {
 
   function editProfile(index) {
     editingProfileIndex = index;
+    editingLocalProfileId = null;
     const profile = findProfile(index);
     if (!profile) return;
 
+    document.getElementById('profile-modal')?.classList.remove('local-profile-edit');
     document.getElementById('modal-kicker').textContent = `Profile ${index}`;
     document.getElementById('modal-name').value = profile.name || '';
     document.getElementById('modal-temp').value = profile.temp_f ?? '';
@@ -2416,11 +2570,18 @@ const app = (() => {
   }
 
   function closeModal() {
-    document.getElementById('profile-modal').classList.remove('visible');
+    const modal = document.getElementById('profile-modal');
+    modal?.classList.remove('visible');
+    modal?.classList.remove('local-profile-edit');
     editingProfileIndex = null;
+    editingLocalProfileId = null;
   }
 
   function saveProfile(forceSelect = false) {
+    if (editingLocalProfileId) {
+      saveLocalProfileFromModal();
+      return;
+    }
     const index = parseInt(document.getElementById('modal-index').value);
     const name = document.getElementById('modal-name').value.trim() || null;
     const tempStr = document.getElementById('modal-temp').value;
@@ -2652,7 +2813,7 @@ const app = (() => {
   }
 
   function scanDevices() {
-    if (scanPending || connected) return;
+    if (!scanAvailableInCurrentMode() || scanPending || connected) return;
     const button = document.getElementById('btn-scan');
     const results = document.getElementById('device-scan-results');
     scanPending = true;
@@ -2674,8 +2835,8 @@ const app = (() => {
     const button = document.getElementById('btn-scan');
     if (button) {
       button.textContent = 'Scan';
-      button.disabled = connected;
     }
+    updateScanButtonVisibility();
   }
 
   function handleDeviceScan(data) {
@@ -3334,7 +3495,7 @@ const app = (() => {
 
   function normalizeStateKey(value) {
     if (value == null || value === '') return '';
-    const compact = String(value).trim().toUpperCase().replace(/[\s.-]+/g, '_');
+    const compact = String(value).trim().toUpperCase().replace(/[\s.\/-]+/g, '_');
     const noSep = compact.replace(/_/g, '');
     const aliases = {
       INITMEMORY: 'INIT_MEMORY',
@@ -3379,6 +3540,17 @@ const app = (() => {
       TEMPSTOP: 'Charging paused',
     };
     return labels[normalized] || humanizeEnum(value);
+  }
+
+  function formatChargeEta(data = {}, readable = {}) {
+    const chargeLabel = formatCharge(data.charge ?? readable.charge);
+    const chargeKey = normalizeStateKey(chargeLabel);
+    if (['ON_BATTERY', 'NOT_CHARGING', 'DONE_DISCONNECTED'].includes(chargeKey)) return 'Not charging';
+    if (chargeKey === 'FULL') return 'Full';
+    const readableEta = readable.chargeEstimatedTimeToFull;
+    if (readableEta && !/inf/i.test(String(readableEta))) return readableEta;
+    const seconds = Number(data.charge_estimated_time_to_full_s);
+    return Number.isFinite(seconds) && seconds >= 0 ? formatSecondsLabel(seconds) : 'Not reported';
   }
 
   function chargeClass(value) {
@@ -3497,10 +3669,19 @@ const app = (() => {
       btn.disabled = true;
       btn.textContent = 'Loading...';
     }
-    send('lorax_registry');
+    requestLoraxRegistry(true);
+  }
+
+  function requestLoraxRegistry(force = false) {
+    if (!force && (registryLoaded || registryRequestInFlight)) return false;
+    registryRequestInFlight = true;
+    const queued = send('lorax_registry');
+    if (!queued) registryRequestInFlight = false;
+    return queued;
   }
 
   function handleLoraxRegistry(data) {
+    registryRequestInFlight = false;
     const btn = document.getElementById('btn-reload-lorax');
     if (btn) {
       btn.disabled = false;
@@ -4058,9 +4239,7 @@ const app = (() => {
     const advancedPanel = document.getElementById('advanced-panel');
     if (advancedPanel) {
       advancedPanel.addEventListener('toggle', () => {
-        if (advancedPanel.open && connected && !registryLoaded) {
-          send('lorax_registry');
-        }
+        if (advancedPanel.open && connected) requestLoraxRegistry();
       });
     }
     renderTimer = setInterval(() => {
@@ -4090,6 +4269,7 @@ const app = (() => {
     exportProfiles,
     openProfileImport,
     saveDeviceProfileToLibrary,
+    editLocalProfile,
     duplicateLocalProfile,
     archiveLocalProfile,
     copyLocalProfileToDevice,

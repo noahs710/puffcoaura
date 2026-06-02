@@ -1669,7 +1669,7 @@ body.heat-active .peak-light {
 
 .profile-library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
   margin-top: 12px;
   padding-top: 12px;
@@ -1693,6 +1693,14 @@ body.heat-active .peak-light {
   overflow: hidden;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
+}
+
+.local-profile-card {
+  min-height: 156px;
+}
+
+.local-profile-card[draggable="true"] .profile-drag-handle {
+  display: inline-flex;
 }
 
 .profile-card.dragging,
@@ -1855,7 +1863,7 @@ body.heat-active .peak-light {
 
 .profile-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   margin-top: auto;
   padding-top: 10px;
@@ -2122,6 +2130,10 @@ input[type="color"]::-webkit-color-swatch {
   width: 18px;
   height: 18px;
   accent-color: var(--accent-teal);
+}
+
+#profile-modal.local-profile-edit .check-row {
+  display: none;
 }
 
 @media (max-width: 780px) {
@@ -2671,22 +2683,24 @@ input[type="range"]::-moz-range-thumb {
 
 .debug-console-shell {
   display: grid;
-  grid-template-columns: minmax(180px, 0.36fr) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(260px, 0.42fr) minmax(440px, 1fr);
+  gap: 14px;
+  align-items: stretch;
 }
 
 .debug-console-meta {
   display: grid;
-  gap: 8px;
+  grid-template-columns: 1fr;
+  gap: 10px;
   align-content: start;
 }
 
 .debug-console-meta > div {
   min-width: 0;
-  padding: 12px;
+  padding: 12px 14px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.24);
+  background: rgba(0, 0, 0, 0.3);
 }
 
 .debug-console-meta span {
@@ -2703,25 +2717,26 @@ input[type="range"]::-moz-range-thumb {
   display: block;
   margin-top: 5px;
   color: var(--text-primary);
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   line-height: 1.25;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .browser-debug-log {
-  min-height: 220px;
-  max-height: 420px;
+  min-height: 300px;
+  max-height: 560px;
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 4px;
+  gap: 7px;
+  padding: 8px;
   border: 1px solid rgba(56, 189, 248, 0.16);
   border-radius: var(--radius-md);
   background:
     linear-gradient(180deg, rgba(56, 189, 248, 0.055), transparent 30%),
     rgba(0, 0, 0, 0.22);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 
 .dev-command-box {
@@ -2800,15 +2815,15 @@ input[type="range"]::-moz-range-thumb {
 
 .log-row {
   display: grid;
-  grid-template-columns: 76px 48px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 82px 58px minmax(0, 1fr);
+  gap: 12px;
   align-items: start;
-  padding: 10px 12px;
-  background: rgba(255,255,255,0.05);
+  padding: 11px 12px;
+  background: rgba(255,255,255,0.045);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  font-size: 0.84rem;
+  font-size: 0.82rem;
   overflow-wrap: anywhere;
 }
 
@@ -2830,6 +2845,7 @@ input[type="range"]::-moz-range-thumb {
 .log-time {
   color: var(--text-muted);
   font-size: 0.74rem;
+  line-height: 1.6;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2842,7 +2858,7 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(255,255,255,0.06);
   color: var(--text-primary);
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 800;
   letter-spacing: 0.04em;
 }
@@ -2864,7 +2880,7 @@ input[type="range"]::-moz-range-thumb {
 
 .log-message {
   color: inherit;
-  line-height: 1.35;
+  line-height: 1.48;
 }
 
 .log-message small {
@@ -3319,6 +3335,21 @@ input[type="range"]::-moz-range-thumb {
     grid-template-columns: 1fr;
   }
 
+  .browser-debug-log {
+    min-height: 180px;
+    max-height: 320px;
+    padding: 6px;
+  }
+
+  .profile-library-grid,
+  .profiles-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .profile-actions {
+    grid-template-columns: 1fr;
+  }
+
   .log-row {
     grid-template-columns: 64px minmax(0, 1fr);
   }
@@ -3377,6 +3408,23 @@ input[type="range"]::-moz-range-thumb {
   }
 }
 
+@media (min-width: 900px) {
+  .app-container {
+    max-width: 1440px;
+    padding-right: 28px;
+    padding-left: 28px;
+  }
+
+  .profiles-grid,
+  .profile-library-grid {
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  }
+
+  .session-debug-strip {
+    grid-template-columns: repeat(4, minmax(130px, 1fr));
+  }
+}
+
 @media (max-width: 860px) {
   .profile-editor-hero,
   .profile-editor-body {
@@ -3386,6 +3434,65 @@ input[type="range"]::-moz-range-thumb {
   .profile-editor-glow {
     width: 112px;
     height: 112px;
+  }
+}
+
+@media (max-width: 600px) {
+  body.mobile-nav-shell .app-container {
+    padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  }
+
+  body.mobile-nav-shell .app-menu {
+    left: 10px;
+    right: 10px;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    padding: 6px;
+  }
+
+  .app-container {
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    padding-right: max(10px, env(safe-area-inset-right, 0px));
+    padding-left: max(10px, env(safe-area-inset-left, 0px));
+  }
+
+  .app-header,
+  .card,
+  .advanced-panel > summary {
+    padding: 14px;
+  }
+
+  .connect-section {
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .connect-section + .connect-section {
+    margin-top: 8px;
+  }
+
+  .input-group {
+    width: 100%;
+    min-width: 0;
+    padding: 6px;
+  }
+
+  .optional-device-field {
+    width: 100%;
+    flex: 0 0 auto;
+  }
+
+  .checkbox-row {
+    min-height: 34px;
+    padding: 2px 4px;
+  }
+
+  .connect-section .btn,
+  .card-header .inline-actions .btn,
+  .power-controls .btn {
+    width: 100%;
+    flex: 0 0 auto;
+    min-height: 42px;
+    padding: 10px 14px;
   }
 }
 

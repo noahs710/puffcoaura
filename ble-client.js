@@ -30,14 +30,38 @@ class PuffcoBrowserBleClient {
   };
 
   static MODE_COMMANDS = {
+    master_off: 0,
     sleep: 1,
     idle: 2,
+    temp_selection_begin: 3,
+    temp_selection_end: 4,
     show_battery: 5,
     show_version: 6,
+    heat_start: 7,
+    heat_stop: 8,
+    heat_boost: 9,
     heat: 7,
     stop: 8,
     boost: 9,
     off: 0,
+  };
+
+  static ACTION_COMMANDS = {
+    heat_start: { path: '/p/app/mc', value: 7, type: 'uint8' },
+    heat_stop: { path: '/p/app/mc', value: 8, type: 'uint8' },
+    heat_boost: { path: '/p/app/mc', value: 9, type: 'uint8' },
+    idle: { path: '/p/app/mc', value: 2, type: 'uint8' },
+    temp_selection_begin: { path: '/p/app/mc', value: 3, type: 'uint8' },
+    temp_selection_end: { path: '/p/app/mc', value: 4, type: 'uint8' },
+    sleep: { path: '/p/app/mc', value: 1, type: 'uint8' },
+    power_off: { path: '/p/app/mc', value: 0, type: 'uint8', dangerous: true },
+    show_battery: { path: '/p/app/mc', value: 5, type: 'uint8' },
+    show_version: { path: '/p/app/mc', value: 6, type: 'uint8' },
+    lantern_on: { path: '/p/app/ltrn/cmd', value: 1, type: 'uint8' },
+    lantern_off: { path: '/p/app/ltrn/cmd', value: 0, type: 'uint8' },
+    stealth_on: { path: '/u/app/ui/stlm', value: 1, type: 'uint8' },
+    stealth_off: { path: '/u/app/ui/stlm', value: 0, type: 'uint8' },
+    factory_reset: { path: '/p/app/facr', value: 1, type: 'uint8', dangerous: true, confirm: 'RESET' },
   };
 
   static STATE_NAMES = {
@@ -139,7 +163,7 @@ class PuffcoBrowserBleClient {
     if (cmd === 'heat_observe') return this.loraxObserve({ ...params, category: 'heater' }, 'heat_observe');
     if (cmd === 'temperature_observe') return this.loraxObserve({ ...params, category: 'heater' }, 'temperature_observe');
     if (cmd === 'lorax_observe') return this.loraxObserve(params, 'lorax_observe');
-    if (cmd === 'lorax_action') return { type: 'error', message: 'Browser Bluetooth Lorax actions are not enabled online. Use direct Lorax read/write paths instead.' };
+    if (cmd === 'lorax_action') return this.loraxAction(params);
     return { type: 'error', message: `Browser Bluetooth command is not implemented yet: ${cmd}` };
   }
 
@@ -266,7 +290,8 @@ class PuffcoBrowserBleClient {
           { path: '/u/app/ui/stlm', name: 'stealth_mode', category: 'lighting', access: 'read_write', data_type: 'uint8', size: 1, status: 'known' },
           { path: '/u/app/ui/lbrt', name: 'led_brightness', category: 'lighting', access: 'read_write', data_type: 'bytes', size: 4, status: 'known' },
         ],
-        actions: {},
+        actions: PuffcoBrowserBleClient.ACTION_COMMANDS,
+        mode_commands: PuffcoBrowserBleClient.MODE_COMMANDS,
       },
     };
   }
@@ -620,7 +645,7 @@ class PuffcoBrowserBleClient {
       state_elapsed_time_s: elapsed,
       state_total_time_s: total,
       led_brightness: brightnessBytes ? Array.from(brightnessBytes) : null,
-      charge_estimated_time_to_full_s: chargeEta,
+      charge_estimated_time_to_full_s: Number.isFinite(Number(chargeEta)) ? chargeEta : null,
       max_battery_level: maxBattery,
       lantern_time_s: lanternTime,
       lantern_remaining_time_s: lanternRemaining,
@@ -633,7 +658,7 @@ class PuffcoBrowserBleClient {
       total_dabs: totalDabs,
       official_readable: {
         brightness: this.brightnessLabel(brightnessBytes),
-        chargeEstimatedTimeToFull: chargeEta == null ? null : `${Math.round(chargeEta)}s`,
+        chargeEstimatedTimeToFull: Number.isFinite(Number(chargeEta)) ? `${Math.round(chargeEta)}s` : null,
         maxBatteryLevel: maxBattery == null ? null : `${Math.round(maxBattery)}%`,
         lanternTime: lanternTime == null ? null : `${Math.round(lanternTime)}s`,
         lanternRemainingTime: lanternRemaining == null ? null : `${Math.round(lanternRemaining)}s`,
@@ -1198,6 +1223,26 @@ class PuffcoBrowserBleClient {
       type: 'ok',
       message: `Wrote ${path}`,
       data: { write: { path, offset, type, raw: Array.from(payload).map((byte) => byte.toString(16).padStart(2, '0')).join(' ') }, status: await this.snapshot(false) },
+    };
+  }
+
+  async loraxAction(params) {
+    const actionName = params.action;
+    const action = PuffcoBrowserBleClient.ACTION_COMMANDS[actionName];
+    if (!action) return { type: 'error', message: `Unknown Lorax action: ${actionName}` };
+    const requiredConfirm = action.confirm || (action.dangerous ? 'WRITE' : null);
+    if (requiredConfirm && params.confirm !== requiredConfirm) {
+      return { type: 'error', message: `${actionName} requires confirm='${requiredConfirm}'` };
+    }
+    const result = await this.loraxWrite({
+      path: action.path,
+      value: params.value ?? action.value,
+      type: action.type,
+    });
+    return {
+      type: 'ok',
+      message: `Lorax action ${actionName} sent`,
+      data: { action: actionName, write: result.data.write, status: result.data.status },
     };
   }
 }
