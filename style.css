@@ -973,14 +973,12 @@ input[type="text"]::placeholder {
   background: linear-gradient(135deg, #f8fafc, #ffffff);
   color: #0a0a0f;
   box-shadow: 0 12px 32px rgba(255,255,255,0.12);
-  transform: translateY(-10px);
 }
 
 .btn-secondary {
   background: rgba(255,255,255,0.055);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
-  transform: translateY(-10px);
 }
 
 .btn-secondary:hover {
