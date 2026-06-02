@@ -258,7 +258,7 @@ body.device-disconnected .connected-only-nav {
   justify-self: end;
   margin-top: 12px;
   padding: 6px 16px;
-  border-radius: var(--radius-full);
+  border-radius: 6px;
   background: var(--bg-glass);
   border: 1px solid var(--border-subtle);
   font-size: 0.8rem;
@@ -314,6 +314,7 @@ body.device-disconnected .connected-only-nav {
 
 .connection-badge .ble-capability .capability-summary {
   display: block;
+  
 }
 
 .connection-badge .ble-capability.expanded {
@@ -325,9 +326,9 @@ body.device-disconnected .connected-only-nav {
   gap: 10px;
   align-items: center;
   padding: 7px 12px;
-  border-radius: var(--radius-full);
   background: rgba(255,255,255,0.07);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.055);
+  overflow: hidden;
 }
 
 .connection-badge .ble-capability.expanded .capability-ring {
@@ -346,6 +347,8 @@ body.device-disconnected .connected-only-nav {
 .connection-badge .ble-capability.expanded .capability-title {
   max-width: none;
   white-space: nowrap;
+  text-align: left;
+  overflow: hidden  ;
 }
 
 /* ---- Cards ---- */
@@ -598,7 +601,7 @@ body.device-disconnected .connected-only-nav {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 0 8px 8px;
+  padding: 0 8px 18px;
   cursor: pointer;
   color: var(--text-secondary);
   font-size: 0.88rem;
@@ -970,12 +973,14 @@ input[type="text"]::placeholder {
   background: linear-gradient(135deg, #f8fafc, #ffffff);
   color: #0a0a0f;
   box-shadow: 0 12px 32px rgba(255,255,255,0.12);
+  transform: translateY(-10px);
 }
 
 .btn-secondary {
   background: rgba(255,255,255,0.055);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
+  transform: translateY(-10px);
 }
 
 .btn-secondary:hover {
