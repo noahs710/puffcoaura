@@ -1,17 +1,32 @@
+# === Runtime / venv ===
 .python311/
 .venv*/
-.tmp/
 __pycache__/
 *.py[cod]
+
+# === Logs & temp ===
 *.log
 
-python-*-embed-amd64.zip
+# === Generated data ===
 lorax_mappings.json
 profiles*.json
+tools/lorax_test_results.json
 
-logs_and_data/*.png
-logs_and_data/*.txt
-logs_and_data/*.log
+# === Test artifacts ===
+*.png
+chrome-profile*/
 
+# === OS junk ===
 .DS_Store
 Thumbs.db
+
+# === Tool-specific ===
+.harness/
+node_modules/
+package-lock.json
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo

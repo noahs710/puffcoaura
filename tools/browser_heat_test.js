@@ -175,7 +175,7 @@ async function main() {
 
   await evalPage(`app.selectProfile(1)`);
   const afterProfileSelect = await evalPage(`(() => ({
-    activeProfile: document.querySelector(".profile-card.active .profile-name span:not(.active-indicator)")?.textContent?.trim(),
+    activeProfile: document.querySelector(".profile-card.active .profile-name span:not(.active-indicator):not(.profile-drag-handle)")?.textContent?.trim(),
     heroProfile: document.querySelector("#hero-profile")?.textContent?.trim(),
     statProfile: document.querySelector("#stat-profile")?.textContent?.trim(),
     sent: (window.__sentCommands || []).map((cmd) => cmd.cmd)

@@ -3217,6 +3217,22 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/api/lorax/save_results":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                results = json.loads(body)
+                output_file = TOOLS_DIR / "lorax_test_results.json"
+                with open(output_file, "w", encoding="utf-8") as f:
+                    json.dump(results, f, indent=2)
+                self.send_json_response(200, {"ok": True, "message": f"Saved results to {output_file.name}"})
+            except Exception as e:
+                self.send_json_response(400, {"ok": False, "error": str(e)})
+            return
+        self.send_error(404)
+
     def send_json_response(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(json_safe(payload), default=str, allow_nan=False).encode("utf-8")
         self.send_response(status)
@@ -3229,7 +3245,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def send_status_response(self) -> None:

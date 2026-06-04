@@ -550,6 +550,7 @@ const app = (() => {
       };
       setBridgeNote(`Bridge connected: ${url}`, 'online');
       renderBackendMirror();
+      requestLoraxRegistry();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -3674,6 +3675,8 @@ const app = (() => {
 
   function requestLoraxRegistry(force = false) {
     if (!force && (registryLoaded || registryRequestInFlight)) return false;
+    if (transportMode === 'browser_ble' && !browserBleSupported()) return false;
+    if (transportMode === 'bridge' && ws?.readyState !== WebSocket.OPEN) return false;
     registryRequestInFlight = true;
     const queued = send('lorax_registry');
     if (!queued) registryRequestInFlight = false;
@@ -4235,11 +4238,12 @@ const app = (() => {
       initWebSocket(bridgeUrl);
     } else {
       setBridgeNote('Browser Bluetooth is active. Press Connect to open the browser Bluetooth chooser.', 'online');
+      requestLoraxRegistry();
     }
     const advancedPanel = document.getElementById('advanced-panel');
     if (advancedPanel) {
       advancedPanel.addEventListener('toggle', () => {
-        if (advancedPanel.open && connected) requestLoraxRegistry();
+        if (advancedPanel.open) requestLoraxRegistry();
       });
     }
     renderTimer = setInterval(() => {
@@ -4271,6 +4275,17 @@ const app = (() => {
     saveDeviceProfileToLibrary,
     editLocalProfile,
     duplicateLocalProfile,
+    archiveLocalProfile,
+    copyLocalProfileToDevice,
+    restoreProfileBackup,
+    restoreDefaultProfiles,
+    toggleLantern,
+    toggleStealth,
+    applyColorToProfile,
+    applyLanternColor,
+    setMoodPreset,
+    addMoodColor,
+    saveMoodPreset,
     archiveLocalProfile,
     copyLocalProfileToDevice,
     restoreProfileBackup,
@@ -4323,6 +4338,7 @@ const app = (() => {
     exportBrowserDebugLog,
     copyBrowserDebugLog,
     downloadBrowserDebugLog,
+    getBrowserBle,
   };
 })();
 

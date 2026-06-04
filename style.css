@@ -313,8 +313,7 @@ body.device-disconnected .connected-only-nav {
 }
 
 .connection-badge .ble-capability .capability-summary {
-  display: block;
-  
+  display: none;
 }
 
 .connection-badge .ble-capability.expanded {
