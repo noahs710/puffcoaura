@@ -615,6 +615,7 @@ class PuffcoBrowserBleClient {
     const lanternRemaining = await this.safe(() => this.readFloat32('/p/app/ltrn/remt'), null);
     const boostTempC = await this.safe(() => this.readFloat32('/p/app/thc/btmp'), null);
     const boostTime = await this.safe(() => this.readFloat32('/p/app/thc/btim'), null);
+    const stealthMode = await this.safe(() => this.readUint8('/u/app/ui/stlm'), null);
 
     const data = {
       connected: true,
@@ -650,6 +651,7 @@ class PuffcoBrowserBleClient {
       lantern_time_s: lanternTime,
       lantern_remaining_time_s: lanternRemaining,
       lantern: lanternRemaining == null ? null : lanternRemaining > 0,
+      stealth: stealthMode == null ? null : Boolean(stealthMode),
       boost_temperature_delta_c: boostTempC,
       boost_temperature_delta_f: boostTempC == null ? null : Math.round(boostTempC * 1.8),
       boost_time_s: boostTime,
