@@ -154,6 +154,15 @@ OFFICIAL_ATTRIBUTE_SPECS = {
     "bleFault.absoluteCount": ("/p/app/bt/ufca", "uint32"),
     "bleFault.creditCount": ("/p/app/bt/ufcc", "uint32"),
 }
+
+DRAW_STRENGTH_CANDIDATES = (
+    ("/p/app/htr/draw", "float32", "direct"),
+    ("/p/app/htr/inh", "float32", "direct"),
+    ("/p/app/htr/air", "float32", "direct"),
+    ("/p/htr/air", "float32", "direct"),
+    ("/p/htr/flow", "float32", "direct"),
+    ("/p/htr/pwr", "float32", "heater_power_proxy"),
+)
 FAST_OFFICIAL_ATTRIBUTES = (
     "batteryLevel",
     "chargeState",
@@ -1470,6 +1479,35 @@ async def read_official_attributes(names: tuple[str, ...] | list[str] | None = N
     }
 
 
+async def read_draw_strength() -> dict[str, Any]:
+    if not device:
+        return {"value": None, "percent": 0, "active": False, "source": None, "mode": "unavailable"}
+    for path, data_type, mode in DRAW_STRENGTH_CANDIDATES:
+        try:
+            raw = bytes(await device.read_short(path, 0, read_size_for_type(data_type)))
+            value = decode_lorax_bytes(raw, data_type)
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                continue
+            if mode == "heater_power_proxy":
+                percent = max(0, min(100, round(numeric)))
+                active = percent >= 8
+            else:
+                percent = max(0, min(100, round(numeric * 100 if 0 <= numeric <= 1 else numeric)))
+                active = percent >= 6
+            return {
+                "value": round(numeric, 3),
+                "percent": percent,
+                "active": active,
+                "source": path,
+                "mode": mode,
+                "raw": raw.hex(" "),
+            }
+        except Exception:
+            continue
+    return {"value": None, "percent": 0, "active": False, "source": None, "mode": "not_found"}
+
+
 def lorax_interpretations(raw: bytes) -> dict[str, Any]:
     values: dict[str, Any] = {"raw_hex": raw.hex(" "), "length": len(raw)}
     if len(raw) >= 1:
@@ -2053,7 +2091,12 @@ def build_heat_report(data: dict[str, Any]) -> dict[str, Any]:
     firmware_elapsed = seconds_value(data.get("state_elapsed_time_s"))
     firmware_total = seconds_value(data.get("state_total_time_s"))
     profile_duration = seconds_value(data.get("active_profile_time_s"))
-    duration = profile_duration if profile_duration is not None else (firmware_total if active else None)
+    duration_candidates = []
+    if profile_duration is not None:
+        duration_candidates.append(profile_duration)
+    if active and firmware_total is not None:
+        duration_candidates.append(firmware_total)
+    duration = max(duration_candidates) if duration_candidates else None
     started_at = heat_session.get("started_at")
     timer_started_at = heat_session.get("timer_started_at")
     timer_elapsed = None
@@ -2241,11 +2284,17 @@ async def device_snapshot(*, full: bool = True) -> dict[str, Any]:
 
         official = await read_official_attributes(None if full else FAST_OFFICIAL_ATTRIBUTES)
         official_attrs = official.get("attributes", {})
+        draw_strength = await read_draw_strength()
         if not full and isinstance(data.get("official_attributes"), dict):
             merged_attrs = dict(data["official_attributes"])
             merged_attrs.update({key: value for key, value in official_attrs.items() if value is not None})
             official_attrs = merged_attrs
         data["official_attributes"] = official_attrs
+        data["draw_strength"] = draw_strength.get("value")
+        data["draw_strength_percent"] = draw_strength.get("percent")
+        data["draw_strength_active"] = draw_strength.get("active")
+        data["draw_strength_source"] = draw_strength.get("source")
+        data["draw_strength_mode"] = draw_strength.get("mode")
         official_sources = official.get("sources") or {}
         if not full and isinstance(data.get("official_sources"), dict):
             merged_sources = dict(data["official_sources"])
@@ -2806,8 +2855,7 @@ async def handle_select_profile(params: dict[str, Any]) -> dict[str, Any]:
     return {"type": "ok", "message": f"Selected profile {index}", "data": await device_snapshot(full=False)}
 
 
-async def handle_set_profile(params: dict[str, Any]) -> dict[str, Any]:
-    index = profile_index(params["index"])
+async def write_profile_fields(index: int, params: dict[str, Any]) -> tuple[list[str], bytes | None]:
     changed = []
     expected_mood_payload = None
     if params.get("name") is not None:
@@ -2837,6 +2885,12 @@ async def handle_set_profile(params: dict[str, Any]) -> dict[str, Any]:
             colour=expected_mood_payload,
         )
         changed.append("mood light")
+    return changed, expected_mood_payload
+
+
+async def handle_set_profile(params: dict[str, Any]) -> dict[str, Any]:
+    index = profile_index(params["index"])
+    changed, expected_mood_payload = await write_profile_fields(index, params)
     if params.get("select"):
         await device.set_current_profile(index)
         changed.append("selected")
@@ -2846,6 +2900,30 @@ async def handle_set_profile(params: dict[str, Any]) -> dict[str, Any]:
         "type": "ok",
         "message": f"Updated profile {index}: {', '.join(changed) or 'nothing'}",
         "data": snapshot,
+    }
+
+
+async def handle_reorder_profiles(params: dict[str, Any]) -> dict[str, Any]:
+    profiles = params.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        return {"type": "error", "message": "Profile reorder requires profiles"}
+    if len(profiles) > 4:
+        return {"type": "error", "message": "Profile reorder supports up to 4 slots"}
+    changed_slots = []
+    for slot, profile in enumerate(profiles):
+        if not isinstance(profile, dict):
+            return {"type": "error", "message": f"Profile slot {slot} is not an object"}
+        profile_params = {**profile, "index": slot}
+        changed, _expected_mood_payload = await write_profile_fields(slot, profile_params)
+        changed_slots.append({"index": slot, "changed": changed})
+    select_index = params.get("select_index")
+    if select_index is not None:
+        await device.set_current_profile(profile_index(select_index))
+    snapshot = await device_snapshot(full=True)
+    return {
+        "type": "ok",
+        "message": "Device profile order updated",
+        "data": {"changed_slots": changed_slots, "status": snapshot},
     }
 
 
@@ -2983,6 +3061,7 @@ async def handle_boost(_params: dict[str, Any]) -> dict[str, Any]:
     if state is not None and not is_heat_state(state):
         return {"type": "error", "message": "Boost is only available during a heat cycle"}
     await device.boost_heat_cycle()
+    await asyncio.sleep(0.35)
     return {"type": "ok", "message": "Boost sent", "data": await device_snapshot(full=False)}
 
 
@@ -3045,6 +3124,7 @@ COMMANDS = {
     "lorax_action": handle_lorax_action,
     "select_profile": handle_select_profile,
     "set_profile": handle_set_profile,
+    "reorder_profiles": handle_reorder_profiles,
     "set_color": handle_set_color,
     "mood_light": handle_mood_light,
     "lantern": handle_lantern,
@@ -3073,7 +3153,7 @@ READONLY_COMMANDS = {
     "official_attributes",
 }
 MUTATING_COMMANDS = set(COMMANDS) - READONLY_COMMANDS
-FULL_REFRESH_COMMANDS = {"select_profile", "set_profile", "set_color", "mood_light", "lantern_color"}
+FULL_REFRESH_COMMANDS = {"select_profile", "set_profile", "reorder_profiles", "set_color", "mood_light", "lantern_color"}
 UNLOCKED_COMMANDS = {"connect", "disconnect", "scan_devices", "status", "lorax_registry"}
 
 

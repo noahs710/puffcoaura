@@ -32,13 +32,30 @@ const app = (() => {
   let optimisticProfileIndex = null;
   let bleCapabilityExpanded = false;
   let localMoodPresets = [];
+  let voiceRecognition = null;
+  let voiceListening = false;
+  let voicePermissionGranted = false;
+  let lastVoiceCommandText = '';
+  let lastVoiceCommandAt = 0;
+  let voiceStream = null;
+  let voiceAudioContext = null;
+  let voiceAnalyser = null;
+  let voiceMeterFrame = null;
+  let voiceBluetoothPending = false;
   const browserDebugEvents = [];
   const BROWSER_DEBUG_LIMIT = 300;
   const PROFILE_ORDER_KEY = 'puffco_profile_order';
+  const PROFILE_VAPOR_KEY = 'puffco_profile_vapor_presets_v1';
   const LOCAL_PROFILES_KEY = 'puffco_local_profiles';
   const PROFILE_BACKUP_KEY = 'puffco_profile_backups_v1';
   const MOOD_LIBRARY_KEY = 'puffco_mood_library_v1';
   const LAST_CONNECTED_KEY = 'puffco_last_connected';
+  const VAPOR_PRESETS = [
+    { id: 'standard', name: 'Balanced', short: 'Balanced', desc: 'Smooth everyday vapor' },
+    { id: 'high', name: 'High Vapor', short: 'High', desc: 'Fuller clouds' },
+    { id: 'max', name: 'Max Vapor', short: 'Max', desc: 'Densest pull' },
+    { id: 'xl', name: 'XL Vapor', short: 'XL', desc: '3D XL chamber mode' },
+  ];
   const VISIBLE_BLE_POLL_MS = 1000;
   const HIDDEN_BLE_POLL_MS = 8000;
   const VISIBLE_RECONNECT_MS = 2000;
@@ -87,6 +104,36 @@ const app = (() => {
       tempo: true,
     },
     {
+      id: 'pulse',
+      name: 'Pulse',
+      desc: 'Breathing app-style glow',
+      min: 1,
+      max: 3,
+      colors: ['#00d6b4', '#f6a623'],
+      tempo: true,
+      sourcePreset: 'fade',
+    },
+    {
+      id: 'rainbow',
+      name: 'Rainbow',
+      desc: 'Classic Puffco spectrum',
+      min: 3,
+      max: 6,
+      colors: ['#ef4444', '#f6a623', '#22c55e', '#38bdf8', '#7c3aed'],
+      tempo: true,
+      sourcePreset: 'disco',
+    },
+    {
+      id: 'lava_lamp',
+      name: 'Lava Lamp',
+      desc: 'Warm rolling fade',
+      min: 2,
+      max: 4,
+      colors: ['#ef4444', '#fb923c', '#f6a623'],
+      tempo: true,
+      sourcePreset: 'fade',
+    },
+    {
       id: 'spin',
       name: 'Spin',
       desc: 'Lighthouse motion',
@@ -94,6 +141,16 @@ const app = (() => {
       max: 6,
       colors: ['#ff0000'],
       tempo: true,
+    },
+    {
+      id: 'chase',
+      name: 'Chase',
+      desc: 'Fast rotating highlight',
+      min: 1,
+      max: 3,
+      colors: ['#38bdf8', '#f8fafc'],
+      tempo: true,
+      sourcePreset: 'spin',
     },
     {
       id: 'split_gradient',
@@ -114,6 +171,14 @@ const app = (() => {
       tempo: true,
     },
   ];
+  const DISCO_BASE_OFFSETS = [
+    15360, 18773, 1707, 5120, 8533, 11947, 15360, 10240, 10240, 5120,
+    2844, 1138, 853, 19627, 19342, 17636, 0, 0, 0, 0,
+  ];
+  const SPLIT_OFFSETS_2 = [0, 0, 0, 0, 0, 0, 7680, 25600, 15360, 7680, 12800, 12800, 17920, 17920, 12800, 12800, 15360, 15360, 15360, 15360];
+  const SPLIT_OFFSETS_3_4 = [0, 0, 0, 0, 0, 0, 7680, 46080, 15360, 7680, 33280, 33280, 38400, 38400, 33280, 33280, 15360, 15360, 15360, 15360];
+  const SPLIT_OFFSETS_5_6 = [0, 0, 0, 0, 0, 0, 7680, 66560, 15360, 7680, 53760, 53760, 58880, 58880, 53760, 53760, 15360, 15360, 15360, 15360];
+  const VERTICAL_SLIDESHOW_OFFSETS = [20480, 20480, 20480, 20480, 20480, 20480, 15930, 9100, 11835, 15930, 0, 0, 6825, 6825, 0, 0, 20480, 20480, 20480, 20480];
   const moodEditor = {
     preset: 'no_animation',
     colors: ['#ff0000'],
@@ -121,7 +186,7 @@ const app = (() => {
     dynamicInhale: false,
   };
   const DEVICE_COMMANDS = new Set([
-    'select_profile', 'set_profile', 'set_color', 'mood_light', 'lantern', 'lantern_color',
+    'select_profile', 'set_profile', 'reorder_profiles', 'set_color', 'mood_light', 'lantern', 'lantern_color',
     'stealth', 'brightness', 'show_battery', 'show_version', 'heat', 'stop',
     'boost', 'set_boost_options', 'power', 'temperature_observe', 'temperature_source',
     'lorax_read', 'lorax_write', 'lorax_action', 'lorax_probe',
@@ -629,6 +694,9 @@ const app = (() => {
     } catch (err) {
       let detail = err?.message || String(err);
       if (err?.name === 'NotFoundError') detail = 'Bluetooth chooser was canceled.';
+      if (cmd === 'connect' && err?.name === 'NotAllowedError') {
+        setVoiceBluetoothPrompt(true, 'Chrome blocked the chooser. Tap Open Chooser while this page is active.');
+      }
       if (!options.quiet) {
         expandBleCapability();
         handleMessage({ type: 'error', message: `Browser Bluetooth ${cmd} failed: ${detail}` });
@@ -685,6 +753,7 @@ const app = (() => {
         case 'connected':
           connectPending = false;
           browserBleDisconnectHandled = false;
+          setVoiceBluetoothPrompt(false);
           updateDeviceState(normalizeConnectedPayload(msg.data));
           if (transportMode === 'browser_ble') startBrowserBlePolling();
           toast('Connected to device!', 'success');
@@ -1107,7 +1176,7 @@ const app = (() => {
 
   function updateControlAvailability(isConnected) {
     const selectors = [
-      '#controls-grid button',
+      '#controls-grid .connected-only button',
       'button[data-device-command]',
       '#profiles-card button',
       '#brightness-card button',
@@ -1116,6 +1185,9 @@ const app = (() => {
     ];
     document.querySelectorAll(selectors.join(',')).forEach((el) => {
       el.disabled = !isConnected;
+    });
+    document.querySelectorAll('#voice-card button, #voice-card input').forEach((el) => {
+      el.disabled = false;
     });
     applyCapabilityGates(deviceState);
     updateHeatControls();
@@ -1307,6 +1379,7 @@ const app = (() => {
       setText('hero-target-temp', '—');
       setText('hero-heat-timer', '—');
       setText('hero-profile', '—');
+      setText('hero-vapor', '—');
       return;
     }
 
@@ -1330,6 +1403,7 @@ const app = (() => {
     setText('hero-target-temp', target);
     setText('hero-heat-timer', timer);
     setText('hero-profile', profileName);
+    setText('hero-vapor', selectedProfile ? vaporPresetMeta(selectedProfile).name : '—');
   }
 
   function updateHeatLiveUI(data) {
@@ -1379,6 +1453,7 @@ const app = (() => {
     targetEl.textContent = target ? `Target ${target}` : 'Target unavailable';
     metaEl.textContent = meta;
     updateSessionMetrics(data, dynamicRemaining);
+    updateDrawStrengthUI(data);
     const hasTimer = ['observed', 'firmware'].includes(report.timer_confidence);
     panel.className = 'heat-live-panel' + (heating ? ' active' : '') + (hasTimer ? ' timer-running' : '');
     updateHeroTelemetry(data);
@@ -1395,12 +1470,30 @@ const app = (() => {
     setText('session-chamber', data?.connected ? formatChamber(data.chamber) : '—');
   }
 
+  function updateDrawStrengthUI(data) {
+    const panel = document.getElementById('draw-strength-panel');
+    const label = document.getElementById('draw-strength-label');
+    const source = document.getElementById('draw-strength-source');
+    if (!panel || !label || !source) return;
+    const percent = data?.connected ? Math.max(0, Math.min(100, Math.round(Number(data.draw_strength_percent) || 0))) : 0;
+    const active = Boolean(data?.draw_strength_active || percent >= 8);
+    panel.style.setProperty('--draw-strength', String(percent));
+    panel.classList.toggle('active', active);
+    panel.classList.toggle('found', Boolean(data?.draw_strength_source));
+    label.textContent = data?.connected ? (active ? `${percent}% draw` : 'Idle') : 'Disconnected';
+    const mode = data?.draw_strength_mode === 'heater_power_proxy' ? 'heater power proxy' : data?.draw_strength_mode;
+    source.textContent = data?.draw_strength_source
+      ? `${data.draw_strength_source} · ${mode || 'direct'}`
+      : 'No direct inhale path found yet';
+  }
+
   function updateTelemetryFields(data) {
     const telemetryIds = [
       'stat-current-temp',
       'stat-target-temp',
       'stat-heat-timer',
       'stat-profile',
+      'stat-vapor',
       'stat-battery-source',
       'stat-charge-eta',
       'stat-boost',
@@ -1432,6 +1525,7 @@ const app = (() => {
     setText('stat-target-temp', target || '—');
     setText('stat-heat-timer', timer);
     setText('stat-profile', profileName);
+    setText('stat-vapor', selectedProfile ? formatVaporPreset(selectedProfile) : '—');
     setText('stat-battery-source', formatBatterySource(data.battery_source, data.battery_source_type));
     setText('stat-charge-eta', formatChargeEta(data, readable));
     setText('stat-boost', formatBoostSetting(data, readable));
@@ -1468,7 +1562,12 @@ const app = (() => {
 
     startBtn.textContent = heatCommandPending === 'heat' ? 'Starting…' : 'Start Heat';
     boostBtn.textContent = heatCommandPending === 'boost' ? 'Boosting…' : (isBoostActive(deviceState) ? 'Boost Active' : 'Boost');
-    if (boostOptionsBtn) boostOptionsBtn.textContent = formatBoostSetting(deviceState || {}, deviceState?.official_readable || {});
+    if (boostOptionsBtn) {
+      const boostSetting = formatBoostSetting(deviceState || {}, deviceState?.official_readable || {});
+      boostOptionsBtn.textContent = boostSetting === 'Boost options unavailable' ? 'Boost Options' : `Boost ${boostSetting}`;
+      const panel = document.getElementById('boost-options-panel');
+      boostOptionsBtn.setAttribute('aria-expanded', String(panel ? !panel.classList.contains('hidden') : false));
+    }
     stopBtn.textContent = heatCommandPending === 'stop' ? 'Stopping…' : 'Stop';
 
     if (statusText && heatCommandPending) {
@@ -1492,7 +1591,8 @@ const app = (() => {
     }
 
     const orderedProfiles = applySavedProfileOrder(profiles);
-    orderedProfiles.forEach((p, i) => {
+    orderedProfiles.forEach((rawProfile, i) => {
+      const p = profileWithVapor(rawProfile, i);
       const profileIndex = Number(p.index ?? i);
       const isPending = optimisticProfileIndex != null && Number(optimisticProfileIndex) === profileIndex;
       const isActive = isPending || p.active || profileIndex === Number(currentIndex);
@@ -1500,10 +1600,11 @@ const app = (() => {
       const profileColor = profileColors[0] || extractProfileColor(p.color);
       const profileSwatch = profileColorBackground(profileColors);
       const mood = extractProfileMood(p.color);
-      const officialMood = isOfficialMoodPayload(p.color);
+      const moodOrigin = profileMoodOrigin(p.color);
       const moodName = mood.name;
       const tempLabel = formatProfileTemperature(p.temp_f);
       const timeLabel = formatProfileDuration(p.time_s);
+      const vaporLabel = formatVaporPreset(p, { short: true });
 
       // Profile card
       const card = document.createElement('div');
@@ -1550,8 +1651,9 @@ const app = (() => {
         <div class="profile-meta">
           <span>${escHtml(tempLabel)}</span>
           <span>${escHtml(timeLabel)}</span>
+          <span>${escHtml(vaporLabel)}</span>
           <span>${escHtml(moodName)}</span>
-          <span class="profile-sync-badge ${officialMood ? 'ok' : 'warn'}">${officialMood ? 'Official' : 'Legacy'}</span>
+          <span class="profile-sync-badge ${moodOrigin.className}">${escHtml(moodOrigin.label)}</span>
         </div>
         <div class="profile-actions">
           <button class="btn btn-sm ${isActive ? 'btn-primary' : 'btn-secondary'}" onclick="app.selectProfile(${profileIndex})">
@@ -1603,17 +1705,80 @@ const app = (() => {
     if (fromPos < 0 || toPos < 0) return;
     const [moved] = profiles.splice(fromPos, 1);
     profiles.splice(toPos, 0, moved);
-    const order = profiles.map((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex));
+    commitDeviceProfileOrder(profiles, fromIndex);
+  }
+
+  function profilePayloadForDevice(profile, index) {
+    const payload = {
+      index,
+      name: profile.name || `Profile ${index}`,
+      temp_f: Number(profile.temp_f),
+      time_s: Number(profile.time_s),
+      vapor: normalizeVaporPreset(profile),
+    };
+    const mood = normalizeProfileMood(profile);
+    if (mood) {
+      payload.mood_light = {
+        preset: mood.sourcePreset || mood.preset,
+        colors: mood.colors,
+        tempo_frac: mood.tempoFrac ?? mood.tempo_frac ?? 0.5,
+        dynamic_inhale: mood.dynamicInhale ?? mood.dynamic_inhale ?? false,
+      };
+    }
+    return payload;
+  }
+
+  function commitDeviceProfileOrder(orderedProfiles, movedIndex) {
+    const currentProfile = Number(deviceState?.current_profile);
+    const selectedIndex = orderedProfiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === currentProfile);
+    const nextProfiles = orderedProfiles.map((profile, slotIndex) => ({
+      ...profile,
+      vapor: normalizeVaporPreset(profile),
+      index: slotIndex,
+      active: slotIndex === selectedIndex,
+    }));
+    deviceState.profiles = nextProfiles;
+    if (selectedIndex >= 0) deviceState.current_profile = selectedIndex;
     try {
-      localStorage.setItem(PROFILE_ORDER_KEY, JSON.stringify(order));
+      localStorage.removeItem(PROFILE_ORDER_KEY);
     } catch {}
-    deviceState.profiles = profiles;
-    updateProfilesUI(deviceState.profiles, optimisticProfileIndex ?? deviceState.current_profile);
-    toast('Profile order saved locally', 'success');
+    updateProfilesUI(deviceState.profiles, selectedIndex >= 0 ? selectedIndex : deviceState.current_profile);
+    writeProfileVaporOverridesForProfiles(nextProfiles);
+    const payload = {
+      profiles: orderedProfiles.map((profile, slotIndex) => profilePayloadForDevice(profile, slotIndex)),
+      select_index: selectedIndex >= 0 ? selectedIndex : null,
+    };
+    if (send('reorder_profiles', payload)) {
+      optimisticProfileIndex = selectedIndex >= 0 ? selectedIndex : null;
+      toast(`Moving profile ${movedIndex} on device`, 'info');
+    } else {
+      toast('Profile order saved locally only', 'warn');
+    }
   }
 
   function extractProfileColors(colorObj) {
     if (!colorObj) return ['#8b5cf6'];
+    const bytesToColors = (raw, limit = 6) => {
+      if (!raw) return [];
+      const values = Array.isArray(raw)
+        ? raw
+        : (typeof Uint8Array !== 'undefined' && raw instanceof Uint8Array)
+          ? Array.from(raw)
+          : [];
+      if (values.length < 3 || !values.every(value => Number.isFinite(Number(value)))) return [];
+      const colors = [];
+      for (let index = 0; index + 2 < values.length; index += 3) {
+        const rgb = values.slice(index, index + 3).map(value => Math.max(0, Math.min(255, Number(value))));
+        colors.push('#' + rgb.map(value => value.toString(16).padStart(2, '0')).join(''));
+      }
+      const unique = [...new Set(colors)];
+      if (unique.length <= limit) return unique;
+      const sampled = [];
+      for (let index = 0; index < limit; index += 1) {
+        sampled.push(unique[Math.round((index / Math.max(1, limit - 1)) * (unique.length - 1))]);
+      }
+      return [...new Set(sampled)];
+    };
     const normalize = (raw) => {
       if (!raw) return null;
       if (typeof raw === 'string') {
@@ -1624,7 +1789,7 @@ const app = (() => {
       }
       if (Array.isArray(raw)) {
         if (raw.length >= 3 && raw.slice(0, 3).every(v => Number.isFinite(Number(v)))) {
-          return '#' + raw.slice(0, 3).map(v => Math.max(0, Math.min(255, Number(v))).toString(16).padStart(2, '0')).join('');
+          return bytesToColors(raw, 1)[0] || null;
         }
         for (const item of raw) {
           const color = normalize(item);
@@ -1641,8 +1806,7 @@ const app = (() => {
       }
       if (Array.isArray(raw)) {
         if (raw.length >= 3 && raw.slice(0, 3).every(v => Number.isFinite(Number(v)))) {
-          const color = normalize(raw);
-          return color ? [color] : [];
+          return bytesToColors(raw);
         }
         return raw.flatMap(item => collect(item));
       }
@@ -1690,6 +1854,38 @@ const app = (() => {
     return Number.isFinite(parsed) && parsed > 0 ? formatSecondsLabel(parsed) : 'Time not synced';
   }
 
+  function normalizeVaporPreset(profileOrValue) {
+    const raw = profileOrValue && typeof profileOrValue === 'object'
+      ? profileOrValue.vapor ?? profileOrValue.vapor_preset ?? profileOrValue.xl_vapor ?? profileOrValue.vaporControl
+      : profileOrValue;
+    const value = String(raw ?? 'standard').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+    const aliases = {
+      normal: 'standard',
+      balanced: 'standard',
+      default: 'standard',
+      low: 'standard',
+      more: 'high',
+      boosted: 'high',
+      maximum: 'max',
+      full: 'max',
+      xlarge: 'xl',
+      '3d_xl': 'xl',
+      xl_vapor: 'xl',
+    };
+    const id = aliases[value] || value;
+    return VAPOR_PRESETS.some((preset) => preset.id === id) ? id : 'standard';
+  }
+
+  function vaporPresetMeta(profileOrValue) {
+    const id = normalizeVaporPreset(profileOrValue);
+    return VAPOR_PRESETS.find((preset) => preset.id === id) || VAPOR_PRESETS[0];
+  }
+
+  function formatVaporPreset(profileOrValue, options = {}) {
+    const preset = vaporPresetMeta(profileOrValue);
+    return options.short ? preset.short : preset.name;
+  }
+
   function extractProfileMood(colorObj) {
     const profileColors = extractProfileColors(colorObj);
     const fallbackColor = profileColors[0] || extractProfileColor(colorObj);
@@ -1732,13 +1928,23 @@ const app = (() => {
       if (preset) return preset.id;
     }
     const offset = Array.isArray(param.offset) ? param.offset.map(value => Number(value)) : [];
+    const offsetKey = offset.join(',');
+    const colorCount = Number(param.colorLen) > 0 && Number(param.colorLen) !== 32
+      ? Math.max(1, Math.round(Number(param.colorLen) / 5))
+      : extractProfileColors(colorObj).length;
     if (Number(param.anim) === 7) return 'spin';
     if (Number(param.colorLen) === 32) return 'no_animation';
     if (offset.length) {
       if (offset.every(value => value === 0)) return 'fade';
-      if (offset.includes(20480) && offset.includes(15930)) return 'vertical_slideshow';
-      if (offset.includes(7680) && offset.some(value => value >= 25600)) return 'split_gradient';
-      if (offset[0] === 15360 || offset.includes(18773)) return 'disco';
+      if (offsetKey === VERTICAL_SLIDESHOW_OFFSETS.join(',')) return 'vertical_slideshow';
+      if (
+        offsetKey === SPLIT_OFFSETS_2.join(',')
+        || offsetKey === SPLIT_OFFSETS_3_4.join(',')
+        || offsetKey === SPLIT_OFFSETS_5_6.join(',')
+        || (offset.includes(7680) && offset.some(value => value >= 25600))
+      ) return 'split_gradient';
+      const expectedDisco = DISCO_BASE_OFFSETS.map(value => Math.round(value * Math.max(1, colorCount))).join(',');
+      if (offsetKey === expectedDisco || offset[0] === 15360 || offset.includes(18773)) return 'disco';
     }
     if (lamp.name === 'pikaled2' || Array.isArray(param.color)) return 'no_animation';
     return null;
@@ -1756,6 +1962,17 @@ const app = (() => {
       && MOOD_PRESETS.some(item => item.id === preset);
   }
 
+  function profileMoodOrigin(colorObj) {
+    const meta = colorObj?.meta || {};
+    if (meta.format === 'official-pikaled2-profile-colr') {
+      return { label: 'App-made', className: 'ok' };
+    }
+    if (isOfficialMoodPayload(colorObj)) {
+      return { label: 'Puffco app', className: 'ok' };
+    }
+    return { label: 'Device', className: 'warn' };
+  }
+
   function readJsonStorage(key, fallback) {
     try {
       const value = JSON.parse(localStorage.getItem(key) || 'null');
@@ -1767,6 +1984,45 @@ const app = (() => {
 
   function writeJsonStorage(key, value) {
     localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function profileVaporDeviceKey() {
+    return String(deviceState?.serial || deviceState?.name || 'default-device');
+  }
+
+  function readProfileVaporOverrides() {
+    const payload = readJsonStorage(PROFILE_VAPOR_KEY, { version: 1, devices: {} });
+    return payload && typeof payload === 'object' && payload.devices && typeof payload.devices === 'object'
+      ? payload
+      : { version: 1, devices: {} };
+  }
+
+  function writeProfileVaporOverride(index, vapor) {
+    if (!Number.isFinite(Number(index))) return;
+    const payload = readProfileVaporOverrides();
+    const deviceKey = profileVaporDeviceKey();
+    const device = { ...(payload.devices[deviceKey] || {}) };
+    device[String(Number(index))] = normalizeVaporPreset(vapor);
+    payload.devices = { ...payload.devices, [deviceKey]: device };
+    payload.updated_at = new Date().toISOString();
+    writeJsonStorage(PROFILE_VAPOR_KEY, payload);
+  }
+
+  function writeProfileVaporOverridesForProfiles(profiles) {
+    if (!Array.isArray(profiles)) return;
+    profiles.forEach((profile, fallbackIndex) => {
+      const index = Number(profile?.index ?? fallbackIndex);
+      writeProfileVaporOverride(index, normalizeVaporPreset(profile));
+    });
+  }
+
+  function profileWithVapor(profile, fallbackIndex = null) {
+    if (!profile || typeof profile !== 'object') return profile;
+    const index = Number(profile.index ?? fallbackIndex);
+    const payload = readProfileVaporOverrides();
+    const device = payload.devices?.[profileVaporDeviceKey()] || {};
+    const override = Number.isFinite(index) ? device[String(index)] : null;
+    return { ...profile, vapor: normalizeVaporPreset(profile.vapor ?? profile.vapor_preset ?? profile.xl_vapor ?? override) };
   }
 
   function validateProfile(profile) {
@@ -1785,20 +2041,22 @@ const app = (() => {
     const colors = (Array.isArray(source.colors) ? source.colors : [])
       .flatMap(color => extractProfileColors({ color }))
       .filter(color => /^#[0-9a-f]{6}$/i.test(color));
-    const preset = source.sourcePreset || source.preset || 'no_animation';
+    const devicePreset = source.preset || 'no_animation';
+    const displayPreset = source.appPreset || source.sourcePreset || devicePreset;
     const tempo = Number(source.tempoFrac ?? source.tempo_frac);
     const tempoFrac = Number.isFinite(tempo) ? Math.max(0, Math.min(1, tempo)) : 0.5;
     const dynamicInhale = Boolean(source.dynamicInhale ?? source.dynamic_inhale);
-    const presetName = MOOD_PRESETS.find(item => item.id === preset)?.name || source.name || 'Static color';
+    const presetName = MOOD_PRESETS.find(item => item.id === displayPreset)?.name || source.name || 'Static color';
     return {
-      preset,
+      preset: displayPreset,
       name: normalizeMoodDisplayName(presetName),
       colors: colors.length ? [...new Set(colors)] : ['#ff0000'],
       tempoFrac,
       tempo_frac: tempoFrac,
       dynamicInhale,
       dynamic_inhale: dynamicInhale,
-      sourcePreset: preset,
+      appPreset: displayPreset,
+      sourcePreset: devicePreset,
     };
   }
 
@@ -1814,7 +2072,7 @@ const app = (() => {
       time_s: Number(profile.time_s),
       boost_temperature_delta_f: profile.boost_temperature_delta_f ?? deviceState?.boost_temperature_delta_f ?? null,
       boost_time_s: profile.boost_time_s ?? deviceState?.boost_time_s ?? null,
-      vapor: profile.vapor ?? profile.xl_vapor ?? null,
+      vapor: normalizeVaporPreset(profile),
       chamber: profile.chamber ?? deviceState?.chamber ?? null,
       color: profile.color || null,
       mood,
@@ -1837,7 +2095,9 @@ const app = (() => {
   }
 
   function saveProfileBackup(reason = 'manual') {
-    const profiles = Array.isArray(deviceState?.profiles) ? applySavedProfileOrder(deviceState.profiles) : [];
+    const profiles = Array.isArray(deviceState?.profiles)
+      ? applySavedProfileOrder(deviceState.profiles).map((profile, fallbackIndex) => profileWithVapor(profile, fallbackIndex))
+      : [];
     if (!profiles.length) return null;
     const backups = readJsonStorage(PROFILE_BACKUP_KEY, []);
     const snapshot = {
@@ -1884,6 +2144,7 @@ const app = (() => {
       const color = extractProfileColor({ color: colors[0] });
       const background = profileColorBackground(colors);
       const moodName = mood?.name || mood?.preset || 'Static color';
+      const vaporLabel = formatVaporPreset(profile, { short: true });
       return `
         <div class="profile-card local-profile-card" data-local-profile-id="${escAttr(profile.id)}" draggable="true" style="--profile-color:${escAttr(color)}">
           <div class="profile-name">
@@ -1895,6 +2156,7 @@ const app = (() => {
           <div class="profile-meta">
             <span>${escHtml(formatProfileTemperature(profile.temp_f))}</span>
             <span>${escHtml(formatProfileDuration(profile.time_s))}</span>
+            <span>${escHtml(vaporLabel)}</span>
             <span>${escHtml(moodName)}</span>
             <span class="profile-sync-badge warn">Local</span>
           </div>
@@ -1980,6 +2242,7 @@ const app = (() => {
     document.getElementById('modal-name').value = profile.name || '';
     document.getElementById('modal-temp').value = profile.temp_f ?? '';
     document.getElementById('modal-time').value = profile.time_s ?? '';
+    document.getElementById('modal-vapor').value = normalizeVaporPreset(profile);
     document.getElementById('modal-index').value = '';
 
     const mood = normalizeProfileMood(profile) || extractProfileMood(profile.color);
@@ -1989,6 +2252,7 @@ const app = (() => {
     moodEditor.dynamicInhale = Boolean(mood.dynamicInhale);
     syncPickerToMoodColor();
     renderMoodControls();
+    renderVaporControls();
     renderModalSummary();
     document.getElementById('modal-select').checked = false;
 
@@ -2002,6 +2266,7 @@ const app = (() => {
     const name = document.getElementById('modal-name').value.trim() || 'Local profile';
     const temp = parseFloat(document.getElementById('modal-temp').value);
     const time = parseFloat(document.getElementById('modal-time').value);
+    const vapor = normalizeVaporPreset(document.getElementById('modal-vapor')?.value);
     const mood = moodParams();
     if (!mood) return;
     const profile = {
@@ -2009,6 +2274,7 @@ const app = (() => {
       name,
       temp_f: temp,
       time_s: time,
+      vapor,
       color: null,
       mood: normalizeProfileMood({ mood }),
       saved_at: new Date().toISOString(),
@@ -2047,6 +2313,7 @@ const app = (() => {
       name: profile.name,
       temp_f: Number(profile.temp_f),
       time_s: Number(profile.time_s),
+      vapor: normalizeVaporPreset(profile),
     };
     const mood = normalizeProfileMood(profile);
     if (mood) {
@@ -2057,6 +2324,7 @@ const app = (() => {
         dynamic_inhale: mood.dynamicInhale ?? mood.dynamic_inhale ?? false,
       };
     }
+    writeProfileVaporOverride(index, params.vapor);
     send('set_profile', params);
   }
 
@@ -2207,9 +2475,13 @@ const app = (() => {
   function initMoodControls() {
     const tempo = document.getElementById('mood-tempo');
     const dynamic = document.getElementById('mood-dynamic');
-    ['modal-temp', 'modal-time'].forEach((id) => {
+    ['modal-temp', 'modal-time', 'modal-vapor'].forEach((id) => {
       const input = document.getElementById(id);
-      if (input) input.addEventListener('input', renderModalSummary);
+      if (!input) return;
+      input.addEventListener(id === 'modal-vapor' ? 'change' : 'input', () => {
+        if (id === 'modal-vapor') renderVaporControls();
+        renderModalSummary();
+      });
     });
     if (tempo) {
       tempo.addEventListener('input', () => {
@@ -2343,6 +2615,8 @@ const app = (() => {
     }
     return {
       preset: preset.sourcePreset || moodEditor.preset,
+      appPreset: moodEditor.preset,
+      name: preset.name,
       colors: moodEditor.colors.slice(),
       tempo_frac: moodEditor.tempoFrac,
       dynamic_inhale: moodEditor.dynamicInhale,
@@ -2408,22 +2682,6 @@ const app = (() => {
     moodEditor.preset = preset.id;
     renderMoodControls();
     toast('Mood saved locally', 'success');
-  }
-
-  function duplicateMoodPreset() {
-    const preset = currentMoodPresetPayload(`${activeMoodPreset().name || 'Mood'} Copy`);
-    preset.id = `local-mood-${Date.now()}`;
-    const validation = validateMoodPreset(preset);
-    if (!validation.ok) {
-      toast(validation.reason, 'error');
-      return;
-    }
-    const moods = readMoodLibrary();
-    moods.unshift(preset);
-    writeMoodLibrary(moods);
-    moodEditor.preset = preset.id;
-    renderMoodControls();
-    toast('Mood duplicated', 'success');
   }
 
   function deleteMoodPreset() {
@@ -2535,8 +2793,29 @@ const app = (() => {
     if (!summary) return;
     const temp = document.getElementById('modal-temp')?.value || '—';
     const time = document.getElementById('modal-time')?.value || '—';
+    const vapor = formatVaporPreset(document.getElementById('modal-vapor')?.value);
     const preset = activeMoodPreset();
-    summary.textContent = `${temp}°F · ${time}s · ${preset.name}`;
+    summary.textContent = `${temp}°F · ${time}s · ${vapor} · ${preset.name}`;
+  }
+
+  function renderVaporControls() {
+    const wrap = document.getElementById('modal-vapor-presets');
+    const select = document.getElementById('modal-vapor');
+    if (!wrap || !select) return;
+    const active = normalizeVaporPreset(select.value);
+    wrap.innerHTML = VAPOR_PRESETS.map((preset) => `
+      <button type="button" class="vapor-preset ${preset.id === active ? 'active' : ''}" data-vapor="${escAttr(preset.id)}">
+        <strong>${escHtml(preset.name)}</strong>
+        <span>${escHtml(preset.desc)}</span>
+      </button>
+    `).join('');
+    wrap.querySelectorAll('.vapor-preset').forEach((button) => {
+      button.addEventListener('click', () => {
+        select.value = button.dataset.vapor;
+        renderVaporControls();
+        renderModalSummary();
+      });
+    });
   }
 
   function editProfile(index) {
@@ -2550,6 +2829,7 @@ const app = (() => {
     document.getElementById('modal-name').value = profile.name || '';
     document.getElementById('modal-temp').value = profile.temp_f ?? '';
     document.getElementById('modal-time').value = profile.time_s ?? '';
+    document.getElementById('modal-vapor').value = normalizeVaporPreset(profile);
     document.getElementById('modal-index').value = index;
 
     const mood = extractProfileMood(profile.color);
@@ -2559,6 +2839,7 @@ const app = (() => {
     moodEditor.dynamicInhale = mood.dynamicInhale;
     syncPickerToMoodColor();
     renderMoodControls();
+    renderVaporControls();
     renderModalSummary();
     document.getElementById('modal-select').checked = false;
 
@@ -2567,7 +2848,8 @@ const app = (() => {
 
   function findProfile(index) {
     const profiles = Array.isArray(deviceState?.profiles) ? deviceState.profiles : [];
-    return profiles.find((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(index));
+    const fallback = profiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(index));
+    return fallback >= 0 ? profileWithVapor(profiles[fallback], fallback) : null;
   }
 
   function closeModal() {
@@ -2587,11 +2869,13 @@ const app = (() => {
     const name = document.getElementById('modal-name').value.trim() || null;
     const tempStr = document.getElementById('modal-temp').value;
     const timeStr = document.getElementById('modal-time').value;
+    const vapor = normalizeVaporPreset(document.getElementById('modal-vapor')?.value);
 
     const params = { index };
     if (name) params.name = name;
     if (tempStr) params.temp_f = parseFloat(tempStr);
     if (timeStr) params.time_s = parseFloat(timeStr);
+    params.vapor = vapor;
     const validation = validateProfile({
       name: name || findProfile(index)?.name || `Profile ${index}`,
       temp_f: params.temp_f ?? findProfile(index)?.temp_f,
@@ -2607,6 +2891,8 @@ const app = (() => {
     if (forceSelect || document.getElementById('modal-select').checked) params.select = true;
 
     saveProfileBackup('before_set_profile');
+    writeProfileVaporOverride(index, vapor);
+    updateOptimisticProfileDetails(index, params);
     send('set_profile', params);
     if (params.select) {
       optimisticProfileIndex = index;
@@ -2624,7 +2910,9 @@ const app = (() => {
         serial: deviceState?.serial || null,
       },
       current_profile: deviceState?.current_profile ?? null,
-      profiles: Array.isArray(deviceState?.profiles) ? applySavedProfileOrder(deviceState.profiles) : [],
+      profiles: Array.isArray(deviceState?.profiles)
+        ? applySavedProfileOrder(deviceState.profiles).map((profile, fallbackIndex) => profileWithVapor(profile, fallbackIndex))
+        : [],
     };
   }
 
@@ -2689,26 +2977,38 @@ const app = (() => {
     el.setAttribute('aria-pressed', String(Boolean(state)));
   }
 
-  function toggleLantern() {
-    if (!connected) return;
+  function setLanternState(nextState) {
+    if (!connected) return false;
     const previous = lanternOn;
-    lanternOn = !lanternOn;
+    lanternOn = Boolean(nextState);
     updateToggle('toggle-lantern', lanternOn);
     if (!send('lantern', { state: lanternOn ? 'on' : 'off' })) {
       lanternOn = previous;
       updateToggle('toggle-lantern', previous);
+      return false;
     }
+    return true;
   }
 
-  function toggleStealth() {
-    if (!connected) return;
+  function toggleLantern() {
+    return setLanternState(!lanternOn);
+  }
+
+  function setStealthState(nextState) {
+    if (!connected) return false;
     const previous = stealthOn;
-    stealthOn = !stealthOn;
+    stealthOn = Boolean(nextState);
     updateToggle('toggle-stealth', stealthOn);
     if (!send('stealth', { state: stealthOn ? 'on' : 'off' })) {
       stealthOn = previous;
       updateToggle('toggle-stealth', previous);
+      return false;
     }
+    return true;
+  }
+
+  function toggleStealth() {
+    return setStealthState(!stealthOn);
   }
 
   // ---- Brightness ----
@@ -2728,12 +3028,26 @@ const app = (() => {
   }
 
   function applyBrightness() {
-    send('brightness', {
+    return send('brightness', {
       base: parseInt(document.getElementById('slider-base').value),
       mid: parseInt(document.getElementById('slider-mid').value),
       glass: parseInt(document.getElementById('slider-glass').value),
       logo: parseInt(document.getElementById('slider-logo').value),
     });
+  }
+
+  function setAllBrightnessPercent(percent) {
+    const value = Math.max(1, Math.min(100, Math.round(Number(percent))));
+    if (!Number.isFinite(value)) return false;
+    const all = document.getElementById('slider-all');
+    if (all) all.value = String(value);
+    ['base', 'mid', 'glass', 'logo'].forEach((name) => {
+      const slider = document.getElementById(`slider-${name}`);
+      if (slider) slider.value = String(value);
+      updateSliderLabel(name);
+    });
+    setText('val-all', `${value}%`);
+    return applyBrightness();
   }
 
   function syncBoostOptionInputs(data) {
@@ -2752,6 +3066,7 @@ const app = (() => {
     if (!panel) return;
     syncBoostOptionInputs(deviceState);
     panel.classList.toggle('hidden');
+    document.getElementById('btn-boost-options')?.setAttribute('aria-expanded', String(!panel.classList.contains('hidden')));
   }
 
   function saveBoostOptions() {
@@ -2828,7 +3143,9 @@ const app = (() => {
     }
     if (!send('scan_devices', { timeout: 6, puffco_only: true })) {
       finishDeviceScan();
+      return false;
     }
+    return true;
   }
 
   function finishDeviceScan() {
@@ -2887,17 +3204,19 @@ const app = (() => {
   }
 
   function refreshStatus() {
-    send('status');
+    return send('status');
   }
 
   function selectProfile(index) {
-    if (!connected || optimisticProfileIndex === Number(index)) return;
+    if (!connected || optimisticProfileIndex === Number(index)) return false;
     optimisticProfileIndex = Number(index);
     updateOptimisticProfile(index);
     if (!send('select_profile', { index })) {
       optimisticProfileIndex = null;
       if (deviceState?.profiles) updateProfilesUI(deviceState.profiles, deviceState.current_profile);
+      return false;
     }
+    return true;
   }
 
   function updateOptimisticProfile(index) {
@@ -2910,6 +3229,7 @@ const app = (() => {
       active_profile_temp_f: Number.isFinite(Number(profile?.temp_f)) ? Number(profile.temp_f) : deviceState.active_profile_temp_f,
       profiles: deviceState.profiles.map((item, fallbackIndex) => ({
         ...item,
+        vapor: Number(item.index ?? fallbackIndex) === Number(index) ? normalizeVaporPreset(profile) : normalizeVaporPreset(item),
         active: Number(item.index ?? fallbackIndex) === Number(index),
       })),
     };
@@ -2920,47 +3240,80 @@ const app = (() => {
     appendLog(`Switching to ${profile?.name || `Profile ${index}`}`, 'info');
   }
 
+  function updateOptimisticProfileDetails(index, params) {
+    if (!deviceState || !Array.isArray(deviceState.profiles)) return;
+    const targetIndex = Number(index);
+    deviceState = {
+      ...deviceState,
+      profiles: deviceState.profiles.map((item, fallbackIndex) => {
+        if (Number(item.index ?? fallbackIndex) !== targetIndex) return item;
+        return {
+          ...item,
+          name: params.name ?? item.name,
+          temp_f: params.temp_f ?? item.temp_f,
+          time_s: params.time_s ?? item.time_s,
+          vapor: normalizeVaporPreset(params.vapor ?? item),
+        };
+      }),
+    };
+    if (Number(deviceState.current_profile) === targetIndex) {
+      const profile = findProfile(targetIndex);
+      deviceState.active_profile_name = profile?.name || deviceState.active_profile_name;
+      deviceState.active_profile_temp_f = profile?.temp_f ?? deviceState.active_profile_temp_f;
+    }
+    lastDeviceSnapshot = deviceState;
+    updateProfilesUI(deviceState.profiles, deviceState.current_profile);
+    updateHeroTelemetry(deviceState);
+    updateTelemetryFields(deviceState);
+  }
+
   function heat() {
-    if (heatCommandPending || isHeatActive(deviceState)) return;
+    if (heatCommandPending || isHeatActive(deviceState)) return false;
     heatCommandPending = 'heat';
     updateHeatControls();
     if (!send('heat')) {
       heatCommandPending = null;
       updateHeatControls();
+      return false;
     }
+    return true;
   }
 
-  function stop() {
-    if (heatCommandPending) return;
+  function stop(priority = false) {
+    if (heatCommandPending && !priority) return false;
     heatCommandPending = 'stop';
     updateHeatControls();
     if (!send('stop')) {
       heatCommandPending = null;
       updateHeatControls();
+      return false;
     }
+    return true;
   }
 
   function boost() {
-    if (heatCommandPending || !isHeatActive(deviceState)) return;
+    if (heatCommandPending || !isHeatActive(deviceState)) return false;
     heatCommandPending = 'boost';
     updateHeatControls();
     if (!send('boost')) {
       heatCommandPending = null;
       updateHeatControls();
+      return false;
     }
+    return true;
   }
 
   function showBattery() {
-    send('show_battery');
+    return send('show_battery');
   }
 
   function showVersion() {
-    send('show_version');
+    return send('show_version');
   }
 
   function power(cmd) {
-    if (cmd === 'off' && !confirm('Power off the device?')) return;
-    send('power', { cmd });
+    if (cmd === 'off' && !confirm('Power off the device?')) return false;
+    return send('power', { cmd });
   }
 
   function factoryReset() {
@@ -3418,7 +3771,9 @@ const app = (() => {
     const total = secondsNumber(data?.state_total_time_s);
     const selectedProfile = getSelectedProfile(data);
     const profileDuration = secondsNumber(selectedProfile?.time_s) ?? secondsNumber(data?.active_profile_time_s);
-    const duration = profileDuration ?? (active ? total : null);
+    const durationCandidates = [profileDuration];
+    if (active) durationCandidates.push(total);
+    const duration = durationCandidates.filter(value => value != null).reduce((max, value) => Math.max(max, value), null);
     const activeTimer = active && stateKey === 'HEAT_CYCLE_ACTIVE';
     const remaining = activeTimer && elapsed != null && duration != null ? Math.max(0, duration - elapsed) : null;
     const timerConfidence = activeTimer && remaining != null ? 'firmware' : active ? 'preheating' : 'inactive';
@@ -3595,9 +3950,10 @@ const app = (() => {
     const profiles = Array.isArray(data?.profiles) ? data.profiles : [];
     if (!profiles.length) return null;
     const selected = data?.current_profile;
-    return profiles.find((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(selected))
-      || profiles.find((profile) => profile?.active)
-      || null;
+    const selectedIndex = profiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(selected));
+    if (selectedIndex >= 0) return profileWithVapor(profiles[selectedIndex], selectedIndex);
+    const activeIndex = profiles.findIndex((profile) => profile?.active);
+    return activeIndex >= 0 ? profileWithVapor(profiles[activeIndex], activeIndex) : null;
   }
 
   function formatChamber(value) {
@@ -4144,6 +4500,366 @@ const app = (() => {
     send('temperature_source', { clear: true });
   }
 
+  function voiceSupportConstructor() {
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  }
+
+  function updateVoiceUI(message = null) {
+    const button = document.getElementById('btn-voice');
+    const state = document.getElementById('voice-state');
+    if (button) button.textContent = voiceListening ? 'Stop Voice' : 'Enable Voice';
+    if (state) {
+      state.textContent = message || (voiceListening ? 'Listening' : voicePermissionGranted ? 'Ready' : 'Permission required');
+      state.classList.toggle('listening', voiceListening);
+    }
+  }
+
+  function setVoiceBluetoothPrompt(visible, message = null) {
+    voiceBluetoothPending = Boolean(visible);
+    const prompt = document.getElementById('voice-bluetooth-prompt');
+    const note = document.getElementById('voice-bluetooth-note');
+    if (prompt) prompt.classList.toggle('hidden', !voiceBluetoothPending);
+    if (note && message) note.textContent = message;
+  }
+
+  function updateVoicePreview(text = null, confidence = null) {
+    const heard = document.getElementById('voice-heard-preview');
+    const conf = document.getElementById('voice-confidence');
+    if (heard && text != null) heard.textContent = `Heard: ${text || '—'}`;
+    if (conf && confidence != null) {
+      const pct = Number.isFinite(Number(confidence)) ? `${Math.round(Number(confidence) * 100)}%` : '—';
+      conf.textContent = `Confidence: ${pct}`;
+    }
+  }
+
+  function setVoiceTranscript(text, handled = null) {
+    const transcript = document.getElementById('voice-transcript');
+    if (transcript) {
+      const suffix = handled == null ? '' : handled ? ' · sent' : ' · not sent';
+      transcript.textContent = `${text || 'No command heard yet'}${suffix}`;
+    }
+  }
+
+  function updateVoiceMeter(level) {
+    const meter = document.querySelector('.voice-meter');
+    if (meter) meter.style.setProperty('--voice-level', String(Math.max(0, Math.min(100, Math.round(level)))));
+  }
+
+  async function ensureVoiceMic() {
+    if (voiceStream) return true;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      updateVoiceUI('Mic API unavailable');
+      return false;
+    }
+    try {
+      voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voicePermissionGranted = true;
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextCtor) {
+        voiceAudioContext = new AudioContextCtor();
+        const source = voiceAudioContext.createMediaStreamSource(voiceStream);
+        voiceAnalyser = voiceAudioContext.createAnalyser();
+        voiceAnalyser.fftSize = 512;
+        source.connect(voiceAnalyser);
+        runVoiceMeter();
+      }
+      return true;
+    } catch (err) {
+      voicePermissionGranted = false;
+      updateVoiceUI(err?.name === 'NotAllowedError' ? 'Mic permission denied' : 'Mic unavailable');
+      setVoiceTranscript(`Mic error: ${err?.message || err}`, false);
+      return false;
+    }
+  }
+
+  function runVoiceMeter() {
+    if (!voiceAnalyser) return;
+    const samples = new Uint8Array(voiceAnalyser.fftSize);
+    const tick = () => {
+      if (!voiceListening || !voiceAnalyser) {
+        updateVoiceMeter(0);
+        return;
+      }
+      voiceAnalyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) {
+        const centered = sample - 128;
+        sum += centered * centered;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      updateVoiceMeter(Math.min(100, rms * 5.6));
+      voiceMeterFrame = requestAnimationFrame(tick);
+    };
+    cancelAnimationFrame(voiceMeterFrame);
+    tick();
+  }
+
+  function voiceProfileIndex(text) {
+    const words = { one: 0, first: 0, blue: 0, two: 1, second: 1, green: 1, three: 2, third: 2, red: 2, four: 3, fourth: 3, gold: 3 };
+    const numberMatch = text.match(/\bprofile\s*([1-4])\b/);
+    if (numberMatch) return Number(numberMatch[1]) - 1;
+    const word = Object.keys(words).find((key) => new RegExp(`\\b(profile\\s+)?${key}\\b`).test(text));
+    return word == null ? null : words[word];
+  }
+
+  function runVoiceConnect(text) {
+    if (connectPending) {
+      updateVoiceUI('Chooser already opening');
+      setVoiceTranscript(`Heard: ${text}`, true);
+      return true;
+    }
+    if (connected) {
+      setVoiceBluetoothPrompt(false);
+      updateVoiceUI('Already connected');
+      setVoiceTranscript(`Heard: ${text}`, true);
+      return true;
+    }
+    if (transportMode !== 'browser_ble') {
+      setTransportMode('browser_ble');
+    }
+    const hasUserActivation = window.navigator?.userActivation ? window.navigator.userActivation.isActive === true : true;
+    if (!hasUserActivation) {
+      const message = 'Chrome requires one page tap before it can show Bluetooth devices.';
+      setVoiceBluetoothPrompt(true, message);
+      updateVoiceUI('Tap Open Chooser');
+      setVoiceTranscript(`Heard: ${text} · Bluetooth chooser queued`, true);
+      appendLog('Voice queued Bluetooth chooser; browser requires a trusted tap to open it.', 'warn');
+      return true;
+    }
+    setVoiceBluetoothPrompt(false);
+    updateVoiceUI('Opening Bluetooth chooser');
+    setVoiceTranscript('Opening Bluetooth chooser for Peak Pro', true);
+    connectDevice();
+    return true;
+  }
+
+  function openBluetoothFromVoice() {
+    const text = voiceBluetoothPending ? 'queued bluetooth selector' : 'open bluetooth selector';
+    lastVoiceCommandText = '';
+    lastVoiceCommandAt = 0;
+    updateVoicePreview(text, null);
+    return runVoiceConnect(text);
+  }
+
+  function handleVoiceCommand(transcript) {
+    const text = String(transcript || '').toLowerCase().trim();
+    if (!text) return false;
+    const now = Date.now();
+    if (text === lastVoiceCommandText && now - lastVoiceCommandAt < 1800) return false;
+    lastVoiceCommandText = text;
+    lastVoiceCommandAt = now;
+    updateVoicePreview(text, null);
+    setVoiceTranscript(`Heard: ${text}`);
+    appendLog(`Voice heard: ${text}`, 'info');
+    if (/\b(browser|web)\s*(bluetooth|ble)\s*(mode)?\b/.test(text)) {
+      setTransportMode('browser_ble');
+      updateVoiceUI('Browser Bluetooth mode');
+      setVoiceTranscript(`Heard: ${text}`, true);
+      return true;
+    }
+    if (/\b(local|windows)?\s*bridge\s*(mode)?\b/.test(text)) {
+      setTransportMode('bridge');
+      updateVoiceUI('Bridge mode');
+      setVoiceTranscript(`Heard: ${text}`, true);
+      return true;
+    }
+    if (/\b(open|show|start|launch)?\s*(bluetooth|ble)\s*(selector|chooser|pairing)?\b/.test(text)
+      || /\b(connect|pair|find|scan)\b.*\b(peak|peak pro|puffco|device|bluetooth|ble)\b/.test(text)
+      || /\b(scan|find|search)\s*(devices?|peak|puffco)?\b/.test(text)
+      || /\b(connect|pair)\b/.test(text)) {
+      return runVoiceConnect(text);
+    }
+    if (/\b(disconnect|unpair)\b/.test(text)) {
+      disconnectDevice();
+      updateVoiceUI('Disconnect requested');
+      setVoiceTranscript(`Heard: ${text}`, true);
+      return true;
+    }
+    if (/\b(stop|cancel|end)\b/.test(text)) {
+      const sent = stop(true);
+      updateVoiceUI(sent ? 'Stop sent' : 'Stop blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(boost|boost it)\b/.test(text)) {
+      const sent = boost();
+      updateVoiceUI(sent ? 'Boost sent' : 'Boost needs active heat');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(battery|battery level|show battery)\b/.test(text)) {
+      const sent = showBattery();
+      updateVoiceUI(sent ? 'Battery sent' : 'Battery blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(version|show version|firmware)\b/.test(text)) {
+      const sent = showVersion();
+      updateVoiceUI(sent ? 'Version sent' : 'Version blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\blantern\b/.test(text)) {
+      const desired = /\b(off|disable|disabled)\b/.test(text) ? false : /\b(on|enable|enabled)\b/.test(text) ? true : !lanternOn;
+      const sent = setLanternState(desired);
+      updateVoiceUI(sent ? `Lantern ${desired ? 'on' : 'off'} sent` : 'Lantern blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\bstealth\b/.test(text)) {
+      const desired = /\b(off|disable|disabled)\b/.test(text) ? false : /\b(on|enable|enabled)\b/.test(text) ? true : !stealthOn;
+      const sent = setStealthState(desired);
+      updateVoiceUI(sent ? `Stealth ${desired ? 'on' : 'off'} sent` : 'Stealth blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    const brightnessMatch = text.match(/\b(?:brightness|lights?|leds?)\s*(?:to|at)?\s*(\d{1,3})\s*(?:percent|%)?\b/)
+      || text.match(/\b(?:set|make)\s*(?:brightness|lights?|leds?)\s*(?:to|at)?\s*(\d{1,3})\s*(?:percent|%)?\b/);
+    if (brightnessMatch) {
+      const percent = Number(brightnessMatch[1]);
+      const sent = setAllBrightnessPercent(percent);
+      updateVoiceUI(sent ? `Brightness ${Math.max(1, Math.min(100, Math.round(percent)))}% sent` : 'Brightness blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(go to sleep|sleep mode|sleep)\b/.test(text)) {
+      const sent = power('sleep');
+      updateVoiceUI(sent ? 'Sleep sent' : 'Sleep blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(power off|turn off device|shut down)\b/.test(text)) {
+      const sent = power('off');
+      updateVoiceUI(sent ? 'Power off sent' : 'Power off canceled');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(start|begin|run)\b.*\b(heat|session|cycle)\b|\bheat up\b/.test(text)) {
+      const sent = heat();
+      updateVoiceUI(sent ? 'Heat sent' : 'Heat unavailable');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    const profileIndex = voiceProfileIndex(text);
+    if (profileIndex != null) {
+      const sent = selectProfile(profileIndex);
+      updateVoiceUI(sent ? `Profile ${profileIndex + 1} sent` : 'Profile blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    if (/\b(resync|reconnect)\b/.test(text)) {
+      resyncDevice();
+      updateVoiceUI('Resync requested');
+      setVoiceTranscript(`Heard: ${text}`, true);
+      return true;
+    }
+    if (/\b(status|refresh|sync)\b/.test(text)) {
+      const sent = refreshStatus();
+      updateVoiceUI(sent ? 'Status sent' : 'Status blocked');
+      setVoiceTranscript(`Heard: ${text}`, sent);
+      return sent;
+    }
+    updateVoiceUI('Command not matched');
+    setVoiceTranscript(`Heard: ${text}`, false);
+    return false;
+  }
+
+  function testVoiceCommand() {
+    const input = document.getElementById('voice-test-command');
+    const value = input?.value?.trim();
+    if (!value) {
+      updateVoiceUI('Enter a command');
+      return false;
+    }
+    return handleVoiceCommand(value);
+  }
+
+  async function startVoiceCommands() {
+    const Recognition = voiceSupportConstructor();
+    updateVoiceUI('Requesting mic');
+    if (!(await ensureVoiceMic())) return;
+    if (!Recognition) {
+      voiceListening = true;
+      runVoiceMeter();
+      toast('Mic enabled, but speech-to-text is not supported in this browser', 'warn');
+      updateVoiceUI('Mic only');
+      setVoiceTranscript('Mic meter is active; use Chrome/Edge for speech-to-text', false);
+      return;
+    }
+    if (!voiceRecognition) {
+      voiceRecognition = new Recognition();
+      voiceRecognition.continuous = true;
+      voiceRecognition.interimResults = true;
+      voiceRecognition.lang = 'en-US';
+      voiceRecognition.onstart = () => {
+        voiceListening = true;
+        updateVoiceUI('Listening');
+        setVoiceTranscript('Speech recognition started');
+      };
+      voiceRecognition.onaudiostart = () => updateVoiceUI('Mic active');
+      voiceRecognition.onsoundstart = () => updateVoiceUI('Sound detected');
+      voiceRecognition.onspeechstart = () => updateVoiceUI('Speech detected');
+      voiceRecognition.onspeechend = () => updateVoiceUI('Processing speech');
+      voiceRecognition.onresult = (event) => {
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const alternative = event.results[index][0];
+          const heard = alternative?.transcript;
+          if (!heard) continue;
+          updateVoicePreview(heard.trim(), alternative?.confidence);
+          setVoiceTranscript(`Hearing: ${heard.trim()}`);
+          if (event.results[index].isFinal || /\b(stop|cancel|end|boost|start heat|heat up|status|refresh|sync|resync|connect|disconnect|profile|bluetooth|ble|pair|peak pro|scan|battery|version|firmware|lantern|stealth|brightness|lights|leds|sleep|power off|bridge)\b/i.test(heard)) {
+            handleVoiceCommand(heard);
+          }
+        }
+      };
+      voiceRecognition.onerror = (event) => {
+        if (event.error === 'not-allowed') voicePermissionGranted = false;
+        setVoiceTranscript(`Speech error: ${event.error}`, false);
+        const labels = {
+          'not-allowed': 'Speech permission denied',
+          'audio-capture': 'No microphone found',
+          network: 'Speech network error',
+          'no-speech': 'No speech heard',
+          aborted: 'Speech aborted',
+        };
+        updateVoiceUI(labels[event.error] || `Speech error: ${event.error}`);
+      };
+      voiceRecognition.onend = () => {
+        if (voiceListening) {
+          setTimeout(() => {
+            try { voiceRecognition.start(); } catch {}
+          }, document.hidden ? 1000 : 250);
+        }
+      };
+    }
+    voiceListening = true;
+    voicePermissionGranted = true;
+    updateVoiceUI('Starting speech');
+    runVoiceMeter();
+    try {
+      voiceRecognition.start();
+      toast('Voice commands listening', 'success');
+    } catch (err) {
+      voiceListening = false;
+      updateVoiceUI('Speech start failed');
+      setVoiceTranscript(`Speech start failed: ${err?.message || err}`, false);
+      updateVoiceMeter(0);
+    }
+  }
+
+  function stopVoiceCommands() {
+    voiceListening = false;
+    try { voiceRecognition?.stop(); } catch {}
+    cancelAnimationFrame(voiceMeterFrame);
+    updateVoiceMeter(0);
+    updateVoiceUI();
+  }
+
+  function toggleVoiceCommands() {
+    if (voiceListening) stopVoiceCommands();
+    else startVoiceCommands();
+  }
+
   function devRunLoraxAction() {
     const action = selectValue('dev-lorax-action');
     if (!action) {
@@ -4196,6 +4912,11 @@ const app = (() => {
     window.addEventListener('orientationchange', syncShellClasses, { passive: true });
     document.addEventListener('visibilitychange', () => {
       restartBrowserBlePolling();
+      if (voiceListening && voiceRecognition) {
+        setTimeout(() => {
+          try { voiceRecognition.start(); } catch {}
+        }, document.hidden ? 1000 : 150);
+      }
       if (!document.hidden && connected) {
         if (transportMode === 'bridge' && ws?.readyState === WebSocket.OPEN) {
           send('status');
@@ -4222,6 +4943,8 @@ const app = (() => {
     updateConnectionUI(false);
     renderBridgeUI();
     renderProfileLibrary();
+    updateVoiceUI();
+    updateVoicePreview('—', null);
 
     initAppNavigation();
     initLabelTooltips();
@@ -4286,18 +5009,6 @@ const app = (() => {
     setMoodPreset,
     addMoodColor,
     saveMoodPreset,
-    archiveLocalProfile,
-    copyLocalProfileToDevice,
-    restoreProfileBackup,
-    restoreDefaultProfiles,
-    toggleLantern,
-    toggleStealth,
-    applyColorToProfile,
-    applyLanternColor,
-    setMoodPreset,
-    addMoodColor,
-    saveMoodPreset,
-    duplicateMoodPreset,
     deleteMoodPreset,
     exportMoods,
     openMoodImport,
@@ -4309,6 +5020,10 @@ const app = (() => {
     updateAllBrightness,
     toggleBoostOptions,
     saveBoostOptions,
+    toggleVoiceCommands,
+    openBluetoothFromVoice,
+    handleVoiceCommand,
+    testVoiceCommand,
     heat,
     stop,
     boost,

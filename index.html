@@ -146,10 +146,71 @@
                 <span>Profile</span>
                 <strong id="hero-profile">—</strong>
               </div>
+              <div>
+                <span>Vapor</span>
+                <strong id="hero-vapor">—</strong>
+              </div>
             </div>
           </div>
           <div class="device-visual" aria-hidden="true">
             <div class="device-halo"></div>
+          </div>
+        </div>
+
+        <div class="heat-status-control connected-only" id="heat-control-card">
+          <div class="heat-status-heading">
+            <div>
+              <div class="stat-label">Heat Control</div>
+              <strong id="heat-status-text">Idle</strong>
+            </div>
+            <div class="heat-indicator" id="heat-indicator" aria-live="polite">
+              <span class="heat-dot"></span>
+            </div>
+          </div>
+          <div class="heat-controls">
+            <button class="btn btn-heat" id="btn-heat" onclick="app.heat()">Start Heat</button>
+            <button class="btn btn-secondary hidden" id="btn-boost" onclick="app.boost()">Boost</button>
+            <button class="btn btn-secondary hidden" id="btn-extend" disabled title="Extend is not exposed by this BLE bridge yet">Extend</button>
+            <button class="btn btn-danger hidden" id="btn-stop" onclick="app.stop()">Stop</button>
+            <button class="btn btn-secondary" id="btn-boost-options" aria-expanded="false" aria-controls="boost-options-panel" onclick="app.toggleBoostOptions()">Boost Options</button>
+          </div>
+          <div class="boost-options hidden" id="boost-options-panel">
+            <div class="input-group">
+              <label for="boost-temp-delta">Boost Temp</label>
+              <input type="number" id="boost-temp-delta" min="0" max="120" step="1" placeholder="+10" />
+            </div>
+            <div class="input-group">
+              <label for="boost-time-delta">Boost Time</label>
+              <input type="number" id="boost-time-delta" min="0" max="180" step="1" placeholder="+30" />
+            </div>
+            <button class="btn btn-primary" id="btn-save-boost-options" onclick="app.saveBoostOptions()">Save Boost</button>
+          </div>
+          <div class="heat-live-panel" id="heat-live-panel" aria-live="polite">
+            <div>
+              <span class="heat-live-label">Timer</span>
+              <strong id="heat-countdown">Idle</strong>
+            </div>
+            <div class="heat-live-details">
+              <span id="heat-live-phase">Idle</span>
+              <span id="heat-live-current">Current unavailable</span>
+              <span id="heat-live-target">Target unavailable</span>
+              <span id="heat-live-meta">Waiting for device</span>
+            </div>
+          </div>
+          <div class="draw-strength-panel" id="draw-strength-panel" style="--draw-strength: 0;">
+            <div class="draw-strength-head">
+              <span>Dynamic Inhale</span>
+              <strong id="draw-strength-label">Idle</strong>
+            </div>
+            <div class="draw-strength-track" aria-hidden="true">
+              <div class="draw-strength-fill" id="draw-strength-fill"></div>
+            </div>
+            <div class="draw-strength-source" id="draw-strength-source">Path search pending</div>
+          </div>
+          <div class="session-metrics" id="session-metrics">
+          <span><b>Remaining</b><i id="session-remaining">—</i></span>
+          <span><b>Boost</b><i id="session-boost">—</i></span>
+          <span><b>Chamber</b><i id="session-chamber">—</i></span>
           </div>
         </div>
 
@@ -184,21 +245,9 @@
             <div class="stat-label">Active Profile</div>
             <div class="stat-value" id="stat-profile">—</div>
           </div>
-          <div class="stat-item telemetry-stat">
-            <div class="stat-label">Live Temp</div>
-            <div class="stat-value" id="stat-current-temp">—</div>
-          </div>
-          <div class="stat-item telemetry-stat">
-            <div class="stat-label">Target</div>
-            <div class="stat-value" id="stat-target-temp">—</div>
-          </div>
-          <div class="stat-item telemetry-stat">
-            <div class="stat-label">Timer</div>
-            <div class="stat-value" id="stat-heat-timer">—</div>
-          </div>
-          <div class="stat-item telemetry-stat">
-            <div class="stat-label">Boost</div>
-            <div class="stat-value" id="stat-boost">—</div>
+          <div class="stat-item">
+            <div class="stat-label">Vapor Control</div>
+            <div class="stat-value" id="stat-vapor">—</div>
           </div>
           <div class="stat-item">
             <div class="stat-label">LED Brightness</div>
@@ -240,53 +289,7 @@
       <div class="profile-library-grid" id="profile-library-grid"></div>
     </section>
 
-    <div class="section-grid connected-only" id="controls-grid">
-      <!-- Heat Controls -->
-      <section class="card connected-only" id="heat-control-card">
-        <div class="card-header">
-          <h2><span class="icon icon-heat"></span> Heat Control</h2>
-        </div>
-        <div class="heat-controls">
-          <button class="btn btn-heat" id="btn-heat" onclick="app.heat()">Start Heat</button>
-          <button class="btn btn-secondary hidden" id="btn-boost" onclick="app.boost()">Boost</button>
-          <button class="btn btn-secondary hidden" id="btn-extend" disabled title="Extend is not exposed by this BLE bridge yet">Extend</button>
-          <button class="btn btn-danger hidden" id="btn-stop" onclick="app.stop()">Stop</button>
-          <button class="btn btn-secondary" id="btn-boost-options" onclick="app.toggleBoostOptions()">Boost Options</button>
-        </div>
-        <div class="boost-options hidden" id="boost-options-panel">
-          <div class="input-group">
-            <label for="boost-temp-delta">Boost Temp</label>
-            <input type="number" id="boost-temp-delta" min="0" max="120" step="1" placeholder="+10" />
-          </div>
-          <div class="input-group">
-            <label for="boost-time-delta">Boost Time</label>
-            <input type="number" id="boost-time-delta" min="0" max="180" step="1" placeholder="+30" />
-          </div>
-          <button class="btn btn-primary" id="btn-save-boost-options" onclick="app.saveBoostOptions()">Save Boost</button>
-        </div>
-        <div class="heat-indicator mt-sm" id="heat-indicator" aria-live="polite">
-          <span class="heat-dot"></span>
-          <span id="heat-status-text">Idle</span>
-        </div>
-        <div class="heat-live-panel" id="heat-live-panel" aria-live="polite">
-          <div>
-            <span class="heat-live-label">Timer</span>
-            <strong id="heat-countdown">Idle</strong>
-          </div>
-          <div class="heat-live-details">
-            <span id="heat-live-phase">Idle</span>
-            <span id="heat-live-current">Current unavailable</span>
-            <span id="heat-live-target">Target unavailable</span>
-            <span id="heat-live-meta">Waiting for device</span>
-          </div>
-        </div>
-        <div class="session-metrics" id="session-metrics">
-          <span><b>Remaining</b><i id="session-remaining">—</i></span>
-          <span><b>Boost</b><i id="session-boost">—</i></span>
-          <span><b>Chamber</b><i id="session-chamber">—</i></span>
-        </div>
-      </section>
-
+    <div class="section-grid" id="controls-grid">
       <!-- Lighting -->
       <section class="card connected-only" id="lighting-card">
         <div class="card-header">
@@ -306,6 +309,55 @@
             <button class="btn btn-sm btn-secondary" onclick="app.applyMoodToLantern()">Apply Mood</button>
           </div>
         </div>
+      </section>
+
+      <section class="card" id="voice-card">
+        <div class="card-header">
+          <h2><span class="icon icon-status"></span> Voice Commands</h2>
+          <button class="btn btn-sm btn-secondary" id="btn-voice" onclick="app.toggleVoiceCommands()">Enable Voice</button>
+        </div>
+        <div class="voice-command-panel">
+          <div>
+            <div class="stat-label">Priority Commands</div>
+            <div class="voice-command-list">open bluetooth · connect peak pro · start heat · stop · boost · profile one-four · battery · lantern · stealth · brightness 70</div>
+          </div>
+          <div class="voice-state" id="voice-state">Permission required</div>
+        </div>
+        <div class="voice-preview">
+          <div class="voice-meter" style="--voice-level:0;">
+            <div class="voice-meter-fill" id="voice-meter-fill"></div>
+          </div>
+          <div class="voice-preview-meta">
+            <span id="voice-heard-preview">Heard: —</span>
+            <span id="voice-confidence">Confidence: —</span>
+          </div>
+        </div>
+        <div class="voice-command-chips" aria-label="Test voice commands">
+          <button class="btn btn-sm btn-primary" onclick="app.openBluetoothFromVoice()">Open Bluetooth</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.openBluetoothFromVoice()">Connect Peak Pro</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('status')">Status</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('stop')">Stop</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('boost')">Boost</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('profile two')">Profile 2</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('battery')">Battery</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('lantern on')">Lantern</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('stealth on')">Stealth</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('brightness 70')">Brightness 70</button>
+        </div>
+        <div class="voice-bluetooth-prompt hidden" id="voice-bluetooth-prompt">
+          <div>
+            <strong>Bluetooth chooser queued</strong>
+            <span id="voice-bluetooth-note">Browsers need one tap to open the device selector.</span>
+          </div>
+          <button class="btn btn-sm btn-primary" id="voice-open-bluetooth" onclick="app.openBluetoothFromVoice()">Open Chooser</button>
+        </div>
+        <div class="voice-test-row">
+          <input type="text" id="voice-test-command" placeholder="Try: start heat" />
+          <button class="btn btn-sm btn-secondary" onclick="app.testVoiceCommand()">Run</button>
+        </div>
+        <div class="voice-transcript" id="voice-transcript">No command heard yet</div>
+        <div class="voice-help">Enable Voice should first move the mic meter, then update Heard as speech-to-text receives words.</div>
       </section>
     </div>
 
@@ -726,6 +778,16 @@
               <input type="number" id="modal-time" min="5" max="180" step="1" placeholder="60" />
               <strong>s</strong>
             </label>
+            <label class="dial-field vapor-field">
+              <span>Vapor Control</span>
+              <select id="modal-vapor">
+                <option value="standard">Balanced</option>
+                <option value="high">High Vapor</option>
+                <option value="max">Max Vapor</option>
+                <option value="xl">XL Vapor</option>
+              </select>
+              <div class="vapor-presets" id="modal-vapor-presets" aria-label="Vapor presets"></div>
+            </label>
           </div>
           <label class="check-row">
             <input type="checkbox" id="modal-select" />
@@ -744,7 +806,6 @@
           <div class="mood-library-actions">
             <input type="text" id="mood-name" placeholder="Mood preset name" maxlength="40" />
             <button class="btn btn-sm btn-secondary" onclick="app.saveMoodPreset()">Save Mood</button>
-            <button class="btn btn-sm btn-secondary" onclick="app.duplicateMoodPreset()">Duplicate</button>
             <button class="btn btn-sm btn-secondary" onclick="app.deleteMoodPreset()">Delete</button>
             <button class="btn btn-sm btn-secondary" onclick="app.exportMoods()">Export</button>
             <button class="btn btn-sm btn-secondary" onclick="app.openMoodImport()">Import</button>

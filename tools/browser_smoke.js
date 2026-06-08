@@ -95,6 +95,17 @@ async function main() {
   });
   await sleep(500);
 
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const input = document.querySelector("#voice-test-command");
+      if (input) input.value = "status";
+      app.testVoiceCommand();
+      app.handleVoiceCommand("open bluetooth selector");
+    })()`,
+    returnByValue: true,
+  });
+  await sleep(250);
+
   const expression = `(() => {
     const text = (sel) => document.querySelector(sel)?.textContent?.trim() || null;
     const exists = (sel) => !!document.querySelector(sel);
@@ -130,8 +141,13 @@ async function main() {
       navRect,
       hasStatusEmpty: document.querySelector("#status-empty")?.classList.contains("visible"),
       toastText: [...document.querySelectorAll(".toast")].map((toast) => toast.textContent.trim()),
-      disabledDeviceButtons: [...document.querySelectorAll("#controls-grid button, #color-card button, #brightness-card button, #power-card button")]
+      disabledDeviceButtons: [...document.querySelectorAll("#controls-grid .connected-only button, #color-card button, #brightness-card button, #power-card button")]
         .every((button) => button.disabled),
+      voiceControlsEnabled: [...document.querySelectorAll("#voice-card button, #voice-card input")]
+        .every((control) => !control.disabled),
+      voiceTranscript: text("#voice-transcript"),
+      voiceHeard: text("#voice-heard-preview"),
+      voiceBluetoothPromptVisible: !document.querySelector("#voice-bluetooth-prompt")?.classList.contains("hidden"),
       overflowX: document.documentElement.scrollWidth > window.innerWidth,
       bodyWidth: document.documentElement.scrollWidth,
       viewportWidth: window.innerWidth,
@@ -180,6 +196,10 @@ async function main() {
     failures.push("Mobile viewport is not using the mobile hotbar");
   }
   if (!pageData.disabledDeviceButtons) failures.push("Device controls are enabled while disconnected");
+  if (!pageData.voiceControlsEnabled) failures.push("Voice controls are disabled while disconnected");
+  if (!pageData.voiceTranscript?.includes("Bluetooth chooser queued")) failures.push("Voice connect command did not queue the Bluetooth chooser");
+  if (!pageData.voiceHeard?.includes("open bluetooth selector")) failures.push("Voice preview did not show the heard command");
+  if (!pageData.voiceBluetoothPromptVisible) failures.push("Voice Bluetooth prompt is hidden after a connect command");
   if (pageData.toastOverControls) failures.push("Toast overlaps the main control area");
 
   console.log(JSON.stringify({

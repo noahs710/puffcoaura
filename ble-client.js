@@ -97,6 +97,15 @@ class PuffcoBrowserBleClient {
     4: 'Toad chamber',
   };
 
+  static DRAW_STRENGTH_CANDIDATES = [
+    { path: '/p/app/htr/draw', mode: 'direct' },
+    { path: '/p/app/htr/inh', mode: 'direct' },
+    { path: '/p/app/htr/air', mode: 'direct' },
+    { path: '/p/htr/air', mode: 'direct' },
+    { path: '/p/htr/flow', mode: 'direct' },
+    { path: '/p/htr/pwr', mode: 'heater_power_proxy' },
+  ];
+
   static MOOD_PRESETS = {
     no_animation: { name: 'Static color', desc: 'Split your Peak into different color regions', tag: 'pikaled2-no-animation-mood-light', minColors: 1, maxColors: 6, defaults: ['#ff0000'], anim: 1 },
     fade: { name: 'Fade', desc: 'Smooth transitions', tag: 'pikaled2-fade-mood-light', minColors: 2, maxColors: 6, defaults: ['#ff0000', '#00ff00'], anim: 1 },
@@ -143,6 +152,7 @@ class PuffcoBrowserBleClient {
     if (cmd === 'lorax_write') return this.loraxWrite(params);
     if (cmd === 'select_profile') return this.selectProfile(params);
     if (cmd === 'set_profile') return this.setProfile(params);
+    if (cmd === 'reorder_profiles') return this.reorderProfiles(params);
     if (cmd === 'set_color') return this.setColor(params);
     if (cmd === 'mood_light') return this.setMoodLight(params);
     if (cmd === 'lantern_color') return this.setLanternColor(params);
@@ -153,7 +163,7 @@ class PuffcoBrowserBleClient {
     if (cmd === 'show_version') return this.modeCommand('show_version', 'Version animation started');
     if (cmd === 'heat') return this.modeCommand('heat', 'Heat cycle started');
     if (cmd === 'stop') return this.modeCommand('stop', 'Heat cycle stopped');
-    if (cmd === 'boost') return this.modeCommand('boost', 'Boost sent');
+    if (cmd === 'boost') return this.modeCommand('boost', 'Boost sent', { settleMs: 350 });
     if (cmd === 'set_boost_options') return this.setBoostOptions(params);
     if (cmd === 'power') return this.power(params);
     if (cmd === 'official_attributes') return this.officialAttributes();
@@ -616,6 +626,7 @@ class PuffcoBrowserBleClient {
     const boostTempC = await this.safe(() => this.readFloat32('/p/app/thc/btmp'), null);
     const boostTime = await this.safe(() => this.readFloat32('/p/app/thc/btim'), null);
     const stealthMode = await this.safe(() => this.readUint8('/u/app/ui/stlm'), null);
+    const drawStrength = await this.readDrawStrength();
 
     const data = {
       connected: true,
@@ -655,6 +666,11 @@ class PuffcoBrowserBleClient {
       boost_temperature_delta_c: boostTempC,
       boost_temperature_delta_f: boostTempC == null ? null : Math.round(boostTempC * 1.8),
       boost_time_s: boostTime,
+      draw_strength: drawStrength.value,
+      draw_strength_percent: drawStrength.percent,
+      draw_strength_active: drawStrength.active,
+      draw_strength_source: drawStrength.source,
+      draw_strength_mode: drawStrength.mode,
       dabs_per_day: dabsPerDay,
       dabs_left: dabsLeft,
       total_dabs: totalDabs,
@@ -732,9 +748,10 @@ class PuffcoBrowserBleClient {
     return profiles;
   }
 
-  async modeCommand(name, message) {
+  async modeCommand(name, message, options = {}) {
     const command = PuffcoBrowserBleClient.MODE_COMMANDS[name];
     await this.writeShort('/p/app/mc', 0, 0, Uint8Array.of(command));
+    if (options.settleMs) await new Promise(resolve => setTimeout(resolve, options.settleMs));
     return { type: 'ok', message, data: await this.snapshot(false) };
   }
 
@@ -751,6 +768,25 @@ class PuffcoBrowserBleClient {
 
   rgbToHex(rgb) {
     return `#${rgb.map((channel) => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0')).join('')}`;
+  }
+
+  async readDrawStrength() {
+    for (const candidate of PuffcoBrowserBleClient.DRAW_STRENGTH_CANDIDATES) {
+      const value = await this.safe(() => this.readFloat32(candidate.path), null);
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) continue;
+      const percent = candidate.mode === 'heater_power_proxy'
+        ? Math.max(0, Math.min(100, Math.round(numeric)))
+        : Math.max(0, Math.min(100, Math.round(numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric)));
+      return {
+        value: Math.round(numeric * 1000) / 1000,
+        percent,
+        active: percent >= (candidate.mode === 'heater_power_proxy' ? 8 : 6),
+        source: candidate.path,
+        mode: candidate.mode,
+      };
+    }
+    return { value: null, percent: 0, active: false, source: null, mode: 'not_found' };
   }
 
   normalizeColorList(value, preset) {
@@ -1004,8 +1040,7 @@ class PuffcoBrowserBleClient {
     return out;
   }
 
-  async setProfile(params) {
-    const index = Number(params.index);
+  async writeProfileFields(index, params) {
     const changed = [];
     if (params.name != null) {
       await this.writeShort(`/u/app/hc/${index}/name`, 0, 0, this.profileNameBytes(params.name));
@@ -1037,8 +1072,32 @@ class PuffcoBrowserBleClient {
       await this.writeCborFull(`/u/app/hc/${index}/colr`, payload);
       changed.push('mood light');
     }
+    return changed;
+  }
+
+  async setProfile(params) {
+    const index = Number(params.index);
+    const changed = await this.writeProfileFields(index, params);
     this.lastProfiles = null;
     return { type: 'ok', message: `Updated profile ${index}: ${changed.join(', ') || 'nothing'}`, data: await this.snapshot(true) };
+  }
+
+  async reorderProfiles(params) {
+    const profiles = Array.isArray(params.profiles) ? params.profiles : [];
+    if (!profiles.length) return { type: 'error', message: 'Profile reorder requires profiles' };
+    if (profiles.length > 4) return { type: 'error', message: 'Profile reorder supports up to 4 slots' };
+    const changedSlots = [];
+    for (let slot = 0; slot < profiles.length; slot += 1) {
+      const profile = profiles[slot];
+      if (!profile || typeof profile !== 'object') return { type: 'error', message: `Profile slot ${slot} is not an object` };
+      const changed = await this.writeProfileFields(slot, profile);
+      changedSlots.push({ index: slot, changed });
+    }
+    if (params.select_index != null) {
+      await this.writeShort('/p/app/hcs', 0, 0, Uint8Array.of(Number(params.select_index) & 0xff));
+    }
+    this.lastProfiles = null;
+    return { type: 'ok', message: 'Device profile order updated', data: { changed_slots: changedSlots, status: await this.snapshot(true) } };
   }
 
   async setColor(params) {

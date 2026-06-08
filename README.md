@@ -30,10 +30,10 @@ Web Bluetooth.
 
 Deployment layout:
 
-- `web/` is the static public site.
-- `.github/workflows/pages.yml` publishes `web/` whenever `main` is pushed.
-- `web/ble-client.js` is the browser-native Lorax/Web Bluetooth transport.
-- `server.py` remains the optional local Windows bridge and exposes
+- `index.html`, `app.js`, `style.css`, `ble-client.js`, `manifest.json`, and
+  `sw.js` are served from the repository root.
+- `ble-client.js` is the browser-native Lorax/Web Bluetooth transport.
+- `tools/server.py` remains the optional local Windows bridge and exposes
   `ws://127.0.0.1:8421/ws` when you need it.
 ```text
 ws://127.0.0.1:8421/ws
