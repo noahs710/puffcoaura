@@ -66,7 +66,7 @@ const app = (() => {
   const MOOD_LIBRARY_KEY = 'puffco_mood_library_v1';
   const LAST_CONNECTED_KEY = 'puffco_last_connected';
   const ADVANCED_USER_KEY = 'puffco:advanced-user';
-  const PEAK_PRO_MAC_PREFIX = 'F0:AD:4E';
+  const PEAK_PRO_MAC_PREFIX = 'F0:AD';
   // Round 2 polish: persisted card reorder. Keyed under puffco:* to
   // match the existing puffco:theme / puffco:accent / puffco_transport_mode
   // style. Read by the inline pre-paint script in <head> and by
