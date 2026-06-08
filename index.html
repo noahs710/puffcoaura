@@ -4,23 +4,87 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="description" content="Control your Puffco Peak Pro via Bluetooth: profiles, heat, lighting, brightness, power, and diagnostics." />
-  <meta name="theme-color" content="#07070c" />
+  <meta name="theme-color" content="#07070c" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#e8edf4" media="(prefers-color-scheme: light)" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Puffco BLE" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Puffco Controller</title>
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=6" />
   <style>
     @media (min-width: 701px) { .app-menu { display: none !important; } }
+    /* Round 2: hold the card surface-in animation until the
+       pre-paint script can re-order the cards to their saved
+       positions. Without this, the .card surface-in 420ms keyframe
+       runs against the default order and we see a flash. */
+    html.pre-paint .card,
+    html.pre-paint .advanced-panel,
+    html.pre-paint .section-grid {
+      animation: none !important;
+      opacity: 1 !important;
+      transform: none !important;
+    }
   </style>
+  <script>
+    // Pre-paint (round 2): apply theme + card order before the body
+    // paints so the first frame already shows the saved layout.
+    // Runs synchronously in <head> — no flicker.
+    (function () {
+      try {
+        var themeKey = 'puffco:theme';
+        var orderKey = 'puffco:card-order';
+        var theme = localStorage.getItem(themeKey) || 'auto';
+        if (theme !== 'auto' && theme !== 'light' && theme !== 'dark') theme = 'auto';
+        document.documentElement.setAttribute('data-theme', theme);
+
+        // Reorder cards as soon as the container exists.
+        function applyOrder() {
+          var raw = null;
+          try { raw = localStorage.getItem(orderKey); } catch (e) { return; }
+          if (!raw) return;
+          var order;
+          try { order = JSON.parse(raw); } catch (e) { return; }
+          if (!Array.isArray(order) || !order.length) return;
+          var container = document.querySelector('.app-container[data-card-order-key]');
+          if (!container) return;
+          var byId = {};
+          Array.prototype.forEach.call(container.children, function (el) {
+            var id = el.getAttribute && el.getAttribute('data-card-id');
+            if (id) byId[id] = el;
+          });
+          // Re-append in saved order. appendChild on an existing
+          // child is a no-op move, so this is cheap and idempotent.
+          order.forEach(function (id) {
+            var node = byId[id];
+            if (node && node.parentNode === container) {
+              container.appendChild(node);
+            }
+          });
+        }
+        // Run as soon as the container parses; fall back to DOMContentLoaded.
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', applyOrder, { once: true });
+        } else {
+          applyOrder();
+        }
+
+        // Suppress the surface-in animation for the first 500ms so the
+        // pre-paint reorder isn't followed by a snap.
+        document.documentElement.classList.add('pre-paint');
+        setTimeout(function () {
+          document.documentElement.classList.remove('pre-paint');
+        }, 500);
+      } catch (_) { /* ignore */ }
+    })();
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2307070c'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2300d6b4' stroke-width='7'/%3E%3Cpath d='M22 36c8 8 22 3 22-8' fill='none' stroke='%23f6a623' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E" />
 </head>
 <body>
   <div class="toast-container" id="toast-container"></div>
 
-  <div class="app-container">
+  <div class="app-container" data-card-order-key="puffco:card-order" data-default-order="connect-card,status-card,profiles-card,controls-grid,brightness-card,power-card,advanced-panel">
     <!-- Header -->
     <header class="app-header">
       <div class="logo">Puffco BLE</div>
@@ -40,6 +104,66 @@
           </div>
         </button>
       </div>
+      <div class="header-actions">
+        <button class="settings-button" id="btn-settings" type="button" onclick="app.toggleSettings()" aria-haspopup="dialog" aria-expanded="false" aria-label="Appearance settings" title="Appearance">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path fill="currentColor" d="M19.43 12.98c.04-.32.07-.64.07-.98 0-.34-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.03 7.03 0 0 0-1.7-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.18.58-1.7.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98 0 .33.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.09.73 1.7.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.18-.58 1.7-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65zM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5z"/>
+          </svg>
+        </button>
+        <div class="theme-popover" id="theme-popover" role="dialog" aria-label="Appearance settings" aria-hidden="true">
+          <div class="theme-popover-header">
+            <span class="theme-popover-title">Appearance</span>
+            <button class="theme-popover-close" type="button" onclick="app.toggleSettings()" aria-label="Close">&times;</button>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Theme</span>
+            <div class="theme-options" role="radiogroup" aria-label="Color theme">
+              <button class="theme-option" type="button" data-theme-option="light" role="radio" aria-checked="false">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5zm0 8a3 3 0 1 1 3-3 3 3 0 0 1-3 3zm0-13a1 1 0 0 0 1-1V1a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1zm0 18a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1zM4.22 4.22a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1 1 0 1 0-1.41 1.41zM19.78 19.78a1 1 0 0 0-1.41 0 1 1 0 0 0 0 1.41l.71.71a1 1 0 1 0 1.41-1.41zM1 12a1 1 0 0 0 1 1h1a1 1 0 0 0 0-2H2a1 1 0 0 0-1 1zm20-1h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2zM4.22 19.78l.71-.71a1 1 0 1 0-1.41-1.41l-.71.71a1 1 0 0 0 1.41 1.41zM19.78 4.22l-.71.71a1 1 0 1 0 1.41 1.41l.71-.71a1 1 0 0 0-1.41-1.41z"/></svg>
+                </span>
+                <span class="theme-option-label">Light</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="dark" role="radio" aria-checked="false">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05z"/></svg>
+                </span>
+                <span class="theme-option-label">Dark</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="auto" role="radio" aria-checked="false">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18V4a8 8 0 0 1 0 16z"/></svg>
+                </span>
+                <span class="theme-option-label">Auto</span>
+              </button>
+            </div>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Accent</span>
+            <div class="accent-swatches" role="radiogroup" aria-label="Accent color">
+              <button class="accent-swatch" type="button" data-accent="teal"    style="--swatch:#00d6b4" aria-label="Teal"   role="radio" aria-checked="true"></button>
+              <button class="accent-swatch" type="button" data-accent="orange"  style="--swatch:#f6a623" aria-label="Orange" role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="violet"  style="--swatch:#7c3aed" aria-label="Violet" role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="pink"    style="--swatch:#f43f5e" aria-label="Pink"   role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="cyan"    style="--swatch:#38bdf8" aria-label="Cyan"   role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="gold"    style="--swatch:#f6d365" aria-label="Gold"   role="radio" aria-checked="false"></button>
+            </div>
+          </div>
+          <div class="theme-popover-section">
+            <label class="checkbox-row advanced-user-toggle">
+              <input type="checkbox" id="advanced-user-toggle" onchange="app.toggleAdvancedUser()" />
+              <span>Advanced user</span>
+            </label>
+          </div>
+          <div class="theme-popover-footer">
+            <span id="theme-popover-hint">Auto follows your system theme.</span>
+            <button type="button" class="reset-layout-btn" onclick="app.resetCardOrder()" aria-label="Reset card layout to default order">
+              <span aria-hidden="true">↺</span>
+              <span>Reset card layout</span>
+            </button>
+          </div>
+        </div>
+      </div>
     </header>
 
     <nav class="app-menu" aria-label="App sections">
@@ -47,47 +171,47 @@
       <a href="#status-card">Status</a>
       <a href="#profiles-card" class="connected-only-nav">Profiles</a>
       <a href="#heat-control-card" class="connected-only-nav">Heat</a>
-      <a href="#advanced-panel">Advanced</a>
+      <a href="#advanced-panel" data-advanced-only>Advanced</a>
     </nav>
 
     <!-- Connection Card -->
-    <section class="card" id="connect-card">
+    <section class="card" id="connect-card" data-card-id="connect-card">
       <div class="card-header">
         <h2><span class="icon icon-link"></span> Connection</h2>
       </div>
       <div class="connect-section">
-        <div class="input-group bridge-field">
+        <div class="input-group bridge-field" data-advanced-only>
           <label for="transport-mode">BLE Transport</label>
           <select id="transport-mode" onchange="app.setTransportMode(this.value)">
             <option value="browser_ble">Browser Bluetooth</option>
             <option value="bridge">Local Windows Bridge</option>
           </select>
         </div>
-        <div class="input-group bridge-field" id="bridge-url-group">
+        <div class="input-group bridge-field" id="bridge-url-group" data-advanced-only>
           <label for="bridge-url">Local Bridge</label>
           <input type="text" id="bridge-url" placeholder="ws://127.0.0.1:8421/ws" />
         </div>
-        <button class="btn btn-secondary" id="btn-bridge" onclick="app.connectBridge()">
+        <button class="btn btn-secondary" id="btn-bridge" onclick="app.connectBridge()" data-advanced-only>
           Use Bridge
         </button>
       </div>
-      <div class="bridge-note" id="bridge-note">
+      <div class="bridge-note" id="bridge-note" data-advanced-only>
         Browser Bluetooth runs online from HTTPS, including GitHub Pages. Use the local bridge only as a fallback.
       </div>
       <div class="connect-section">
-        <div class="input-group" id="device-identity-group">
+        <div class="input-group" id="device-identity-group" data-advanced-only>
           <label for="device-name" id="device-identity-label">Device Name</label>
           <input type="text" id="device-name" placeholder="Peak" value="Peak" />
         </div>
-        <label class="checkbox-row optional-device-field" id="device-mac-row">
+        <label class="checkbox-row optional-device-field" id="device-mac-row" data-advanced-only>
           <input type="checkbox" id="use-mac-address" onclick="app.toggleMacAddressMode()" onchange="app.toggleMacAddressMode()" />
           <span>Use MAC address</span>
         </label>
         <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
-          Connect
+          Connect Puffco
         </button>
         <button class="btn btn-secondary" id="btn-scan" onclick="app.scanDevices()">
-          Scan
+          Scan Peak Pros
         </button>
         <button class="btn btn-danger hidden" id="btn-disconnect" onclick="app.disconnect()">
           Disconnect
@@ -97,7 +221,7 @@
     </section>
 
     <!-- Device Status -->
-    <section class="card" id="status-card">
+    <section class="card" id="status-card" data-card-id="status-card">
       <div class="card-header">
         <h2><span class="icon icon-status"></span> Device Status</h2>
         <button class="btn btn-sm btn-secondary" data-device-command="status" onclick="app.refreshStatus()">Refresh</button>
@@ -105,17 +229,29 @@
 
       <div class="disconnected-overlay visible" id="status-empty">
         <div class="offline-stage">
-          <div>
+          <div class="offline-stage-copy">
             <div class="stage-eyebrow">Ready to sync</div>
             <h3>Pair your Puffco</h3>
             <p>Connect to reveal live temperature, battery state, heat timer, profile data, and firmware diagnostics.</p>
           </div>
-          <div class="offline-device" aria-hidden="true">
-            <div class="device-halo"></div>
-            <div class="peak-body">
-              <div class="peak-glass"></div>
-              <div class="peak-cap"></div>
-              <div class="peak-light"></div>
+          <div class="placeholder-art" aria-hidden="true">
+            <div class="art-stack">
+              <svg viewBox="0 0 64 64" width="84" height="84" focusable="false">
+                <defs>
+                  <linearGradient id="placeholder-art-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="currentColor" stop-opacity="0.9" />
+                    <stop offset="100%" stop-color="currentColor" stop-opacity="0.5" />
+                  </linearGradient>
+                </defs>
+                <rect x="22" y="8" width="20" height="48" rx="10" fill="none" stroke="currentColor" stroke-width="2.5" />
+                <line x1="22" y1="22" x2="42" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.6" />
+                <line x1="22" y1="32" x2="42" y2="32" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4" />
+                <line x1="22" y1="42" x2="42" y2="42" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.6" />
+                <circle cx="32" cy="52" r="3" fill="currentColor" />
+                <path d="M28 6 Q32 2 36 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+              <span class="art-name">Puffco Peak Pro</span>
+              <span class="art-caption">Connect to unlock live controls</span>
             </div>
           </div>
         </div>
@@ -128,6 +264,10 @@
             <div class="device-title-row">
               <h3 id="hero-device-name">—</h3>
               <span class="state-chip" id="hero-state-chip">—</span>
+              <span class="draw-chip" id="draw-sensor-chip" data-state="hidden" aria-live="polite" title="Inhale sensor">
+                <span class="draw-dot" aria-hidden="true"></span>
+                <span id="draw-sensor-chip-label">—</span>
+              </span>
             </div>
             <div class="device-temp-readout">
               <span id="hero-current-temp">—</span>
@@ -206,6 +346,10 @@
               <div class="draw-strength-fill" id="draw-strength-fill"></div>
             </div>
             <div class="draw-strength-source" id="draw-strength-source">Path search pending</div>
+            <div class="draw-strength-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-draw-rescan" onclick="app.rescanDrawStrength()">Rescan</button>
+              <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-draw-clear-source" onclick="app.clearDrawStrengthSource()">Clear pinned</button>
+            </div>
           </div>
           <div class="session-metrics" id="session-metrics">
           <span><b>Remaining</b><i id="session-remaining">—</i></span>
@@ -268,7 +412,7 @@
     </section>
 
     <!-- Profiles -->
-    <section class="card connected-only" id="profiles-card">
+    <section class="card connected-only" id="profiles-card" data-card-id="profiles-card">
       <div class="card-header">
         <h2><span class="icon icon-profile"></span> Profiles</h2>
         <div class="inline-actions">
@@ -289,7 +433,7 @@
       <div class="profile-library-grid" id="profile-library-grid"></div>
     </section>
 
-    <div class="section-grid" id="controls-grid">
+    <div class="section-grid" id="controls-grid" data-card-id="controls-grid">
       <!-- Lighting -->
       <section class="card connected-only" id="lighting-card">
         <div class="card-header">
@@ -314,17 +458,20 @@
       <section class="card" id="voice-card">
         <div class="card-header">
           <h2><span class="icon icon-status"></span> Voice Commands</h2>
-          <button class="btn btn-sm btn-secondary" id="btn-voice" onclick="app.toggleVoiceCommands()">Enable Voice</button>
+          <div class="voice-card-actions">
+            <span class="voice-last-action empty" id="voice-last-action" aria-live="polite" title="Last command sent via voice"></span>
+            <button class="btn btn-sm btn-secondary" id="btn-voice" onclick="app.toggleVoiceCommands()">Enable Voice</button>
+          </div>
         </div>
         <div class="voice-command-panel">
           <div>
             <div class="stat-label">Priority Commands</div>
             <div class="voice-command-list">open bluetooth · connect peak pro · start heat · stop · boost · profile one-four · battery · lantern · stealth · brightness 70</div>
           </div>
-          <div class="voice-state" id="voice-state">Permission required</div>
+          <div class="voice-state" id="voice-state" data-state="idle">Permission required</div>
         </div>
         <div class="voice-preview">
-          <div class="voice-meter" style="--voice-level:0;">
+          <div class="voice-meter" style="--voice-level:0;" aria-hidden="true">
             <div class="voice-meter-fill" id="voice-meter-fill"></div>
           </div>
           <div class="voice-preview-meta">
@@ -333,18 +480,59 @@
           </div>
         </div>
         <div class="voice-command-chips" aria-label="Test voice commands">
-          <button class="btn btn-sm btn-primary" onclick="app.openBluetoothFromVoice()">Open Bluetooth</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.openBluetoothFromVoice()">Connect Peak Pro</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('status')">Status</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('stop')">Stop</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('boost')">Boost</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('profile two')">Profile 2</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('battery')">Battery</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('lantern on')">Lantern</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('stealth on')">Stealth</button>
-          <button class="btn btn-sm btn-secondary" onclick="app.handleVoiceCommand('brightness 70')">Brightness 70</button>
+          <button class="btn btn-sm btn-primary" data-voice-cmd="open bluetooth" onclick="app.openBluetoothFromVoice()">Open Bluetooth</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="connect peak pro" onclick="app.handleVoiceCommand('connect peak pro')">Connect Peak Pro</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="status" onclick="app.handleVoiceCommand('status')">Status</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="start heat" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="stop" onclick="app.handleVoiceCommand('stop')">Stop</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="boost" onclick="app.handleVoiceCommand('boost')">Boost</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="profile two" onclick="app.handleVoiceCommand('profile two')">Profile 2</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="battery" onclick="app.handleVoiceCommand('battery')">Battery</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="lantern on" onclick="app.handleVoiceCommand('lantern on')">Lantern</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="stealth on" onclick="app.handleVoiceCommand('stealth on')">Stealth</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="brightness 70" onclick="app.handleVoiceCommand('brightness 70')">Brightness 70</button>
         </div>
+        <details class="voice-grammar">
+          <summary>All voice commands</summary>
+          <div class="voice-grammar-grid">
+            <div>
+              <div class="stat-label">Connection</div>
+              <ul>
+                <li><code>open bluetooth</code> · <code>connect peak pro</code> · <code>find device</code></li>
+                <li><code>disconnect</code> · <code>unpair</code></li>
+                <li><code>browser bluetooth</code> · <code>bridge mode</code></li>
+                <li><code>resync</code></li>
+              </ul>
+            </div>
+            <div>
+              <div class="stat-label">Heat &amp; power</div>
+              <ul>
+                <li><code>start heat</code> · <code>heat up</code> · <code>begin session</code></li>
+                <li><code>stop</code> · <code>cancel</code> · <code>end it</code></li>
+                <li><code>boost</code> · <code>boost it</code></li>
+                <li><code>sleep</code> · <code>go to sleep</code></li>
+                <li><code>power off</code> · <code>shut down</code></li>
+              </ul>
+            </div>
+            <div>
+              <div class="stat-label">Profiles &amp; lights</div>
+              <ul>
+                <li><code>profile one</code>–<code>profile four</code> · <code>profile evening</code> (by name)</li>
+                <li><code>lantern on</code> / <code>lantern off</code> / <code>lantern</code> (toggle)</li>
+                <li><code>stealth on</code> / <code>stealth off</code> / <code>stealth</code> (toggle)</li>
+                <li><code>brightness 70</code> · <code>lights to 50 percent</code></li>
+              </ul>
+            </div>
+            <div>
+              <div class="stat-label">Readouts</div>
+              <ul>
+                <li><code>battery</code> · <code>show battery</code></li>
+                <li><code>version</code> · <code>firmware</code></li>
+                <li><code>status</code> · <code>refresh</code> · <code>sync</code></li>
+              </ul>
+            </div>
+          </div>
+        </details>
         <div class="voice-bluetooth-prompt hidden" id="voice-bluetooth-prompt">
           <div>
             <strong>Bluetooth chooser queued</strong>
@@ -362,7 +550,7 @@
     </div>
 
     <!-- Brightness -->
-    <section class="card connected-only" id="brightness-card">
+    <section class="card connected-only" id="brightness-card" data-card-id="brightness-card">
       <div class="card-header">
         <h2><span class="icon icon-bright"></span> LED Brightness</h2>
         <button class="btn btn-sm btn-primary" onclick="app.applyBrightness()">Apply</button>
@@ -392,7 +580,7 @@
     </section>
 
     <!-- Power -->
-    <section class="card connected-only" id="power-card">
+    <section class="card connected-only" id="power-card" data-card-id="power-card">
       <div class="card-header">
         <h2><span class="icon icon-power"></span> Power</h2>
       </div>
@@ -402,7 +590,7 @@
       </div>
     </section>
 
-    <details class="advanced-panel" id="advanced-panel">
+    <details class="advanced-panel" id="advanced-panel" data-card-id="advanced-panel" data-advanced-only>
       <summary>
         <span>Advanced diagnostics</span>
         <small>Lorax paths, raw reads, and activity</small>
@@ -858,7 +1046,7 @@
     </div>
   </div>
 
-  <script src="ble-client.js"></script>
-  <script src="app.js"></script>
+  <script src="ble-client.js?v=6"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

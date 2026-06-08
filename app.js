@@ -34,9 +34,24 @@ const app = (() => {
   let localMoodPresets = [];
   let voiceRecognition = null;
   let voiceListening = false;
+  // voiceIntentRunning reflects user intent ("they asked voice to be on").
+  // voiceListening reflects the recognition engine state. Keeping them separate
+  // avoids the restart-loop race where stop() is called but onend immediately
+  // restarts because voiceListening is still true.
+  let voiceIntentRunning = false;
   let voicePermissionGranted = false;
   let lastVoiceCommandText = '';
   let lastVoiceCommandAt = 0;
+  // Minimum confidence we trust for an interim (not yet final) result before
+  // firing a command. Final results bypass this gate.
+  const VOICE_INTERIM_CONFIDENCE = 0.6;
+  const VOICE_DEDUPE_MS = 1800;
+  const VOICE_RESTART_DELAY_MS = 250;
+  const VOICE_RESTART_DELAY_HIDDEN_MS = 1000;
+  const VOICE_MIC_RESTART_DELAY_HIDDEN_MS = 150;
+  // Last executed voice action — surfaced in the UI as a fading chip.
+  let voiceLastAction = null;
+  let voiceLastActionFrame = null;
   let voiceStream = null;
   let voiceAudioContext = null;
   let voiceAnalyser = null;
@@ -50,6 +65,16 @@ const app = (() => {
   const PROFILE_BACKUP_KEY = 'puffco_profile_backups_v1';
   const MOOD_LIBRARY_KEY = 'puffco_mood_library_v1';
   const LAST_CONNECTED_KEY = 'puffco_last_connected';
+  const ADVANCED_USER_KEY = 'puffco:advanced-user';
+  const PEAK_PRO_MAC_PREFIX = 'F0:AD:4E';
+  // Round 2 polish: persisted card reorder. Keyed under puffco:* to
+  // match the existing puffco:theme / puffco:accent / puffco_transport_mode
+  // style. Read by the inline pre-paint script in <head> and by
+  // initCardOrder() in this file. Source of truth for the card list
+  // lives in the data-card-id attributes on .app-container children.
+  const CARD_ORDER_KEY = 'puffco:card-order';
+  const CARD_DRAG_INDICATOR_MS = 180;
+  const DRAW_SESSION_KEY = 'puffco:draw-session';
   const VAPOR_PRESETS = [
     { id: 'standard', name: 'Balanced', short: 'Balanced', desc: 'Smooth everyday vapor' },
     { id: 'high', name: 'High Vapor', short: 'High', desc: 'Fuller clouds' },
@@ -189,6 +214,7 @@ const app = (() => {
     'select_profile', 'set_profile', 'reorder_profiles', 'set_color', 'mood_light', 'lantern', 'lantern_color',
     'stealth', 'brightness', 'show_battery', 'show_version', 'heat', 'stop',
     'boost', 'set_boost_options', 'power', 'temperature_observe', 'temperature_source',
+    'draw_strength_observe', 'draw_strength_source',
     'lorax_read', 'lorax_write', 'lorax_action', 'lorax_probe',
     'lorax_observe', 'heat_probe', 'heat_observe', 'official_attributes',
   ]);
@@ -382,9 +408,14 @@ const app = (() => {
     if (select && select.value !== transportMode) select.value = transportMode;
     const bridgeGroup = document.getElementById('bridge-url-group');
     const bridgeButton = document.getElementById('btn-bridge');
+    const connectButton = document.getElementById('btn-connect');
     const browserMode = transportMode === 'browser_ble';
-    if (bridgeGroup) bridgeGroup.classList.toggle('hidden', browserMode);
-    if (bridgeButton) bridgeButton.classList.toggle('hidden', browserMode);
+    const advanced = isAdvancedUser();
+    if (bridgeGroup) bridgeGroup.classList.toggle('hidden', !advanced || browserMode);
+    if (bridgeButton) bridgeButton.classList.toggle('hidden', !advanced || browserMode);
+    if (connectButton && !connectPending) {
+      connectButton.textContent = browserMode ? 'Connect Puffco' : 'Connect Selected Puffco';
+    }
     if (browserMode) {
       setBridgeNote(
         browserSupported
@@ -392,6 +423,8 @@ const app = (() => {
           : 'Browser Bluetooth is unavailable here. Use Chrome or Edge on HTTPS, localhost, or 127.0.0.1, or switch to the local bridge.',
         browserSupported ? 'online' : 'offline',
       );
+    } else if (advanced) {
+      setBridgeNote(`Local bridge scans only Peak Pro manufacturer prefix ${PEAK_PRO_MAC_PREFIX}.`, 'online');
     }
     updateBleCapabilityPanel();
     renderBrowserDebugSummary();
@@ -399,7 +432,7 @@ const app = (() => {
   }
 
   function scanAvailableInCurrentMode() {
-    return transportMode === 'browser_ble';
+    return isAdvancedUser() && transportMode === 'bridge';
   }
 
   function updateScanButtonVisibility() {
@@ -818,6 +851,10 @@ const app = (() => {
           handleTemperatureObservation(msg.data);
           renderDevResult(msg.type, msg.data);
           break;
+        case 'draw_strength_observe':
+          handleDrawStrengthObservation(msg.data);
+          renderDevResult(msg.type, msg.data);
+          break;
         case 'heat_probe':
         case 'lorax_probe':
         case 'lorax_observe':
@@ -826,6 +863,16 @@ const app = (() => {
           break;
         case 'temperature_source':
           appendLog(msg.data ? `Live temp source: ${msg.data.path} (${msg.data.encoding})` : 'Live temp source cleared', 'info');
+          renderDevResult(msg.type, msg.data);
+          send('status');
+          break;
+        case 'draw_strength_source':
+          if (msg.data?.path) {
+            const mode = msg.data.mode === 'dynamic_inhale' ? 'dynamic inhale' : msg.data.mode || 'direct';
+            appendLog(`Dynamic inhale source pinned: ${msg.data.path} (${mode})`, 'info');
+          } else {
+            appendLog('Dynamic inhale pin cleared — falling back to discovery', 'info');
+          }
           renderDevResult(msg.type, msg.data);
           send('status');
           break;
@@ -1474,17 +1521,95 @@ const app = (() => {
     const panel = document.getElementById('draw-strength-panel');
     const label = document.getElementById('draw-strength-label');
     const source = document.getElementById('draw-strength-source');
+    const clearBtn = document.getElementById('btn-draw-clear-source');
     if (!panel || !label || !source) return;
     const percent = data?.connected ? Math.max(0, Math.min(100, Math.round(Number(data.draw_strength_percent) || 0))) : 0;
     const active = Boolean(data?.draw_strength_active || percent >= 8);
+    const dynamicInhale = data?.draw_strength_mode === 'dynamic_inhale' || data?.draw_strength_source === '/p/app/htr/inh';
+    const wasActive = panel.classList.contains('active');
     panel.style.setProperty('--draw-strength', String(percent));
     panel.classList.toggle('active', active);
     panel.classList.toggle('found', Boolean(data?.draw_strength_source));
-    label.textContent = data?.connected ? (active ? `${percent}% draw` : 'Idle') : 'Disconnected';
-    const mode = data?.draw_strength_mode === 'heater_power_proxy' ? 'heater power proxy' : data?.draw_strength_mode;
-    source.textContent = data?.draw_strength_source
-      ? `${data.draw_strength_source} · ${mode || 'direct'}`
-      : 'No direct inhale path found yet';
+    const mapping = data?.draw_strength_source_mapping;
+    panel.classList.toggle('pinned', Boolean(mapping && mapping.path));
+    // Round 2: surface a "heating" state on the draw panel when the
+    // sensor is firing while the chamber is heating, so the panel
+    // visually agrees with .heat-live-panel.timer-running.
+    if (data?.connected && active && (data.heat === 'HEATING' || data.heat === 'BOOSTING' || data.heat === 'heating' || data.heat === 'boosting')) {
+      panel.classList.add('heating');
+    } else {
+      panel.classList.remove('heating');
+    }
+    label.textContent = data?.connected ? (active ? `${percent}% ${dynamicInhale ? 'inhale' : 'draw'}` : 'Idle') : 'Disconnected';
+    const mode = dynamicInhale
+      ? 'dynamic inhale'
+      : data?.draw_strength_mode === 'heater_power_proxy'
+        ? 'heater power proxy'
+        : data?.draw_strength_mode;
+    if (data?.draw_strength_source) {
+      const pinnedTag = mapping?.path && mapping.path === data.draw_strength_source ? ' · pinned' : '';
+      source.textContent = `${mode || 'direct'} · ${data.draw_strength_source}${pinnedTag}`;
+    } else if (!data?.connected) {
+      source.textContent = 'Connect to scan for an inhale sensor';
+    } else if (data.heat === 'HEATING') {
+      source.textContent = 'Scanning direct inhale paths during heat';
+    } else {
+      source.textContent = 'Scanning direct inhale paths';
+    }
+    if (clearBtn) {
+      clearBtn.classList.toggle('hidden', !(mapping && mapping.path));
+    }
+
+    // Round 2: bump the per-session draw counter when a draw starts.
+    // Trigger on the inactive->active transition while connected,
+    // regardless of whether the device is currently heating (the
+    // sensor can fire in idle state too).
+    if (data?.connected && active && !wasActive && typeof bumpDrawSessionCount === 'function') {
+      try { bumpDrawSessionCount(); } catch (_) { /* ignore */ }
+    }
+
+    // Round 2: keep the inline draw chip and the device-stage ring in
+    // sync with the same data source. These work in both idle and
+    // heating states.
+    try { updateDrawSensorChip(data); } catch (_) { /* ignore */ }
+    try { updateDrawSensorRing(data); } catch (_) { /* ignore */ }
+  }
+
+  function rescanDrawStrength() {
+    if (!connected) {
+      toast('Connect to the device before rescanning dynamic inhale', 'error');
+      return;
+    }
+    const button = document.getElementById('btn-draw-rescan');
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Scanning…';
+    }
+    toast('Inhale during the next ~6 s so dynamic inhale can be confirmed', 'info');
+    const sent = send('draw_strength_observe', {
+      samples: 4,
+      interval: 1.5,
+      promote: true,
+    });
+    if (!sent && button) {
+      button.disabled = false;
+      button.textContent = 'Rescan';
+    }
+    // The button gets re-enabled on the next status update / observation reply,
+    // but in case the server never responds we re-enable it after 10 s.
+    setTimeout(() => {
+      if (!button) return;
+      button.disabled = false;
+      button.textContent = 'Rescan';
+    }, 10_000);
+  }
+
+  function clearDrawStrengthSource() {
+    if (!connected) {
+      toast('Connect to the device before clearing the inhale pin', 'error');
+      return;
+    }
+    send('draw_strength_source', { clear: true });
   }
 
   function updateTelemetryFields(data) {
@@ -3141,7 +3266,7 @@ const app = (() => {
       results.innerHTML = '';
       results.classList.add('active');
     }
-    if (!send('scan_devices', { timeout: 6, puffco_only: true })) {
+    if (!send('scan_devices', { timeout: 6, puffco_only: true, manufacturer_prefix: PEAK_PRO_MAC_PREFIX })) {
       finishDeviceScan();
       return false;
     }
@@ -3163,9 +3288,9 @@ const app = (() => {
     if (!results) return;
     const devices = Array.isArray(data?.devices) ? data.devices : [];
     if (!devices.length) {
-      results.innerHTML = `<div class="scan-empty">${escapeHtml(data?.note || 'No Puffco devices found')}</div>`;
+      results.innerHTML = `<div class="scan-empty">${escapeHtml(data?.note || `No Peak Pro devices found with MAC prefix ${PEAK_PRO_MAC_PREFIX}`)}</div>`;
       results.classList.add('active');
-      appendLog(data?.note || 'No Puffco devices found during scan', 'info');
+      appendLog(data?.note || `No Peak Pro devices found with MAC prefix ${PEAK_PRO_MAC_PREFIX}`, 'info');
       return;
     }
     results.innerHTML = devices.map((item) => {
@@ -3198,9 +3323,10 @@ const app = (() => {
         appendLog(`Selected ${name} (${address})`, 'success');
         results.classList.remove('active');
         results.innerHTML = '';
+        setTimeout(() => connectDevice(), 50);
       });
     });
-    appendLog(`Found ${devices.length} Puffco candidate${devices.length === 1 ? '' : 's'} with Windows BLE`, 'success');
+    appendLog(`Found ${devices.length} Peak Pro candidate${devices.length === 1 ? '' : 's'} with ${data?.manufacturer_prefix || PEAK_PRO_MAC_PREFIX}`, 'success');
   }
 
   function refreshStatus() {
@@ -3342,6 +3468,33 @@ const app = (() => {
     } else {
       appendLog('No live temperature candidate found in this sample window', 'warn');
       toast('No temperature path found yet', 'info');
+    }
+  }
+
+  function handleDrawStrengthObservation(data) {
+    const promoted = data?.promoted;
+    const ranked = Array.isArray(data?.ranked) ? data.ranked : [];
+    const automatic = !!data?.automatic;
+    if (promoted) {
+      const tag = automatic ? 'Auto-pinned' : 'Pinned';
+      const mode = promoted.mode === 'dynamic_inhale' ? 'dynamic inhale' : promoted.mode || 'direct';
+      toast(`Dynamic inhale: ${promoted.path}`, 'success');
+      appendLog(`${tag} dynamic inhale source: ${promoted.path} · ${mode}`, 'success');
+      send('status');
+      return;
+    }
+    if (automatic) return; // Background tick without promotion — silent.
+    if (ranked.length) {
+      const top = ranked[0];
+      appendLog(
+        `Best dynamic inhale candidate: ${top.path} (score ${top.score}, spread ${top.spread}, ` +
+          `${top.nonzero_hits}/${top.samples} non-zero samples)`,
+        'info',
+      );
+      toast('Dynamic inhale candidate found; re-run with promote to pin it', 'info');
+    } else {
+      appendLog('No dynamic inhale candidate responded during the scan', 'warn');
+      toast('No dynamic inhale response yet — try again while inhaling', 'info');
     }
   }
 
@@ -4507,10 +4660,20 @@ const app = (() => {
   function updateVoiceUI(message = null) {
     const button = document.getElementById('btn-voice');
     const state = document.getElementById('voice-state');
-    if (button) button.textContent = voiceListening ? 'Stop Voice' : 'Enable Voice';
+    if (button) button.textContent = voiceIntentRunning ? 'Stop Voice' : 'Enable Voice';
     if (state) {
       state.textContent = message || (voiceListening ? 'Listening' : voicePermissionGranted ? 'Ready' : 'Permission required');
       state.classList.toggle('listening', voiceListening);
+      const dataState = !voicePermissionGranted
+        ? 'no-permission'
+        : voiceBluetoothPending
+          ? 'queued'
+          : voiceListening
+            ? 'listening'
+            : voicePermissionGranted
+              ? 'ready'
+              : 'idle';
+      state.dataset.state = dataState;
     }
   }
 
@@ -4641,127 +4804,350 @@ const app = (() => {
     return runVoiceConnect(text);
   }
 
+  // ---- Voice command matcher ----
+  //
+  // Each entry is tried top-to-bottom; the first match wins. Order matters —
+  // more specific patterns come first. Each entry exposes:
+  //   id, label, icon         — UI metadata for the "last action" chip
+  //   match                   — RegExp OR (text) => RegExpMatch|null
+  //   run(text, match)        — perform the action; return { ok, detail?, blocked? }
+  //
+  // Returning { ok: false, blocked: 'why' } from run() surfaces the reason in
+  // the transcript without firing the action.
+  const VOICE_COMMANDS = [
+    {
+      id: 'mode_browser_ble',
+      label: 'Switch to browser Bluetooth',
+      icon: 'bt',
+      match: /\b(?:browser|web)\s*(?:bluetooth|ble)(?:\s*mode)?\b/,
+      run: () => { setTransportMode('browser_ble'); return { ok: true, detail: 'Browser Bluetooth mode' }; },
+    },
+    {
+      id: 'mode_bridge',
+      label: 'Switch to bridge mode',
+      icon: 'bridge',
+      match: /\b(?:local|windows|backend|bridge)\s*(?:bridge|mode)?\b/,
+      run: () => { setTransportMode('bridge'); return { ok: true, detail: 'Bridge mode' }; },
+    },
+    {
+      id: 'connect',
+      label: 'Open Bluetooth chooser',
+      icon: 'bt',
+      match: (text) => (
+        /\b(?:open|show|start|launch)\s+(?:the\s+)?(?:bluetooth|ble)\s*(?:selector|chooser|pairing)?\b/.test(text)
+        || /\b(?:connect|pair|find|scan|search)\b.*\b(?:peak|peak\s*pro|puffco|device|bluetooth|ble)\b/.test(text)
+        || /\b(?:scan|find|search)\s*(?:devices?|peak|puffco)?\b/.test(text)
+        || /\b(?:connect|pair)\b/.test(text)
+      ) ? [text] : null,
+      run: (text) => {
+        const accepted = runVoiceConnect(text);
+        return { ok: accepted, detail: accepted ? 'Bluetooth chooser open' : 'Bluetooth chooser blocked' };
+      },
+    },
+    {
+      id: 'disconnect',
+      label: 'Disconnect',
+      icon: 'bt-off',
+      match: /\b(?:disconnect|unpair|forget(?:\s+device)?|drop(?:\s+device)?)\b/,
+      run: () => {
+        if (!connected) return { ok: false, blocked: 'Not connected' };
+        disconnectDevice();
+        return { ok: true, detail: 'Disconnect sent' };
+      },
+    },
+    {
+      id: 'resync',
+      label: 'Resync device',
+      icon: 'refresh',
+      match: /\b(?:resync|reconnect|re-?sync|refresh(?:\s+ble)?)\b/,
+      run: () => {
+        resyncDevice();
+        return { ok: true, detail: 'Resync requested' };
+      },
+    },
+    {
+      id: 'stop',
+      label: 'Stop heat',
+      icon: 'stop',
+      match: /\b(?:please\s+)?(?:stop|cancel|end|abort)(?:\s+(?:it|the\s+heat|heat|session|cycle|dab|now))?\b/,
+      run: () => {
+        const sent = stop(true);
+        return sent ? { ok: true, detail: 'Stop sent' } : { ok: false, blocked: 'No active heat to stop' };
+      },
+    },
+    {
+      id: 'boost',
+      label: 'Boost',
+      icon: 'boost',
+      match: /\bboost(?:\s+it)?\b|\bturn\s+up(?:\s+the)?\s+(?:heat|temp)/,
+      run: () => {
+        const sent = boost();
+        return sent ? { ok: true, detail: 'Boost sent' } : { ok: false, blocked: 'Boost needs active heat' };
+      },
+    },
+    {
+      id: 'heat',
+      label: 'Start heat',
+      icon: 'heat',
+      match: /\b(?:start|begin|run|do|fire|initiate)\b[^.]{0,20}\b(?:heat|session|cycle|dab)\b|\bheat\s*up\b|\b(?:get|go)\s+hot\b|\b(?:start|begin|fire)\b\s+(?:it|the)\b/,
+      run: () => {
+        const sent = heat();
+        return sent ? { ok: true, detail: 'Heat sent' } : { ok: false, blocked: isHeatActive(deviceState) ? 'Heat already running' : 'Heat unavailable' };
+      },
+    },
+    {
+      id: 'battery',
+      label: 'Show battery',
+      icon: 'battery',
+      match: /\b(?:battery(?:\s+level)?|show\s+battery|charge\s+level)\b/,
+      run: () => {
+        const sent = showBattery();
+        return sent ? { ok: true, detail: 'Battery sent' } : { ok: false, blocked: 'Battery readback blocked' };
+      },
+    },
+    {
+      id: 'version',
+      label: 'Show version',
+      icon: 'version',
+      match: /\b(?:firmware|version|show\s+version)\b/,
+      run: () => {
+        const sent = showVersion();
+        return sent ? { ok: true, detail: 'Version sent' } : { ok: false, blocked: 'Version readback blocked' };
+      },
+    },
+    {
+      id: 'lantern',
+      label: 'Toggle lantern',
+      icon: 'lantern',
+      match: /\blantern\b/,
+      run: (text) => {
+        const off = /\b(off|disable|disabled)\b/.test(text);
+        const on = /\b(on|enable|enabled)\b/.test(text);
+        const desired = off ? false : on ? true : !lanternOn;
+        const sent = setLanternState(desired);
+        return sent
+          ? { ok: true, detail: `Lantern ${desired ? 'on' : 'off'}` }
+          : { ok: false, blocked: 'Lantern unavailable' };
+      },
+    },
+    {
+      id: 'stealth',
+      label: 'Toggle stealth',
+      icon: 'stealth',
+      match: /\bstealth\b/,
+      run: (text) => {
+        const off = /\b(off|disable|disabled)\b/.test(text);
+        const on = /\b(on|enable|enabled)\b/.test(text);
+        const desired = off ? false : on ? true : !stealthOn;
+        const sent = setStealthState(desired);
+        return sent
+          ? { ok: true, detail: `Stealth ${desired ? 'on' : 'off'}` }
+          : { ok: false, blocked: 'Stealth unavailable' };
+      },
+    },
+    {
+      id: 'brightness',
+      label: 'Set brightness',
+      icon: 'brightness',
+      match: (text) => {
+        const wordToNumber = { ten: 10, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100 };
+        const direct = text.match(/\b(?:brightness|lights?|leds?)\s*(?:to|at|set\s*to|set\s*at)?\s*(\d{1,3})\s*(?:percent|%)?\b/);
+        if (direct) return direct;
+        const word = text.match(/\b(?:brightness|lights?|leds?)\s*(?:to|at)?\s*(ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b/);
+        if (word) {
+          return [text, wordToNumber[word[1]], word[0]];
+        }
+        const phrase = text.match(/\b(?:set|make|put)\s+(?:the\s+)?(?:brightness|lights?|leds?)\s*(?:to|at)?\s*(\d{1,3})\s*(?:percent|%)?\b/);
+        if (phrase) return phrase;
+        return null;
+      },
+      run: (text, match) => {
+        const percent = match[2] != null ? Number(match[2]) : Number(match[1]);
+        if (!Number.isFinite(percent)) return { ok: false, blocked: 'No brightness number heard' };
+        const sent = setAllBrightnessPercent(percent);
+        const value = Math.max(1, Math.min(100, Math.round(percent)));
+        return sent
+          ? { ok: true, detail: `Brightness ${value}%` }
+          : { ok: false, blocked: 'Brightness blocked' };
+      },
+    },
+    {
+      id: 'sleep',
+      label: 'Sleep',
+      icon: 'sleep',
+      match: /\b(?:go\s+to\s+sleep|sleep\s+mode|sleep)\b/,
+      run: () => {
+        const sent = power('sleep');
+        return sent ? { ok: true, detail: 'Sleep sent' } : { ok: false, blocked: 'Sleep blocked' };
+      },
+    },
+    {
+      id: 'power_off',
+      label: 'Power off',
+      icon: 'power',
+      match: /\b(?:power\s+off|turn\s+(?:the\s+)?(?:device|it)\s+off|shut\s+(?:down|off))\b/,
+      run: () => {
+        const sent = power('off');
+        return sent ? { ok: true, detail: 'Power off sent' } : { ok: false, blocked: 'Power off canceled' };
+      },
+    },
+    {
+      id: 'profile',
+      label: 'Select profile',
+      icon: 'profile',
+      match: voiceProfileCommandMatch,
+      run: (text, match) => {
+        const index = match && match.profileIndex != null ? match.profileIndex : null;
+        if (index == null) return { ok: false, blocked: 'Profile not recognized' };
+        const sent = selectProfile(index);
+        const profile = findProfile(index);
+        const label = profile?.name ? `Profile ${index + 1} · ${profile.name}` : `Profile ${index + 1}`;
+        return sent
+          ? { ok: true, detail: label }
+          : { ok: false, blocked: 'Profile switch blocked' };
+      },
+    },
+    {
+      id: 'status',
+      label: 'Refresh status',
+      icon: 'status',
+      match: /\b(?:status|state|read\s+state|refresh|sync)\b/,
+      run: () => {
+        const sent = refreshStatus();
+        return sent ? { ok: true, detail: 'Status sent' } : { ok: false, blocked: 'Status blocked' };
+      },
+    },
+  ];
+
+  function voiceProfileCommandMatch(text) {
+    // Number words and color hints. Keep this list small so STT errors don't
+    // accidentally fire a profile switch.
+    const words = { one: 0, first: 0, blue: 0, two: 1, second: 1, green: 1, three: 2, third: 2, red: 2, four: 3, fourth: 3, gold: 3 };
+    if (/\bprofile\s*([1-4])\b/.test(text)) {
+      const index = Number(/\bprofile\s*([1-4])\b/.exec(text)[1]) - 1;
+      return { profileIndex: index, profileMatchType: 'number' };
+    }
+    const word = Object.keys(words).find((key) => new RegExp(`\\b(profile\\s+)?${key}\\b`).test(text));
+    if (word != null) return { profileIndex: words[word], profileMatchType: `word:${word}` };
+    // Match against actual device profile names ("profile evening", "select daily").
+    const profiles = Array.isArray(deviceState?.profiles) ? deviceState.profiles : [];
+    if (!profiles.length) return null;
+    const lower = text.replace(/^.*?\b(?:select|switch\s+to|use|go\s+to|set)\s+/, '');
+    for (let i = 0; i < profiles.length; i += 1) {
+      const name = String(profiles[i]?.name || '').trim().toLowerCase();
+      if (!name) continue;
+      if (lower.includes(name)) return { profileIndex: i, profileMatchType: `name:${name}` };
+    }
+    return null;
+  }
+
+  function voiceProfileIndex(text) {
+    // Legacy helper — kept for any external callers; new code should use the matcher.
+    const match = voiceProfileCommandMatch(text);
+    return match ? match.profileIndex : null;
+  }
+
+  function showVoiceLastAction() {
+    const chip = document.getElementById('voice-last-action');
+    if (!chip) return;
+    cancelAnimationFrame(voiceLastActionFrame);
+    const render = () => {
+      if (!voiceLastAction) {
+        chip.className = 'voice-last-action empty';
+        chip.textContent = 'No command sent yet';
+        return;
+      }
+      const ageMs = Date.now() - voiceLastAction.at;
+      const ageLabel = ageMs < 1500 ? 'just now'
+        : ageMs < 60000 ? `${Math.round(ageMs / 1000)}s ago`
+        : `${Math.round(ageMs / 60000)}m ago`;
+      chip.className = `voice-last-action ${voiceLastAction.ok ? 'ok' : 'blocked'}`;
+      chip.textContent = `Last: ${voiceLastAction.label}${voiceLastAction.detail ? ` · ${voiceLastAction.detail}` : ''} · ${ageLabel}`;
+      if (Date.now() - voiceLastAction.at < 60000) {
+        voiceLastActionFrame = requestAnimationFrame(render);
+      }
+    };
+    render();
+  }
+
+  function recordVoiceAction(command, result) {
+    voiceLastAction = {
+      id: command.id,
+      label: command.label,
+      detail: result.detail,
+      ok: result.ok,
+      at: Date.now(),
+    };
+    showVoiceLastAction();
+  }
+
+  function runVoiceMatcher(text) {
+    for (const command of VOICE_COMMANDS) {
+      let match;
+      try {
+        match = typeof command.match === 'function' ? command.match(text) : text.match(command.match);
+      } catch {
+        match = null;
+      }
+      if (!match) continue;
+      let result;
+      try {
+        result = command.run(text, match) || {};
+      } catch (err) {
+        result = { ok: false, blocked: `Error: ${err?.message || err}` };
+      }
+      if (result.ok === undefined) result.ok = true;
+      return { command, text, result };
+    }
+    return null;
+  }
+
   function handleVoiceCommand(transcript) {
     const text = String(transcript || '').toLowerCase().trim();
     if (!text) return false;
     const now = Date.now();
-    if (text === lastVoiceCommandText && now - lastVoiceCommandAt < 1800) return false;
+    if (text === lastVoiceCommandText && now - lastVoiceCommandAt < VOICE_DEDUPE_MS) return false;
     lastVoiceCommandText = text;
     lastVoiceCommandAt = now;
     updateVoicePreview(text, null);
     setVoiceTranscript(`Heard: ${text}`);
     appendLog(`Voice heard: ${text}`, 'info');
-    if (/\b(browser|web)\s*(bluetooth|ble)\s*(mode)?\b/.test(text)) {
-      setTransportMode('browser_ble');
-      updateVoiceUI('Browser Bluetooth mode');
-      setVoiceTranscript(`Heard: ${text}`, true);
-      return true;
+    const match = runVoiceMatcher(text);
+    if (!match) {
+      updateVoiceUI('Command not matched');
+      setVoiceTranscript(`Heard: ${text}`, false);
+      return false;
     }
-    if (/\b(local|windows)?\s*bridge\s*(mode)?\b/.test(text)) {
-      setTransportMode('bridge');
-      updateVoiceUI('Bridge mode');
-      setVoiceTranscript(`Heard: ${text}`, true);
-      return true;
+    const { command, result } = match;
+    if (result.ok) {
+      updateVoiceUI(result.detail || command.label);
+      setVoiceTranscript(`Heard: ${text} · ${command.label}`, true);
+    } else {
+      updateVoiceUI(result.blocked || `${command.label} blocked`);
+      setVoiceTranscript(`Heard: ${text} · ${result.blocked || command.label}`, false);
     }
-    if (/\b(open|show|start|launch)?\s*(bluetooth|ble)\s*(selector|chooser|pairing)?\b/.test(text)
-      || /\b(connect|pair|find|scan)\b.*\b(peak|peak pro|puffco|device|bluetooth|ble)\b/.test(text)
-      || /\b(scan|find|search)\s*(devices?|peak|puffco)?\b/.test(text)
-      || /\b(connect|pair)\b/.test(text)) {
-      return runVoiceConnect(text);
+    recordVoiceAction(command, result);
+    // Brief flash on the chip whose data-voice-cmd is the longest substring
+    // of the transcript. For "stop heat" → "stop" chip; for direct chip clicks
+    // (e.g. "brightness 70") the exact chip matches itself.
+    const chips = document.querySelectorAll('#voice-card [data-voice-cmd]');
+    let bestChip = null;
+    let bestLen = 0;
+    for (const candidate of chips) {
+      const cmd = candidate.dataset.voiceCmd;
+      if (cmd && text.includes(cmd) && cmd.length > bestLen) {
+        bestChip = candidate;
+        bestLen = cmd.length;
+      }
     }
-    if (/\b(disconnect|unpair)\b/.test(text)) {
-      disconnectDevice();
-      updateVoiceUI('Disconnect requested');
-      setVoiceTranscript(`Heard: ${text}`, true);
-      return true;
+    if (bestChip) {
+      bestChip.classList.remove('fired', 'ok', 'blocked');
+      // force reflow so the animation re-fires
+      void bestChip.offsetWidth;
+      bestChip.classList.add('fired', result.ok ? 'ok' : 'blocked');
+      setTimeout(() => bestChip.classList.remove('fired', 'ok', 'blocked'), 700);
     }
-    if (/\b(stop|cancel|end)\b/.test(text)) {
-      const sent = stop(true);
-      updateVoiceUI(sent ? 'Stop sent' : 'Stop blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(boost|boost it)\b/.test(text)) {
-      const sent = boost();
-      updateVoiceUI(sent ? 'Boost sent' : 'Boost needs active heat');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(battery|battery level|show battery)\b/.test(text)) {
-      const sent = showBattery();
-      updateVoiceUI(sent ? 'Battery sent' : 'Battery blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(version|show version|firmware)\b/.test(text)) {
-      const sent = showVersion();
-      updateVoiceUI(sent ? 'Version sent' : 'Version blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\blantern\b/.test(text)) {
-      const desired = /\b(off|disable|disabled)\b/.test(text) ? false : /\b(on|enable|enabled)\b/.test(text) ? true : !lanternOn;
-      const sent = setLanternState(desired);
-      updateVoiceUI(sent ? `Lantern ${desired ? 'on' : 'off'} sent` : 'Lantern blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\bstealth\b/.test(text)) {
-      const desired = /\b(off|disable|disabled)\b/.test(text) ? false : /\b(on|enable|enabled)\b/.test(text) ? true : !stealthOn;
-      const sent = setStealthState(desired);
-      updateVoiceUI(sent ? `Stealth ${desired ? 'on' : 'off'} sent` : 'Stealth blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    const brightnessMatch = text.match(/\b(?:brightness|lights?|leds?)\s*(?:to|at)?\s*(\d{1,3})\s*(?:percent|%)?\b/)
-      || text.match(/\b(?:set|make)\s*(?:brightness|lights?|leds?)\s*(?:to|at)?\s*(\d{1,3})\s*(?:percent|%)?\b/);
-    if (brightnessMatch) {
-      const percent = Number(brightnessMatch[1]);
-      const sent = setAllBrightnessPercent(percent);
-      updateVoiceUI(sent ? `Brightness ${Math.max(1, Math.min(100, Math.round(percent)))}% sent` : 'Brightness blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(go to sleep|sleep mode|sleep)\b/.test(text)) {
-      const sent = power('sleep');
-      updateVoiceUI(sent ? 'Sleep sent' : 'Sleep blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(power off|turn off device|shut down)\b/.test(text)) {
-      const sent = power('off');
-      updateVoiceUI(sent ? 'Power off sent' : 'Power off canceled');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(start|begin|run)\b.*\b(heat|session|cycle)\b|\bheat up\b/.test(text)) {
-      const sent = heat();
-      updateVoiceUI(sent ? 'Heat sent' : 'Heat unavailable');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    const profileIndex = voiceProfileIndex(text);
-    if (profileIndex != null) {
-      const sent = selectProfile(profileIndex);
-      updateVoiceUI(sent ? `Profile ${profileIndex + 1} sent` : 'Profile blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    if (/\b(resync|reconnect)\b/.test(text)) {
-      resyncDevice();
-      updateVoiceUI('Resync requested');
-      setVoiceTranscript(`Heard: ${text}`, true);
-      return true;
-    }
-    if (/\b(status|refresh|sync)\b/.test(text)) {
-      const sent = refreshStatus();
-      updateVoiceUI(sent ? 'Status sent' : 'Status blocked');
-      setVoiceTranscript(`Heard: ${text}`, sent);
-      return sent;
-    }
-    updateVoiceUI('Command not matched');
-    setVoiceTranscript(`Heard: ${text}`, false);
-    return false;
+    return result.ok;
   }
 
   function testVoiceCommand() {
@@ -4778,6 +5164,7 @@ const app = (() => {
     const Recognition = voiceSupportConstructor();
     updateVoiceUI('Requesting mic');
     if (!(await ensureVoiceMic())) return;
+    voiceIntentRunning = true;
     if (!Recognition) {
       voiceListening = true;
       runVoiceMeter();
@@ -4802,12 +5189,20 @@ const app = (() => {
       voiceRecognition.onspeechend = () => updateVoiceUI('Processing speech');
       voiceRecognition.onresult = (event) => {
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
-          const alternative = event.results[index][0];
+          const result = event.results[index];
+          const alternative = result[0];
           const heard = alternative?.transcript;
           if (!heard) continue;
-          updateVoicePreview(heard.trim(), alternative?.confidence);
+          const confidence = Number.isFinite(Number(alternative?.confidence)) ? Number(alternative.confidence) : null;
+          updateVoicePreview(heard.trim(), confidence);
           setVoiceTranscript(`Hearing: ${heard.trim()}`);
-          if (event.results[index].isFinal || /\b(stop|cancel|end|boost|start heat|heat up|status|refresh|sync|resync|connect|disconnect|profile|bluetooth|ble|pair|peak pro|scan|battery|version|firmware|lantern|stealth|brightness|lights|leds|sleep|power off|bridge)\b/i.test(heard)) {
+          // Final results always run. Interim results are gated by confidence so
+          // a low-confidence whisper doesn't fire a "stop" or "boost".
+          if (result.isFinal) {
+            handleVoiceCommand(heard);
+            continue;
+          }
+          if (confidence != null && confidence >= VOICE_INTERIM_CONFIDENCE) {
             handleVoiceCommand(heard);
           }
         }
@@ -4818,21 +5213,31 @@ const app = (() => {
         const labels = {
           'not-allowed': 'Speech permission denied',
           'audio-capture': 'No microphone found',
-          network: 'Speech network error',
+          network: 'Speech network error — using online speech recognition',
           'no-speech': 'No speech heard',
           aborted: 'Speech aborted',
         };
         updateVoiceUI(labels[event.error] || `Speech error: ${event.error}`);
+        // 'no-speech' / 'aborted' are routine — keep intent and restart.
+        // Permission errors should NOT auto-restart.
+        if (event.error === 'not-allowed' || event.error === 'audio-capture') {
+          voiceIntentRunning = false;
+        }
       };
       voiceRecognition.onend = () => {
-        if (voiceListening) {
+        voiceListening = false;
+        if (voiceIntentRunning) {
+          // Intent is still on, so auto-restart. Use a slightly longer delay
+          // when the tab is hidden so we don't fight Chrome's throttling.
           setTimeout(() => {
+            if (!voiceIntentRunning) return;
             try { voiceRecognition.start(); } catch {}
-          }, document.hidden ? 1000 : 250);
+          }, document.hidden ? VOICE_RESTART_DELAY_HIDDEN_MS : VOICE_RESTART_DELAY_MS);
+        } else {
+          updateVoiceUI();
         }
       };
     }
-    voiceListening = true;
     voicePermissionGranted = true;
     updateVoiceUI('Starting speech');
     runVoiceMeter();
@@ -4841,6 +5246,7 @@ const app = (() => {
       toast('Voice commands listening', 'success');
     } catch (err) {
       voiceListening = false;
+      voiceIntentRunning = false;
       updateVoiceUI('Speech start failed');
       setVoiceTranscript(`Speech start failed: ${err?.message || err}`, false);
       updateVoiceMeter(0);
@@ -4848,6 +5254,8 @@ const app = (() => {
   }
 
   function stopVoiceCommands() {
+    // Order matters: clear intent FIRST so onend's auto-restart short-circuits.
+    voiceIntentRunning = false;
     voiceListening = false;
     try { voiceRecognition?.stop(); } catch {}
     cancelAnimationFrame(voiceMeterFrame);
@@ -4856,7 +5264,7 @@ const app = (() => {
   }
 
   function toggleVoiceCommands() {
-    if (voiceListening) stopVoiceCommands();
+    if (voiceIntentRunning) stopVoiceCommands();
     else startVoiceCommands();
   }
 
@@ -4905,6 +5313,499 @@ const app = (() => {
       });
   }
 
+  // ---- Theme System (Mac-style light / dark / auto) ----
+
+  const THEME_STORAGE_KEY = 'puffco_theme';
+  const ACCENT_STORAGE_KEY = 'puffco_accent';
+  const ACCENT_SWATCHES = {
+    teal:   { base: '#00d6b4', light: '#0d9488' },
+    orange: { base: '#f6a623', light: '#ea580c' },
+    violet: { base: '#7c3aed', light: '#7c3aed' },
+    pink:   { base: '#f43f5e', light: '#be185d' },
+    cyan:   { base: '#38bdf8', light: '#0284c7' },
+    gold:   { base: '#f6d365', light: '#b45309' },
+  };
+  const THEME_OPTIONS = ['light', 'dark', 'auto'];
+  const THEME_HINTS = {
+    light: 'Light mode is always on.',
+    dark: 'Dark mode is always on.',
+    auto: 'Auto follows your system theme.',
+  };
+
+  function readSavedTheme() {
+    try {
+      const stored = localStorage.getItem(THEME_STORAGE_KEY);
+      return THEME_OPTIONS.includes(stored) ? stored : 'auto';
+    } catch {
+      return 'auto';
+    }
+  }
+
+  function readSavedAccent() {
+    try {
+      const stored = localStorage.getItem(ACCENT_STORAGE_KEY);
+      return ACCENT_SWATCHES[stored] ? stored : 'teal';
+    } catch {
+      return 'teal';
+    }
+  }
+
+  function isAdvancedUser() {
+    try {
+      return localStorage.getItem(ADVANCED_USER_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function setAdvancedUser(enabled) {
+    const active = Boolean(enabled);
+    try { localStorage.setItem(ADVANCED_USER_KEY, active ? '1' : '0'); } catch { /* ignore */ }
+    document.body.classList.toggle('advanced-user', active);
+    document.querySelectorAll('[data-advanced-only]').forEach((el) => {
+      el.classList.toggle('hidden', !active);
+      if (!active && el.id === 'advanced-panel') el.removeAttribute('open');
+    });
+    const toggle = document.getElementById('advanced-user-toggle');
+    if (toggle) toggle.checked = active;
+    if (!active && transportMode !== defaultTransportMode()) {
+      setTransportMode(defaultTransportMode());
+    } else {
+      renderBridgeUI();
+    }
+  }
+
+  function toggleAdvancedUser() {
+    setAdvancedUser(Boolean(document.getElementById('advanced-user-toggle')?.checked));
+  }
+
+  function applyTheme(theme) {
+    const next = THEME_OPTIONS.includes(theme) ? theme : 'auto';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch { /* ignore */ }
+    syncThemeUI();
+  }
+
+  function applyAccent(accent) {
+    if (!ACCENT_SWATCHES[accent]) return;
+    const swatch = ACCENT_SWATCHES[accent];
+    const style = document.documentElement.style;
+    // Apply the swatch as the active accent for both themes. CSS variables
+    // --accent-teal-base / --accent-teal-light are read by style.css to
+    // override the theme defaults when the user picks a non-default accent.
+    style.setProperty('--accent-teal-base', swatch.base);
+    style.setProperty('--accent-teal-light', swatch.light);
+    style.setProperty('--accent-teal', swatch.base);
+    try { localStorage.setItem(ACCENT_STORAGE_KEY, accent); } catch { /* ignore */ }
+    syncThemeUI();
+  }
+
+  function syncThemeUI() {
+    const current = document.documentElement.getAttribute('data-theme') || 'auto';
+    document.querySelectorAll('[data-theme-option]').forEach((btn) => {
+      const isActive = btn.getAttribute('data-theme-option') === current;
+      btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+    });
+    const accent = readSavedAccent();
+    document.querySelectorAll('[data-accent]').forEach((btn) => {
+      const isActive = btn.getAttribute('data-accent') === accent;
+      btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+    });
+    const hint = document.getElementById('theme-popover-hint');
+    if (hint) hint.textContent = THEME_HINTS[current] || THEME_HINTS.auto;
+    const advancedToggle = document.getElementById('advanced-user-toggle');
+    if (advancedToggle) advancedToggle.checked = isAdvancedUser();
+  }
+
+  function toggleSettings(forceState) {
+    const popover = document.getElementById('theme-popover');
+    const button = document.getElementById('btn-settings');
+    if (!popover || !button) return;
+    const isOpen = popover.getAttribute('aria-hidden') === 'false';
+    const next = typeof forceState === 'boolean' ? forceState : !isOpen;
+    popover.setAttribute('aria-hidden', next ? 'false' : 'true');
+    button.setAttribute('aria-expanded', next ? 'true' : 'false');
+  }
+
+  function initThemeSystem() {
+    const theme = readSavedTheme();
+    document.documentElement.setAttribute('data-theme', theme);
+    applyAccent(readSavedAccent());
+    setAdvancedUser(isAdvancedUser());
+    syncThemeUI();
+
+    document.querySelectorAll('[data-theme-option]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        applyTheme(btn.getAttribute('data-theme-option'));
+        btn.focus();
+      });
+    });
+    document.querySelectorAll('[data-accent]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        applyAccent(btn.getAttribute('data-accent'));
+        btn.focus();
+      });
+    });
+
+    document.addEventListener('click', (event) => {
+      const popover = document.getElementById('theme-popover');
+      const button = document.getElementById('btn-settings');
+      if (!popover || !button) return;
+      if (popover.getAttribute('aria-hidden') === 'false'
+          && !popover.contains(event.target)
+          && !button.contains(event.target)) {
+        toggleSettings(false);
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        const popover = document.getElementById('theme-popover');
+        if (popover && popover.getAttribute('aria-hidden') === 'false') {
+          toggleSettings(false);
+          document.getElementById('btn-settings')?.focus();
+        }
+      }
+    });
+    if (window.matchMedia) {
+      const mql = window.matchMedia('(prefers-color-scheme: light)');
+      const handler = () => {
+        if ((document.documentElement.getAttribute('data-theme') || 'auto') === 'auto') {
+          // CSS already handles the swap via @media. Just keep the meta-color in sync.
+        }
+      };
+      if (mql.addEventListener) mql.addEventListener('change', handler);
+      else if (mql.addListener) mql.addListener(handler);
+    }
+  }
+
+  // ---- Round 2 polish: draggable card order with localStorage ----
+  // The container (.app-container) is the drop target. Children that
+  // carry a data-card-id attribute are the drag handles. We don't
+  // re-render the page; we move nodes via insertBefore and write the
+  // resulting id list to localStorage. Reset is symmetric and uses
+  // a toast (no OS confirm() dialog).
+
+  function getCardOrderContainer() {
+    return document.querySelector('.app-container[data-card-order-key]');
+  }
+
+  // Captured once at init time, before the saved order is applied,
+  // so resetCardOrder can roll the page back to the actual markup
+  // default rather than the user's current (possibly-mutated) order.
+  let capturedDefaultCardOrder = null;
+
+  function captureDefaultCardOrder() {
+    // The markup-defined default lives on the container's
+    // data-default-order attribute so it does not depend on the
+    // current DOM order (which the pre-paint script may have
+    // already rearranged). If the attribute is missing, fall back
+    // to a live read — better than nothing.
+    const container = getCardOrderContainer();
+    if (container) {
+      const attr = container.getAttribute('data-default-order');
+      if (attr) {
+        const ids = attr
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (ids.length) {
+          capturedDefaultCardOrder = ids.slice();
+          return ids;
+        }
+      }
+    }
+    if (!container) return [];
+    const ids = Array.from(container.children)
+      .map((el) => el.getAttribute('data-card-id'))
+      .filter(Boolean);
+    capturedDefaultCardOrder = ids.slice();
+    return ids;
+  }
+
+  function readSavedCardOrder() {
+    try {
+      const raw = localStorage.getItem(CARD_ORDER_KEY);
+      if (!raw) return null;
+      const order = JSON.parse(raw);
+      if (!Array.isArray(order)) return null;
+      return order.filter((id) => typeof id === 'string' && id.length);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeCardOrder(ids) {
+    try {
+      localStorage.setItem(CARD_ORDER_KEY, JSON.stringify(ids));
+    } catch (_) { /* ignore quota / private mode */ }
+  }
+
+  function defaultCardOrder() {
+    const container = getCardOrderContainer();
+    if (!container) return [];
+    return Array.from(container.children)
+      .map((el) => el.getAttribute('data-card-id'))
+      .filter(Boolean);
+  }
+
+  function applyCardOrder(order) {
+    const container = getCardOrderContainer();
+    if (!container) return;
+    if (!Array.isArray(order) || !order.length) return;
+    const byId = {};
+    Array.from(container.children).forEach((el) => {
+      const id = el.getAttribute('data-card-id');
+      if (id) byId[id] = el;
+    });
+    order.forEach((id) => {
+      const node = byId[id];
+      if (node && node.parentNode === container) {
+        container.appendChild(node); // moves existing node
+      }
+    });
+  }
+
+  function persistCardOrderFromDom() {
+    const container = getCardOrderContainer();
+    if (!container) return;
+    const ids = Array.from(container.children)
+      .map((el) => el.getAttribute('data-card-id'))
+      .filter(Boolean);
+    writeCardOrder(ids);
+  }
+
+  function flashCardSnap(node) {
+    if (!node) return;
+    node.classList.remove('flash-snap');
+    // Force a reflow so the animation restarts.
+    void node.offsetWidth;
+    node.classList.add('flash-snap');
+    setTimeout(() => node.classList.remove('flash-snap'), CARD_DRAG_INDICATOR_MS);
+  }
+
+  function updateCardMoveButtonStates() {
+    // No-op: the up/down move buttons were removed (too small, ugly).
+    // Kept as a stub so existing call sites don't break.
+  }
+
+  function wireCardDragHandlers() {
+    const container = getCardOrderContainer();
+    if (!container) return;
+    let dragging = null;
+    let lastZone = null;
+
+    function setDropZone(target, zone) {
+      if (!target) return;
+      if (lastZone && lastZone !== target) {
+        lastZone.removeAttribute('data-drop-zone');
+      }
+      if (zone) {
+        target.setAttribute('data-drop-zone', zone);
+      } else {
+        target.removeAttribute('data-drop-zone');
+      }
+      lastZone = zone ? target : null;
+    }
+
+    function clearAllDropZones() {
+      Array.from(container.children).forEach((el) => {
+        el.removeAttribute('data-drop-zone');
+      });
+      lastZone = null;
+    }
+
+    function isCard(el) {
+      return el && el.parentNode === container && el.getAttribute('data-card-id');
+    }
+
+    function midpointOf(el) {
+      const rect = el.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    }
+
+    Array.from(container.children).forEach((el) => {
+      if (!el.getAttribute || !el.getAttribute('data-card-id')) return;
+      el.setAttribute('data-draggable', 'true');
+      el.setAttribute('draggable', 'true');
+
+      el.addEventListener('dragstart', (event) => {
+        dragging = el;
+        el.setAttribute('data-dragging', 'true');
+        container.classList.add('is-dragging');
+        try {
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', el.getAttribute('data-card-id'));
+        } catch (_) { /* some browsers throw on setData without data */ }
+      });
+
+      el.addEventListener('dragend', () => {
+        if (el) el.removeAttribute('data-dragging');
+        container.classList.remove('is-dragging');
+        clearAllDropZones();
+        dragging = null;
+      });
+
+      el.addEventListener('dragover', (event) => {
+        if (!dragging || dragging === el) return;
+        event.preventDefault();
+        try { event.dataTransfer.dropEffect = 'move'; } catch (_) { /* ignore */ }
+        const mid = midpointOf(el);
+        const zone = event.clientY < mid ? 'above' : 'below';
+        setDropZone(el, zone);
+      });
+
+      el.addEventListener('dragleave', () => {
+        if (lastZone === el) setDropZone(el, null);
+      });
+
+      el.addEventListener('drop', (event) => {
+        if (!dragging || dragging === el) return;
+        event.preventDefault();
+        const mid = midpointOf(el);
+        const zone = lastZone || (event.clientY < mid ? 'above' : 'below');
+        if (zone === 'above') {
+          container.insertBefore(dragging, el);
+        } else {
+          const after = el.nextSibling;
+          container.insertBefore(dragging, after);
+        }
+        clearAllDropZones();
+        persistCardOrderFromDom();
+        flashCardSnap(dragging);
+        updateCardMoveButtonStates();
+        dragging = null;
+      });
+    });
+  }
+
+  function initCardOrder() {
+    // Capture the markup-defined default order BEFORE applying the
+    // saved order, so resetCardOrder can restore the original layout.
+    captureDefaultCardOrder();
+    // Pre-paint script in <head> already applied the saved order.
+    // Here we just verify it matches and finish wiring up interactions.
+    const saved = readSavedCardOrder();
+    if (saved && saved.length) {
+      applyCardOrder(saved);
+    }
+    ensureCardMoveButtons();
+    wireCardDragHandlers();
+    updateCardMoveButtonStates();
+  }
+
+  // Stub: the move-up / move-down buttons were removed because
+  // they were too small and visually noisy. The drag handle on the
+  // card surface is the only reorder affordance now. Kept as a
+  // no-op so init() can still call it without a guard.
+  function ensureCardMoveButtons() { /* drag-handle only now */ }
+
+  function resetCardOrder() {
+    // No confirm() dialog — show a toast instead and reorder the DOM
+    // in place. Reload isn't needed; the source of truth is the DOM.
+    // We restore the markup-defined default (captured at init time),
+    // not the current (possibly-mutated) order.
+    try { localStorage.removeItem(CARD_ORDER_KEY); } catch (_) { /* ignore */ }
+    const container = getCardOrderContainer();
+    if (!container) return;
+    const defaults = capturedDefaultCardOrder && capturedDefaultCardOrder.length
+      ? capturedDefaultCardOrder
+      : defaultCardOrder();
+    applyCardOrder(defaults);
+    persistCardOrderFromDom();
+    updateCardMoveButtonStates();
+    if (typeof toast === 'function') {
+      toast('Card layout reset to default', 'success');
+    }
+  }
+
+  // ---- Round 2 polish: draw-sensor presentation ----
+  // The draw-strength panel already exposes --draw-strength and a
+  // .active class. We add a small inline chip in the device title
+  // row and a glowing ring on the device-stage, both driven from
+  // the same data.draw_strength_* fields. The handler is wired
+  // for both idle and active heating states (the upstream
+  // updateDrawStrengthUI runs on every status message).
+
+  function updateDrawSensorChip(data) {
+    const chip = document.getElementById('draw-sensor-chip');
+    const label = document.getElementById('draw-sensor-chip-label');
+    if (!chip || !label) return;
+    if (!data || !data.connected) {
+      chip.dataset.state = 'hidden';
+      chip.classList.remove('is-live', 'is-unsupported');
+      label.textContent = '—';
+      return;
+    }
+    const hasSensor = Boolean(data.draw_strength_source);
+    const active = Boolean(data.draw_strength_active || (Number(data.draw_strength_percent) || 0) >= 8);
+    const dynamicInhale = data.draw_strength_mode === 'dynamic_inhale' || data.draw_strength_source === '/p/app/htr/inh';
+    const count = readDrawSessionCount();
+    if (!hasSensor) {
+      chip.dataset.state = 'unsupported';
+      chip.classList.add('is-unsupported');
+      chip.classList.remove('is-live');
+      label.textContent = 'Scanning';
+    } else {
+      chip.dataset.state = active ? 'live' : 'idle';
+      chip.classList.add('is-live');
+      chip.classList.remove('is-unsupported');
+      label.textContent = active
+        ? `${data.draw_strength_percent || 0}% ${dynamicInhale ? 'inhale' : 'draw'}`
+        : `${dynamicInhale ? 'Inhales' : 'Draws'}: ${count}`;
+    }
+  }
+
+  function updateDrawSensorRing(data) {
+    const stage = document.querySelector('.device-stage');
+    if (!stage) return;
+    let ring = stage.querySelector('.draw-ring');
+    if (!ring) {
+      ring = document.createElement('div');
+      ring.className = 'draw-ring';
+      ring.setAttribute('aria-hidden', 'true');
+      stage.appendChild(ring);
+    }
+    if (!data || !data.connected) {
+      ring.style.setProperty('--draw-active', '0');
+      ring.classList.remove('is-supported');
+      return;
+    }
+    const hasSensor = Boolean(data.draw_strength_source);
+    const active = Boolean(data.draw_strength_active || (Number(data.draw_strength_percent) || 0) >= 8);
+    if (hasSensor) {
+      ring.classList.add('is-supported');
+      ring.style.setProperty('--draw-active', active ? '0.85' : '0.18');
+    } else {
+      ring.classList.remove('is-supported');
+      ring.style.setProperty('--draw-active', '0');
+    }
+  }
+
+  function readDrawSessionCount() {
+    try {
+      const raw = localStorage.getItem(DRAW_SESSION_KEY);
+      const n = raw == null ? 0 : Number.parseInt(raw, 10);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    } catch (_) { return 0; }
+  }
+
+  function writeDrawSessionCount(n) {
+    try { localStorage.setItem(DRAW_SESSION_KEY, String(n)); } catch (_) { /* ignore */ }
+  }
+
+  function bumpDrawSessionCount() {
+    const next = readDrawSessionCount() + 1;
+    writeDrawSessionCount(next);
+    return next;
+  }
+
+  // Reset the per-session draw counter; surfaced as a small button
+  // next to the chip when a draw is active so the user can wipe
+  // between sessions without reloading.
+  function resetDrawSessionCount() {
+    writeDrawSessionCount(0);
+  }
+
   function init() {
     // Restore saved values
     syncShellClasses();
@@ -4912,10 +5813,13 @@ const app = (() => {
     window.addEventListener('orientationchange', syncShellClasses, { passive: true });
     document.addEventListener('visibilitychange', () => {
       restartBrowserBlePolling();
-      if (voiceListening && voiceRecognition) {
+      // If the user asked voice to be on, restart recognition when the tab
+      // becomes visible again. Voice intent (not the engine state) drives this.
+      if (voiceIntentRunning && voiceRecognition && !voiceListening) {
         setTimeout(() => {
+          if (!voiceIntentRunning) return;
           try { voiceRecognition.start(); } catch {}
-        }, document.hidden ? 1000 : 150);
+        }, document.hidden ? VOICE_MIC_RESTART_DELAY_HIDDEN_MS : VOICE_RESTART_DELAY_MS);
       }
       if (!document.hidden && connected) {
         if (transportMode === 'bridge' && ws?.readyState === WebSocket.OPEN) {
@@ -4927,9 +5831,9 @@ const app = (() => {
     });
     restoreBrowserDebugLog();
     const savedName = localStorage.getItem('puffco_device_name');
-    const savedMac = localStorage.getItem('puffco_device_mac');
     bridgeUrl = normalizeBridgeUrl(localStorage.getItem('puffco_bridge_url'));
     transportMode = normalizeTransportMode(localStorage.getItem('puffco_transport_mode') || defaultTransportMode());
+    initThemeSystem();
     const savedMacMode = localStorage.getItem('puffco_use_mac_address') === '1';
     const macToggle = document.getElementById('use-mac-address');
     if (macToggle) macToggle.checked = savedMacMode;
@@ -4945,6 +5849,7 @@ const app = (() => {
     renderProfileLibrary();
     updateVoiceUI();
     updateVoicePreview('—', null);
+    showVoiceLastAction();
 
     initAppNavigation();
     initLabelTooltips();
@@ -4969,6 +5874,9 @@ const app = (() => {
         if (advancedPanel.open) requestLoraxRegistry();
       });
     }
+    // Round 2: draggable card order — runs after DOM is ready and
+    // after the pre-paint script in <head> has applied the saved order.
+    initCardOrder();
     renderTimer = setInterval(() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
@@ -4989,6 +5897,11 @@ const app = (() => {
     resyncDevice,
     scanDevices,
     refreshStatus,
+    rescanDrawStrength,
+    clearDrawStrengthSource,
+    resetCardOrder,
+    resetDrawSessionCount,
+    toggleSettings,
     selectProfile,
     editProfile,
     closeModal,
@@ -5022,6 +5935,7 @@ const app = (() => {
     saveBoostOptions,
     toggleVoiceCommands,
     openBluetoothFromVoice,
+    toggleAdvancedUser,
     handleVoiceCommand,
     testVoiceCommand,
     heat,
@@ -5054,6 +5968,9 @@ const app = (() => {
     copyBrowserDebugLog,
     downloadBrowserDebugLog,
     getBrowserBle,
+    // Test hook for the draw-sensor wiring (also used by the
+    // smoke test in tools/draw_sensor_smoke.js).
+    _simulateDrawStrength: (state) => updateDrawStrengthUI(state),
   };
 })();
 
@@ -5061,4 +5978,34 @@ window.app = app;
 window.puffcoDebug = {
   export: () => app.exportBrowserDebugLog(),
   print: () => console.table(app.exportBrowserDebugLog()),
+};
+
+// Lightweight test hook for the draw-sensor wiring. Lets a user
+// (or a smoke-test runner) verify the chip + ring + draw panel
+// react to draw-strength updates without needing a real device.
+// Open devtools and call:
+//   __puffcoTest.simulateDraw(80)            // one active inhale
+//   __puffcoTest.simulateDraw(0)             // back to idle
+//   __puffcoTest.simulateDraw(0, { source: false }) // no source
+//   __puffcoTest.simulateDraw(50, { connected: false }) // disconnect
+//   __puffcoTest.resetSession()              // zero the counter
+window.__puffcoTest = {
+  simulateDraw(percent, overrides = {}) {
+    const state = {
+      connected: true,
+      heat: 'IDLE',
+      draw_strength_source: '/p/app/htr/inh',
+      draw_strength_percent: percent,
+      draw_strength_active: percent >= 8,
+      draw_strength_mode: 'dynamic_inhale',
+      ...overrides,
+    };
+    if (overrides.source === false) delete state.draw_strength_source;
+    if (overrides.connected === false) state.connected = false;
+    try { app._simulateDrawStrength(state); } catch (e) { console.warn('simulateDraw failed:', e); }
+  },
+  resetSession() {
+    try { localStorage.setItem('puffco:draw-session', '0'); } catch (_) {}
+    try { app._simulateDrawStrength({ connected: true, heat: 'IDLE', draw_strength_source: '/p/app/htr/inh', draw_strength_percent: 0, draw_strength_active: false, draw_strength_mode: 'dynamic_inhale' }); } catch (_) {}
+  },
 };

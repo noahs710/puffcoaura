@@ -1,0 +1,157 @@
+version: 1
+plan:
+  name: 'Puffco PWA — alignment cleanup + fake-graphic removal + motion polish + draw-sensor idle/heating + draggable card layout with persistence'
+  max_concurrency: 1
+  max_consecutive_failures: 2
+  max_cycles: 4
+  auto_accept: false
+  auto_reject_retries: 1
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0
+    strict_mode: false
+tasks:
+  - id: ui-polish-round-2
+    title: 'Puffco PWA — alignment, motion, draw-sensor behavior, draggable card layout with persistence'
+    prompt: |
+      Working dir: C:\PuffcoBLE. Stack: plain HTML/CSS/JS PWA, no build step, served as static files on GitHub Pages.
+
+      The mac-style refresh is already merged (style.css + index.html ?v=3, both screenshots at tools/mac-style-{light,dark}.png). Read those and the live state before touching anything.
+
+      The user piled on a stack of follow-ups during the previous run. Bundle them into ONE focused pass on the same surfaces. Do all five asks below. Do NOT regress the mac-style work; do NOT change ble-client.js protocol logic; do NOT introduce a build step.
+
+      ============================================================
+      CONSTRAINT 1 — GitHub Pages stays static.
+      ============================================================
+      Do NOT port the CSS to SCSS, LESS, PostCSS, Tailwind, or any preprocessor. GitHub Pages serves the static repo as-is. Keep everything in plain style.css (or add a sibling style-*.css if it stays under static/ and is referenced from index.html). No npm scripts, no GitHub Actions that compile.
+
+      ============================================================
+      ASK 1 — "Things are aligned well and no overlaps."
+      ============================================================
+      Audit the rendered page in BOTH light and dark mode at 1280x900 and 1440x900. Fix:
+        - Stat grids (.stat-grid, .metric-grid, .control-grid) — same gutter, baseline-aligned numbers, label/value pairs share the same top edge.
+        - Header row: status pill + gear icon vertically aligned with the "Disconnected" / connected chip; title baseline matches the chip.
+        - Card section spacing: equal top/bottom margins between cards, no double-padding from nested panels.
+        - Form rows: label + control baselines match; .control-grid and .form-row have a consistent min-height.
+        - The Device Status hero: "PAIR YOUR PUFFCO" / "READY TO SYNC" / description text all share a single left rail; the device graphic on the right is vertically centered to the text block, not floating high or low.
+        - Footer panels (Voice Commands, Advanced) line up with the Connection panel's left/right edges.
+        - Buttons in a row: equal height, equal baseline.
+        - Toast / modals: centered, not drifting toward a corner.
+      The deliverable MUST be observable in the screenshots you produce. No "should be aligned" — actually fixed.
+
+      ============================================================
+      ASK 2 — "Remove fake puffco graphic as it looks nothing like a puffco."
+      ============================================================
+      Find the device graphic — likely a CSS-only blob in .device-stage / .device-halo / .device-graphic or an inline SVG. Replace it with one of:
+        (a) An honest text-only placeholder ("PAIR YOUR PUFFCO" with no fake device silhouette), or
+        (b) A small inline SVG that's clearly stylized (icon-style, geometric, low-detail) and labeled "Puffco Peak Pro" or similar so the user isn't misled.
+      Do NOT spend time rendering a 3D Puffco. Do NOT pull in a photo or external asset. The user wants the fake blob GONE, period. Default to (a) unless the existing markup makes (b) trivially clean. If a separate .device-halo CSS block is now orphaned by removing the graphic, leave the styles in (they still work for any future graphic) but make sure the stage still looks balanced.
+
+      ============================================================
+      ASK 3 — "UI needs to be beautiful — transitions and animations need to be beautiful and smooth but all snappy."
+      ============================================================
+      Audit and improve motion:
+        - Use Apple-cubic-bezier (0.32, 0.72, 0, 1) for state changes; durations in the 140-260ms range for hover/focus, 240-360ms for layout shifts, 400-600ms for hero/connection transitions.
+        - Cards: subtle lift + shadow growth on hover (translateY(-1px), shadow alpha +0.05), spring-back on leave. Do NOT animate `box-shadow` on its own — composite it.
+        - Buttons: scale to 0.97 on active, fill in 140ms. Primary button gets a soft inset highlight sweep on hover.
+        - Status pill (Connected/Disconnected) and the live state dot: pulse the dot with a calm easeInOut cycle, not a 1Hz blink.
+        - Theme toggle: crossfade background + text-color over 220ms when [data-theme] flips; no flash of unstyled content.
+        - Toast / popover enter: 8px slide-down + fade 220ms. Exit: fade 160ms.
+        - Connection panel: when a device connects, the "PAIR YOUR PUFFCO" hero collapses into a compact status strip with a width + height transition (not display:none swap). Snappy, not jumpy.
+        - Voice Commands panel: when activated, the waveform bars get a smooth height-tween (transform: scaleY) not CSS keyframe linear.
+        - Number counters (temp, battery %) on connect: count up over 600ms with easeOutCubic, not instant snap.
+        - Reduce-motion: respect `prefers-reduced-motion: reduce` — disable non-essential motion, keep opacity crossfades only.
+        - All motion is transform + opacity. NEVER animate width/height/top/left/margin/padding of layout-affecting properties.
+      Snappy = under 300ms for interactions. Smooth = no linear easing anywhere, no jarring keyframe resets.
+
+      ============================================================
+      ASK 4 — "Draw sensor needs to work while idle AND while heating."
+      ============================================================
+      Read ble-client.js and app.js to find the draw-detection path. Currently it likely only fires during active heating. Fix:
+        - The draw sensor (likely a characteristic on the Peak Pro — check the BLE snapshot at /u/app/ui/* if relevant) must be subscribed and parsed in BOTH states: idle (post-heat cooldown / between sessions) and active heating.
+        - Wire a single draw-event handler that updates a "Draws" counter and a session counter, plus a small inline indicator (a glowing ring around the device graphic OR a chip in the status strip — your call, but it must be visible in both states when the sensor reports a hit).
+        - If the device isn't connected, the indicator stays at 0 and hidden. If connected but the sensor characteristic isn't supported, show a neutral "—" not a broken UI.
+        - Persist session draw count in memory; reset on app reload OR on a "Reset session" button if one exists. Don't add a new button if there isn't one.
+        - Do NOT change the BLE protocol. Only change the subscription + handler wiring + the UI presentation.
+        - Verify the wired path actually fires: write a tiny tools/draw_sensor_smoke.js that uses the existing http-server / WebSocket fallback to simulate a draw notification (or skip if no real device — just confirm the JS handler runs and updates the DOM via a synthetic event).
+
+      ============================================================
+      ASK 5 — "Reorder UI for card organization. Save when reloaded."
+      ============================================================
+      The page is a stack of cards in a single column. Let the user drag-reorder the cards. Persist the order across reloads.
+
+      Requirements:
+        - Each top-level card (Connection, Device Status, Voice Commands, Advanced, and any other section card you find) becomes draggable.
+        - Use HTML5 drag-and-drop (no new library). On dragstart, set a `data-dragging` attribute and a slight opacity dim. On dragover, compute the midpoint of the target card and either insert above or below based on cursor Y. On drop, reorder and persist.
+        - Visual feedback: a 2px accent-color top border on the dragged card; a soft outline on the drop target.
+        - Cursor: `grab` on hover, `grabbing` while active.
+        - Touch: HTML5 DnD doesn't work on touch — fall back to long-press (300ms) → drag, OR include a small "Move up / Move down" menu button in the card header for accessibility. Pick one. (Long-press is nicer but more code; the menu is fine and ships faster.)
+        - Persistence: write the order to localStorage under a versioned key like `puffco.cardOrder.v1`. On page load, apply the saved order before first paint (do this in a small inline script in <head> or in the existing app.js init — wherever the theme is currently applied — to avoid a flash of wrong order).
+        - Add a small "Reset layout" affordance inside the existing settings popover (next to the theme toggle is fine). One click → clears the localStorage key and reloads the page to the default order.
+        - Snappy drag animation: use transform: translateY for the drag, FLIP-style for the others snapping into place. 180ms ease-out.
+
+      ============================================================
+      CONSTRAINTS
+      ============================================================
+      - style.css edited in place. Don't append a new patch file.
+      - Bump the stylesheet cache-bust to `?v=4` in index.html.
+      - Preserve all existing class names / ids / data-attrs. Adding new ones is fine; renaming isn't.
+      - Don't rewrite app.js wholesale. Surgical edits only — your changes should be small, additive handlers.
+      - Don't add a build step or any tooling. Everything runs as static files.
+      - GitHub Pages compatible: no server-side rendering, no Node, no SCSS.
+
+      ============================================================
+      DELIVERABLES
+      ============================================================
+      1. style.css, index.html, app.js, ble-client.js (only if sensor wiring demands it) edited in place.
+      2. Cache-bust bumped to `?v=4` in index.html.
+      3. Three screenshots only — tools/round2-light.png, tools/round2-dark.png, tools/round2-draw.png (if the device-graphic replacement is visible in light/dark, the third is the same view to show the draw indicator state, or omit if not distinct from light). DO NOT produce a screenshot per section. DO NOT produce before/after pairs.
+      4. A short report (≤300 words): changed files, the four numbered asks addressed, the new card-order localStorage key, the cache-bust version, and the three screenshot paths.
+
+      Use the mini-coder-max skill if it helps structure the work. Stay scoped — this is a polish round, not a rewrite.
+    assigned_to: coder
+    verified_by: verifier
+    verify_prompt: |
+      You are verifying a UI polish round on the PuffcoBLE PWA at C:\PuffcoBLE. The producer was asked to:
+        1. Fix alignment and remove overlaps
+        2. Remove the fake Puffco graphic
+        3. Add snappy, smooth motion (Apple-cubic-bezier, transform/opacity only, reduced-motion respected)
+        4. Wire draw-sensor to fire in BOTH idle and heating
+        5. Make cards draggable + persist order in localStorage with a reset affordance
+      Plus the GitHub-Pages constraint: no SCSS, no build step, plain static files.
+
+      Do these checks IN ORDER. PASS only if all pass.
+
+      CHECK 1 — Open the diff and confirm:
+        - style.css is edited in place (no .scss / .less / build artifacts).
+        - index.html links style.css?v=4 (or higher).
+        - ble-client.js is NOT modified for protocol reasons; sensor wiring changes only are allowed.
+        - app.js has small, additive changes (no wholesale rewrite).
+        - New localStorage key looks like `puffco.cardOrder.v1` (or versioned).
+        - No package.json, no node_modules, no GitHub Actions workflows were added that compile CSS.
+
+      CHECK 2 — Serve the folder on a free port (e.g. npx http-server -p 8724 -c-1 .) and use the playwright MCP to:
+        a) Navigate to http://127.0.0.1:8724/ in BOTH light and dark. Screenshot both at 1440x900 → tools/verify-round2-light.png and tools/verify-round2-dark.png.
+        b) Drag one card to a new position (use page.dragAndDrop() or evaluate() to dispatch the DnD events). Reload the page. Confirm the new order persists by reading the cards' order via evaluate() (compare getBoundingClientRect().top values, or read the localStorage key).
+        c) Confirm the fake Puffco graphic is GONE in both themes — no conic-gradient halo blob, no device silhouette. The Device Status card still reads "PAIR YOUR PUFFCO" with a clean glass background.
+        d) Trigger a synthetic draw event (use evaluate() to dispatch one through whatever global the app exposes, OR set a draw flag and confirm the UI updates). If no synthetic path is feasible, at minimum read the code path and confirm it subscribes to the draw characteristic outside the heating-active branch.
+        e) Confirm prefers-reduced-motion: reduce is respected — set it via emulateMedia and verify a known heavy animation either doesn't run or runs as a crossfade only.
+
+      CHECK 3 — Run a quick grep:
+        - rg "prefers-reduced-motion" C:\PuffcoBLE\style.css — must hit.
+        - rg "cardOrder" C:\PuffcoBLE — must hit in app.js (or inline init) AND style.css for the drag styles.
+        - rg "translateY|transform:" C:\PuffcoBLE\style.css — confirm motion is on transform/opacity, not width/height/top.
+
+      CHECK 4 — Do NOT pass if:
+        - SCSS / LESS / Tailwind / PostCSS / any preprocessor was added.
+        - A build step or GitHub Action that compiles CSS was added.
+        - The fake Puffco graphic is still rendered.
+        - The card order does NOT persist across reload.
+        - Light or dark mode regressed vs. the previous round's mac-style screenshots.
+        - More than 3 screenshots are produced (test less, fewer pictures).
+        - You found JS errors in the browser console.
+
+      REPORT: verdict (PASS / FAIL), the verify screenshots you generated, the list of failed checks (if any), and a one-paragraph summary. If FAIL, list each fix the producer must apply. Do NOT modify any project files.
+    max_retries: 2
+    timeout_ms: 1500000
+    hang_alert_after_ms: 1500000

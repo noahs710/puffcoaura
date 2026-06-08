@@ -14,6 +14,108 @@ class PuffcoBrowserBleClient {
     this.disconnecting = false;
     this.replyHandler = (event) => this.onReply(event);
     this.disconnectHandler = () => this.handleGattDisconnected();
+    this.drawStrengthSource = this.loadDrawStrengthSource();
+  }
+
+  loadDrawStrengthSource() {
+    try {
+      const raw = localStorage.getItem(PuffcoBrowserBleClient.DRAW_STRENGTH_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      if (!parsed.path) return null;
+      const mode = this.drawStrengthModeForPath(parsed.path, parsed.mode);
+      return {
+        path: String(parsed.path),
+        encoding: parsed.encoding || 'float32',
+        mode,
+        evidence: parsed.evidence || null,
+        persisted: true,
+        updated_at: parsed.updated_at || null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  saveDrawStrengthSource(source) {
+    if (!source || !source.path) {
+      try { localStorage.removeItem(PuffcoBrowserBleClient.DRAW_STRENGTH_STORAGE_KEY); }
+      catch { /* ignore */ }
+      this.drawStrengthSource = null;
+      return;
+    }
+    const payload = {
+      path: source.path,
+      encoding: source.encoding || 'float32',
+      mode: this.drawStrengthModeForPath(source.path, source.mode),
+      evidence: source.evidence || null,
+      updated_at: new Date().toISOString(),
+    };
+    try { localStorage.setItem(PuffcoBrowserBleClient.DRAW_STRENGTH_STORAGE_KEY, JSON.stringify(payload)); }
+    catch { /* ignore */ }
+    this.drawStrengthSource = {
+      path: payload.path,
+      encoding: payload.encoding,
+      mode: payload.mode,
+      evidence: payload.evidence,
+      persisted: true,
+      updated_at: payload.updated_at,
+    };
+  }
+
+  formatDrawStrengthValue(numeric, mode) {
+    if (mode === 'heater_power_proxy') {
+      const percent = Math.max(0, Math.min(100, Math.round(numeric)));
+      return { percent, active: percent >= 8 };
+    }
+    const percent = Math.max(0, Math.min(100, Math.round(numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric)));
+    return { percent, active: percent >= 6 };
+  }
+
+  drawStrengthModeForPath(path, mode = 'direct') {
+    if (mode === 'heater_power_proxy' || path === PuffcoBrowserBleClient.DRAW_STRENGTH_PROXY_PATH) {
+      return 'heater_power_proxy';
+    }
+    if (mode === 'dynamic_inhale' || path === PuffcoBrowserBleClient.DYNAMIC_INHALE_PATH) {
+      return 'dynamic_inhale';
+    }
+    return 'direct';
+  }
+
+  drawStrengthReading(path, numeric, mode) {
+    const { percent, active } = this.formatDrawStrengthValue(numeric, mode);
+    return {
+      value: Math.round(numeric * 1000) / 1000,
+      percent,
+      active,
+      source: path,
+      mode,
+    };
+  }
+
+  async readDrawStrengthPath(path, mode = 'direct') {
+    const value = await this.safe(() => this.readFloat32(path), null);
+    if (value == null) return null;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return this.drawStrengthReading(path, numeric, mode);
+  }
+
+  promoteDrawStrengthSource(reading, evidenceSource) {
+    if (!reading?.source || reading.mode === 'heater_power_proxy') return;
+    const current = this.drawStrengthSource;
+    if (current?.path === reading.source && current.mode === reading.mode) return;
+    this.saveDrawStrengthSource({
+      path: reading.source,
+      encoding: 'float32',
+      mode: reading.mode,
+      evidence: {
+        source: evidenceSource,
+        value: reading.value,
+        percent: reading.percent,
+      },
+    });
   }
 
   static LORAX_SERVICE = 'e276967f-ea8a-478a-a92e-d78f5dd15dd5';
@@ -97,14 +199,25 @@ class PuffcoBrowserBleClient {
     4: 'Toad chamber',
   };
 
-  static DRAW_STRENGTH_CANDIDATES = [
-    { path: '/p/app/htr/draw', mode: 'direct' },
-    { path: '/p/app/htr/inh', mode: 'direct' },
-    { path: '/p/app/htr/air', mode: 'direct' },
-    { path: '/p/htr/air', mode: 'direct' },
-    { path: '/p/htr/flow', mode: 'direct' },
-    { path: '/p/htr/pwr', mode: 'heater_power_proxy' },
+  static DYNAMIC_INHALE_PATH = '/p/app/htr/inh';
+
+  // Dynamic inhale is the canonical draw-strength signal. Other readable paths
+  // are left as firmware fallbacks, but /p/app/htr/inh is always tried first.
+  static DRAW_STRENGTH_DIRECT_CANDIDATES = [
+    { path: PuffcoBrowserBleClient.DYNAMIC_INHALE_PATH },
+    { path: '/p/app/htr/draw' },
+    { path: '/p/app/htr/air' },
+    { path: '/p/htr/air' },
+    { path: '/p/htr/flow' },
   ];
+
+  // Heater power is an indirect proxy for draw strength. It only registers a
+  // draw while the heater is actively maintaining temperature, so it is only
+  // consulted as a fallback when a heat cycle is running.
+  static DRAW_STRENGTH_PROXY_PATH = '/p/htr/pwr';
+
+  static DRAW_STRENGTH_STORAGE_KEY = 'puffco_draw_strength_source';
+  static DRAW_STRENGTH_NONZERO_THRESHOLD = 0.01;
 
   static MOOD_PRESETS = {
     no_animation: { name: 'Static color', desc: 'Split your Peak into different color regions', tag: 'pikaled2-no-animation-mood-light', minColors: 1, maxColors: 6, defaults: ['#ff0000'], anim: 1 },
@@ -159,6 +272,8 @@ class PuffcoBrowserBleClient {
     if (cmd === 'lantern') return this.setLantern(params);
     if (cmd === 'stealth') return this.setStealth(params);
     if (cmd === 'brightness') return this.setBrightness(params);
+    if (cmd === 'draw_strength_source') return this.drawStrengthSourceCommand(params);
+    if (cmd === 'draw_strength_observe') return this.observeDrawStrengthPaths(params);
     if (cmd === 'show_battery') return this.modeCommand('show_battery', 'Battery animation started');
     if (cmd === 'show_version') return this.modeCommand('show_version', 'Version animation started');
     if (cmd === 'heat') return this.modeCommand('heat', 'Heat cycle started');
@@ -192,7 +307,12 @@ class PuffcoBrowserBleClient {
     this.disconnecting = false;
 
     const requestOptions = {
-      acceptAllDevices: true,
+      filters: [
+        { services: [PuffcoBrowserBleClient.LORAX_SERVICE] },
+        { namePrefix: 'Peak' },
+        { namePrefix: 'Puffco' },
+        { namePrefix: 'Proxy' },
+      ],
       optionalServices: [PuffcoBrowserBleClient.LORAX_SERVICE],
     };
     try {
@@ -626,7 +746,7 @@ class PuffcoBrowserBleClient {
     const boostTempC = await this.safe(() => this.readFloat32('/p/app/thc/btmp'), null);
     const boostTime = await this.safe(() => this.readFloat32('/p/app/thc/btim'), null);
     const stealthMode = await this.safe(() => this.readUint8('/u/app/ui/stlm'), null);
-    const drawStrength = await this.readDrawStrength();
+    const drawStrength = await this.readDrawStrength(stateName);
 
     const data = {
       connected: true,
@@ -650,6 +770,7 @@ class PuffcoBrowserBleClient {
       current_temperature_c: currentTempC,
       current_temperature_f: currentTempC == null ? null : this.cToF(currentTempC),
       live_temperature_source: { path: '/p/app/htr/temp', encoding: 'float32_c', transport: 'browser_ble' },
+      draw_strength_source_mapping: this.drawStrengthSource,
       target_temperature_c: targetTempC,
       target_temperature_f: targetTempC == null || Number(targetTempC) < 80 ? null : this.cToF(targetTempC),
       state_elapsed_time: elapsed,
@@ -770,23 +891,172 @@ class PuffcoBrowserBleClient {
     return `#${rgb.map((channel) => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0')).join('')}`;
   }
 
-  async readDrawStrength() {
-    for (const candidate of PuffcoBrowserBleClient.DRAW_STRENGTH_CANDIDATES) {
-      const value = await this.safe(() => this.readFloat32(candidate.path), null);
-      const numeric = Number(value);
-      if (!Number.isFinite(numeric)) continue;
-      const percent = candidate.mode === 'heater_power_proxy'
-        ? Math.max(0, Math.min(100, Math.round(numeric)))
-        : Math.max(0, Math.min(100, Math.round(numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric)));
-      return {
-        value: Math.round(numeric * 1000) / 1000,
-        percent,
-        active: percent >= (candidate.mode === 'heater_power_proxy' ? 8 : 6),
-        source: candidate.path,
-        mode: candidate.mode,
-      };
+  async readDrawStrength(stateName = null) {
+    const saved = this.drawStrengthSource;
+    const heating = ['HEAT_CYCLE_PREHEAT', 'HEAT_CYCLE_ACTIVE', 'HEAT_CYCLE_FADE'].includes(stateName);
+    const savedMode = saved?.path ? this.drawStrengthModeForPath(saved.path, saved.mode) : null;
+    const savedIsDirect = Boolean(saved?.path && savedMode !== 'heater_power_proxy');
+    const directReadings = [];
+    let savedDirectReading = null;
+
+    // 0) Dynamic inhale is the canonical signal. If the firmware exposes it,
+    //    report it even at zero so the UI shows the real trigger amount.
+    const dynamicReading = await this.readDrawStrengthPath(
+      PuffcoBrowserBleClient.DYNAMIC_INHALE_PATH,
+      'dynamic_inhale',
+    );
+    if (dynamicReading) {
+      this.promoteDrawStrengthSource(dynamicReading, 'read_dynamic_inhale');
+      return dynamicReading;
+    }
+
+    // 1) Honor a pinned direct fallback when it is active, but still let the
+    //    candidate walk below self-heal stale pins that sit at zero forever.
+    if (savedIsDirect) {
+      savedDirectReading = await this.readDrawStrengthPath(saved.path, savedMode);
+      if (savedDirectReading) {
+        directReadings.push(savedDirectReading);
+        if (savedDirectReading.active) return savedDirectReading;
+      }
+    }
+
+    // 2) Try every remaining direct inhale / airflow fallback in every state. Do not stop
+    //    at the first finite zero, because some firmware exposes placeholder
+    //    paths that read cleanly but never fire.
+    for (const candidate of PuffcoBrowserBleClient.DRAW_STRENGTH_DIRECT_CANDIDATES) {
+      if (candidate.path === PuffcoBrowserBleClient.DYNAMIC_INHALE_PATH) continue;
+      if (savedIsDirect && candidate.path === saved.path) continue;
+      const reading = await this.readDrawStrengthPath(candidate.path, this.drawStrengthModeForPath(candidate.path));
+      if (reading) directReadings.push(reading);
+    }
+
+    const activeDirect = directReadings.find((reading) => reading.active);
+    if (activeDirect) {
+      this.promoteDrawStrengthSource(activeDirect, 'read_draw_strength_active');
+      return activeDirect;
+    }
+
+    if (savedDirectReading) return savedDirectReading;
+    if (directReadings.length) {
+      return directReadings.reduce((best, reading) => (
+        reading.percent > best.percent ? reading : best
+      ), directReadings[0]);
+    }
+
+    // 3) Fall back to heater-power proxy — only valid while a heat cycle is
+    //    actively running, otherwise it just reads zero and lies about idle
+    //    draws. A pinned proxy never gets priority over a direct sensor.
+    if (heating) {
+      const proxyPath = savedMode === 'heater_power_proxy' && saved.path
+        ? saved.path
+        : PuffcoBrowserBleClient.DRAW_STRENGTH_PROXY_PATH;
+      const proxyReading = await this.readDrawStrengthPath(proxyPath, 'heater_power_proxy');
+      if (proxyReading) return proxyReading;
     }
     return { value: null, percent: 0, active: false, source: null, mode: 'not_found' };
+  }
+
+  async observeDrawStrengthPaths(params = {}) {
+    if (!this.connected) throw new Error('Browser Bluetooth is not connected to the Puffco.');
+    const samples = Math.max(2, Math.min(12, Number(params.samples || 4)));
+    const interval = Math.max(0.2, Math.min(5, Number(params.interval || 1.5))) * 1000;
+    const threshold = Math.max(0, Number(params.threshold || PuffcoBrowserBleClient.DRAW_STRENGTH_NONZERO_THRESHOLD));
+    const explicit = Array.isArray(params.paths) ? params.paths : null;
+    const candidates = explicit && explicit.length
+      ? explicit.map((path) => ({ path, mode: 'direct' }))
+      : PuffcoBrowserBleClient.DRAW_STRENGTH_DIRECT_CANDIDATES;
+
+    const series = {};
+    for (let index = 0; index < samples; index += 1) {
+      const time = new Date().toISOString();
+      for (const candidate of candidates) {
+        const entry = series[candidate.path] || (series[candidate.path] = { path: candidate.path, samples: [] });
+        try {
+          const raw = await this.readFloat32(candidate.path, null);
+          const numeric = raw == null ? NaN : Number(raw);
+          const ok = Number.isFinite(numeric);
+          entry.samples.push({
+            index,
+            time,
+            ok,
+            value: ok ? Math.round(numeric * 10000) / 10000 : null,
+            mode: this.drawStrengthModeForPath(candidate.path, candidate.mode),
+          });
+        } catch (err) {
+          entry.samples.push({ index, time, ok: false, error: err?.message || String(err) });
+        }
+      }
+      if (index < samples - 1) {
+        await new Promise((resolve) => setTimeout(resolve, interval));
+      }
+    }
+
+    const ranked = [];
+    for (const path of Object.keys(series)) {
+      const entry = series[path];
+      const good = entry.samples.filter((s) => s.ok && s.value != null);
+      if (good.length < 2) {
+        entry.summary = null;
+        continue;
+      }
+      const values = good.map((s) => Number(s.value));
+      const spread = Math.max(...values) - Math.min(...values);
+      const nonzeroHits = values.filter((v) => Math.abs(v) >= threshold).length;
+      const last = values[values.length - 1];
+      let score = nonzeroHits * 2;
+      if (spread >= threshold) score += 3;
+      if (spread >= Math.max(0.1, threshold * 5)) score += 2;
+      if (Math.abs(last) >= threshold) score += 1;
+      entry.summary = {
+        samples: good.length,
+        nonzero_hits: nonzeroHits,
+        spread: Math.round(spread * 10000) / 10000,
+        min: Math.round(Math.min(...values) * 10000) / 10000,
+        max: Math.round(Math.max(...values) * 10000) / 10000,
+        last: Math.round(last * 10000) / 10000,
+        score,
+      };
+      ranked.push({ path, mode: this.drawStrengthModeForPath(path), ...entry.summary });
+    }
+    ranked.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    let promoted = null;
+    if (params.promote && ranked.length) {
+      const best = ranked[0];
+      if (best.nonzero_hits >= 1 && best.samples >= 2) {
+        promoted = this.saveDrawStrengthSource({
+          path: best.path,
+          encoding: 'float32',
+          mode: this.drawStrengthModeForPath(best.path),
+          evidence: {
+            source: 'draw_strength_observe',
+            nonzero_hits: best.nonzero_hits,
+            samples: best.samples,
+            spread: best.spread,
+            max: best.max,
+            min: best.min,
+            last: best.last,
+          },
+        });
+        promoted = this.drawStrengthSource;
+      }
+    }
+
+    return {
+      type: 'draw_strength_observe',
+      data: {
+        samples,
+        interval_s: interval / 1000,
+        threshold,
+        count: Object.keys(series).length,
+        results: Object.values(series),
+        ranked,
+        promoted,
+        mapped_draw_strength_source: this.drawStrengthSource,
+        guidance:
+          'Take at least one draw during the scan. The candidate with the most non-zero samples and the largest spread between min and max wins. Use promote=true to pin the winner so future snapshots prefer it.',
+      },
+    };
   }
 
   normalizeColorList(value, preset) {
@@ -1210,6 +1480,23 @@ class PuffcoBrowserBleClient {
         ? null
         : { path: params.path || '/p/app/htr/temp', encoding: params.encoding || 'float32', transport: 'browser_ble' },
     };
+  }
+
+  drawStrengthSourceCommand(params = {}) {
+    if (params.clear) {
+      this.saveDrawStrengthSource(null);
+    } else if (params.path) {
+      const mode = params.path === PuffcoBrowserBleClient.DRAW_STRENGTH_PROXY_PATH
+        ? 'heater_power_proxy'
+        : this.drawStrengthModeForPath(params.path, params.mode);
+      this.saveDrawStrengthSource({
+        path: params.path,
+        encoding: params.encoding || 'float32',
+        mode,
+        evidence: { source: 'manual', note: 'Pinned by user command.' },
+      });
+    }
+    return { type: 'draw_strength_source', data: this.drawStrengthSource };
   }
 
   registryPaths(params = {}) {
