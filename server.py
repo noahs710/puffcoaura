@@ -2845,7 +2845,21 @@ async def handle_scan_devices_locked(params: dict[str, Any]) -> dict[str, Any]:
     prefixes = scan_mac_prefixes(params)
     prefix_label = ", ".join(prefixes)
     puffco_only = bool(params.get("puffco_only", True))
-    await broadcast_connection_status("scanning", f"Scanning Windows Bluetooth for Puffco MAC prefix {prefix_label} ({timeout:.0f}s).")
+    # The "puffco_only" gate is a Puffco-specific filter, not a MAC
+    # filter. Puffco hardware has shipped under multiple Bluetooth
+    # identifiers and at least one user-reported case where the
+    # advertised MAC prefix isn't the historical F0:AD:4E range — so
+    # we keep the gate but back it with a name / protocol-token match
+    # (Puffco / Peak / Pearl / Proxy / Lorax), which is the only
+    # Puffco-specific signal visible during a generic BLE scan. The
+    # MAC prefix match is still computed (and reported in the row as
+    # `manufacturer_prefix_match`) so the UI can highlight devices
+    # that hit both signals without hiding those that hit only one.
+    likely_puffco_tokens = ("peak", "pearl", "puffco", "proxy", "lorax")
+    await broadcast_connection_status(
+        "scanning",
+        f"Scanning Windows Bluetooth for Puffco devices ({timeout:.0f}s).",
+    )
     devices = await BleakScanner.discover(timeout=timeout, return_adv=True)
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2856,20 +2870,20 @@ async def handle_scan_devices_locked(params: dict[str, Any]) -> dict[str, Any]:
             continue
         seen.add(normalized_address)
         lower_name = name.lower()
-        likely_puffco = any(token in lower_name for token in ("peak", "pearl", "puffco", "proxy"))
+        likely_puffco = any(token in lower_name for token in likely_puffco_tokens)
         prefix_match = matches_mac_prefix(normalized_address, prefixes)
-        if puffco_only and not prefix_match:
+        if puffco_only and not likely_puffco:
             continue
         rows.append(
             {
                 "name": name or "Puffco device",
                 "address": normalized_address,
                 "rssi": adv.rssi,
-                "likely_puffco": prefix_match or likely_puffco,
+                "likely_puffco": likely_puffco or prefix_match,
                 "manufacturer_prefix_match": prefix_match,
             }
         )
-    rows.sort(key=lambda row: (not row["manufacturer_prefix_match"], row["name"].lower(), row["address"]))
+    rows.sort(key=lambda row: (not row["likely_puffco"], row["name"].lower(), row["address"]))
     return {
         "type": "scan_devices",
         "data": {

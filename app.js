@@ -17,6 +17,9 @@ const app = (() => {
   let scanPending = false;
   let editingProfileIndex = null;
   let editingLocalProfileId = null;
+  let pendingProfileReload = null;
+  let profileSaveInFlight = null;
+  let pendingAutoCloseIndex = null;
   let heatCommandPending = null;
   let renderTimer = null;
   let lastDeviceSnapshot = null;
@@ -49,6 +52,23 @@ const app = (() => {
   const VOICE_RESTART_DELAY_MS = 250;
   const VOICE_RESTART_DELAY_HIDDEN_MS = 1000;
   const VOICE_MIC_RESTART_DELAY_HIDDEN_MS = 150;
+  // Voice command prefix (a.k.a. wake word). When non-empty, transcripts
+  // only fire a command if the wake word is detected — the wake word is
+  // stripped and the remainder is sent to the matcher. When empty, the
+  // current "fire on any matching command" behavior is preserved so users
+  // who don't want a prefix don't have to set one. Persisted in
+  // localStorage so a returning user lands in the same mode they left.
+  //   localStorage key: 'puffco:voice-prefix'
+  //   localStorage key: 'puffco:voice-intent'  ('1' = user wants voice on)
+  const VOICE_PREFIX_KEY = 'puffco:voice-prefix';
+  const VOICE_INTENT_KEY = 'puffco:voice-intent';
+  const VOICE_DEFAULT_PREFIX = 'puffco';
+  let voicePrefix = loadVoicePrefix();
+  // lastHeardAt records when the wake word was last detected, used to
+  // surface a brief "Puffco:" flash in the UI when the user speaks
+  // the wake word but no command follows (or the command is not yet
+  // matched).
+  let voiceWakeFiredAt = 0;
   // Last executed voice action — surfaced in the UI as a fading chip.
   let voiceLastAction = null;
   let voiceLastActionFrame = null;
@@ -846,6 +866,7 @@ const app = (() => {
           if (msg.data && msg.data.path && selectedPathEntry && msg.data.path === selectedPathEntry.path) {
             readSelectedLoraxPath();
           }
+          handleProfileSaveResponse(msg, false);
           break;
         case 'error':
           {
@@ -866,6 +887,7 @@ const app = (() => {
           }
           heatCommandPending = null;
           updateHeatControls();
+          handleProfileSaveResponse(msg, true);
           break;
         case 'temperature_observe':
         case 'heat_observe':
@@ -1001,6 +1023,7 @@ const app = (() => {
     reconcileHeatPending();
     updateHeatControls();
     renderBackendMirror();
+    if (pendingProfileReload != null) applyPendingProfileReload();
   }
 
   // ---- UI Updates ----
@@ -2939,6 +2962,9 @@ const app = (() => {
     renderMoodControls();
     renderVaporControls();
     renderModalSummary();
+    syncProfileDialSliders();
+    populateProfileReadback(profile);
+    clearProfileReadbackState();
     document.getElementById('modal-select').checked = false;
 
     modal?.classList.add('visible');
@@ -2961,6 +2987,9 @@ const app = (() => {
     setMoodPreset('no_animation');
     renderVaporControls();
     renderModalSummary();
+    syncProfileDialSliders();
+    clearProfileReadbackState();
+    clearProfileDialValidity();
   }
 
   function deleteCurrentProfile() {
@@ -3622,8 +3651,10 @@ const app = (() => {
     renderMoodControls();
     renderVaporControls();
     renderModalSummary();
+    syncProfileDialSliders();
+    populateProfileReadback(profile);
+    clearProfileReadbackState();
     document.getElementById('modal-select').checked = false;
-
     document.getElementById('profile-modal').classList.add('visible');
   }
 
@@ -3633,12 +3664,234 @@ const app = (() => {
     return fallback >= 0 ? profileWithVapor(profiles[fallback], fallback) : null;
   }
 
+  // Slider <-> number sync for the temperature and duration dial fields.
+  // Drag the slider for an approximate value, type for an exact one. The
+  // slider also gets re-tinted by the percent of the range covered, so
+  // users get a visual cue when the value sits at the high or low end.
+  function syncProfileDialSliders() {
+    syncDialPair('modal-temp', 'modal-temp-slider', { min: 250, max: 700 });
+    syncDialPair('modal-time', 'modal-time-slider', { min: 5, max: 180 });
+  }
+
+  function syncDialPair(numberId, sliderId, { min, max }) {
+    const numberEl = document.getElementById(numberId);
+    const sliderEl = document.getElementById(sliderId);
+    if (!numberEl || !sliderEl) return;
+    if (sliderEl.dataset.bound === '1') return;
+    sliderEl.dataset.bound = '1';
+    const tint = () => {
+      const value = Number(sliderEl.value);
+      if (!Number.isFinite(value)) return;
+      const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+      sliderEl.style.background = `linear-gradient(90deg, var(--accent, #c084fc) 0%, var(--accent, #c084fc) ${pct}%, rgba(255,255,255,0.12) ${pct}%, rgba(255,255,255,0.12) 100%)`;
+    };
+    const pushValue = (raw) => {
+      if (raw === '' || raw == null) {
+        // Empty input — leave the slider where it is; validation will
+        // surface the missing value at save time.
+        return;
+      }
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return;
+      const clamped = Math.max(min, Math.min(max, value));
+      if (Number.isFinite(Number(sliderEl.value)) && Number(sliderEl.value) !== clamped) {
+        sliderEl.value = String(clamped);
+      }
+      tint();
+    };
+    sliderEl.addEventListener('input', () => {
+      numberEl.value = sliderEl.value;
+      validateProfileDial(numberId, numberEl.value, { min, max });
+      renderModalSummary();
+      tint();
+    });
+    numberEl.addEventListener('input', () => {
+      pushValue(numberEl.value);
+      validateProfileDial(numberId, numberEl.value, { min, max });
+      renderModalSummary();
+    });
+    numberEl.addEventListener('blur', () => {
+      if (numberEl.value === '') return;
+      const value = Number(numberEl.value);
+      if (!Number.isFinite(value)) return;
+      const clamped = Math.max(min, Math.min(max, value));
+      numberEl.value = String(clamped);
+      pushValue(clamped);
+    });
+    pushValue(numberEl.value || sliderEl.value);
+  }
+
+  function validateProfileDial(id, value, { min, max }) {
+    const el = document.getElementById(id);
+    if (!el) return true;
+    const field = el.closest('.dial-field');
+    if (!field) return true;
+    const numeric = Number(value);
+    if (value === '' || !Number.isFinite(numeric)) {
+      field.classList.remove('is-invalid');
+      return true;
+    }
+    if (numeric < min || numeric > max) {
+      field.classList.add('is-invalid');
+      return false;
+    }
+    field.classList.remove('is-invalid');
+    return true;
+  }
+
+  function clearProfileDialValidity() {
+    document.querySelectorAll('#profile-modal .dial-field.is-invalid').forEach((el) => el.classList.remove('is-invalid'));
+  }
+
+  // Fills the readback panel (chamber / boost / last saved). All values
+  // are best-effort — if the device didn't report a chamber we just show
+  // a dash instead of pretending the data exists.
+  function populateProfileReadback(profile) {
+    const chamber = document.getElementById('modal-chamber');
+    const boostTemp = document.getElementById('modal-boost-temp');
+    const boostTime = document.getElementById('modal-boost-time');
+    const savedStamp = document.getElementById('modal-saved-stamp');
+    if (chamber) chamber.textContent = chamberLabel(deviceState?.chamber) || '—';
+    if (boostTemp) {
+      const deltaF = Number(deviceState?.boost_temperature_delta_f);
+      if (Number.isFinite(deltaF) && deltaF !== 0) boostTemp.textContent = `+${Math.round(deltaF)} °F`;
+      else boostTemp.textContent = '—';
+    }
+    if (boostTime) {
+      const seconds = Number(deviceState?.boost_time_s);
+      if (Number.isFinite(seconds) && seconds > 0) boostTime.textContent = `${Math.round(seconds)} s`;
+      else boostTime.textContent = '—';
+    }
+    if (savedStamp) {
+      const stamp = profile?.saved_at || deviceState?.profile_saved_at?.[profile?.index];
+      savedStamp.textContent = stamp ? formatRelativeStamp(stamp) : '—';
+    }
+  }
+
+  function formatRelativeStamp(value) {
+    if (!value) return '—';
+    try {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '—';
+      return date.toLocaleString();
+    } catch {
+      return '—';
+    }
+  }
+
+  function clearProfileReadbackState() {
+    const panel = document.getElementById('modal-readback');
+    if (!panel) return;
+    panel.classList.remove('is-saved', 'is-error', 'is-saving');
+    const stamp = document.getElementById('modal-saved-stamp');
+    if (stamp) stamp.textContent = '—';
+  }
+
+  function markProfileReadbackSaving() {
+    const panel = document.getElementById('modal-readback');
+    if (!panel) return;
+    panel.classList.remove('is-saved', 'is-error');
+    panel.classList.add('is-saving');
+    const stamp = document.getElementById('modal-saved-stamp');
+    if (stamp) stamp.innerHTML = '<span class="spinner-inline" aria-hidden="true"></span>Saving…';
+  }
+
+  function markProfileReadbackSaved(message) {
+    const panel = document.getElementById('modal-readback');
+    if (!panel) return;
+    panel.classList.remove('is-saving', 'is-error');
+    panel.classList.add('is-saved');
+    const stamp = document.getElementById('modal-saved-stamp');
+    if (stamp) stamp.textContent = message || 'Saved';
+  }
+
+  function markProfileReadbackError(message) {
+    const panel = document.getElementById('modal-readback');
+    if (!panel) return;
+    panel.classList.remove('is-saving', 'is-saved');
+    panel.classList.add('is-error');
+    const stamp = document.getElementById('modal-saved-stamp');
+    if (stamp) stamp.textContent = message || 'Save failed';
+  }
+
+  // Discard local edits and re-read this profile slot from the device.
+  // Useful when the user suspects the local snapshot is stale (for
+  // example, after editing the same profile in the official app).
+  function reloadCurrentProfile() {
+    if (editingProfileIndex == null) {
+      toast('Open a profile first', 'warn');
+      return;
+    }
+    const index = Number(editingProfileIndex);
+    const btn = event?.currentTarget;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Reloading…';
+    }
+    markProfileReadbackSaving();
+    pendingProfileReload = index;
+    send('status', { full: true });
+    setTimeout(() => {
+      // Safety net: if the status message never lands (transport down),
+      // restore the button and surface a hint rather than leaving the
+      // user staring at a perpetual spinner.
+      if (pendingProfileReload == null) return;
+      pendingProfileReload = null;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Reload from device';
+      }
+      markProfileReadbackError('Reload timed out');
+    }, 4000);
+  }
+
+  // Called from the 'status' message handler when a reload is pending.
+  function applyPendingProfileReload() {
+    const index = pendingProfileReload;
+    if (index == null) return;
+    pendingProfileReload = null;
+    const profile = findProfile(index);
+    const buttons = document.querySelectorAll('#profile-modal .modal-actions button');
+    const reloadBtn = Array.from(buttons).find((b) => b.textContent.trim().startsWith('Reloading'));
+    if (reloadBtn) {
+      reloadBtn.disabled = false;
+      reloadBtn.textContent = 'Reload from device';
+    }
+    if (!profile) {
+      markProfileReadbackError('Profile not found on device');
+      return;
+    }
+    document.getElementById('modal-name').value = profile.name || '';
+    document.getElementById('modal-temp').value = profile.temp_f ?? '';
+    document.getElementById('modal-time').value = profile.time_s ?? '';
+    document.getElementById('modal-vapor').value = normalizeVaporPreset(profile);
+    const mood = extractProfileMood(profile.color);
+    moodEditor.preset = mood.preset;
+    moodEditor.colors = mood.colors;
+    moodEditor.tempoFrac = mood.tempoFrac;
+    moodEditor.dynamicInhale = mood.dynamicInhale;
+    syncPickerToMoodColor();
+    renderMoodControls();
+    renderVaporControls();
+    renderModalSummary();
+    syncProfileDialSliders();
+    populateProfileReadback(profile);
+    markProfileReadbackSaved('Reloaded from device');
+    toast(`Reloaded profile ${index} from device`, 'success');
+  }
+
   function closeModal() {
     const modal = document.getElementById('profile-modal');
     modal?.classList.remove('visible');
     modal?.classList.remove('local-profile-edit');
     editingProfileIndex = null;
     editingLocalProfileId = null;
+    profileSaveInFlight = null;
+    pendingProfileReload = null;
+    pendingAutoCloseIndex = null;
+    setSaveButtonsPending(false);
+    clearProfileReadbackState();
+    clearProfileDialValidity();
   }
 
   function saveProfile(forceSelect = false) {
@@ -3651,6 +3904,16 @@ const app = (() => {
     const tempStr = document.getElementById('modal-temp').value;
     const timeStr = document.getElementById('modal-time').value;
     const vapor = normalizeVaporPreset(document.getElementById('modal-vapor')?.value);
+
+    // Block on out-of-range dial values so the user gets a clear visual
+    // signal in the form (not just a toast that vanishes). The validator
+    // also runs a second time below as a hard guard.
+    const tempOk = validateProfileDial('modal-temp', tempStr, { min: 250, max: 700 });
+    const timeOk = validateProfileDial('modal-time', timeStr, { min: 5, max: 180 });
+    if (!tempOk || !timeOk) {
+      toast('Temperature must be 250-700 °F and duration 5-180 s', 'error');
+      return;
+    }
 
     const params = { index };
     if (name) params.name = name;
@@ -3683,12 +3946,41 @@ const app = (() => {
     saveProfileBackup('before_set_profile');
     writeProfileVaporOverride(index, vapor);
     updateOptimisticProfileDetails(index, params);
-    send('set_profile', params);
+    // Keep the modal open so the user can see the saving/saved state in
+    // the readback panel. The success and error handlers below dismiss
+    // it after a short delay or surface the error inline.
+    markProfileReadbackSaving();
+    profileSaveInFlight = index;
+    const sent = send('set_profile', params);
+    if (!sent) {
+      profileSaveInFlight = null;
+      markProfileReadbackError('Bridge is offline — could not send');
+      return;
+    }
     if (params.select) {
       optimisticProfileIndex = index;
       updateOptimisticProfile(index);
     }
-    closeModal();
+    setSaveButtonsPending(true);
+    // Auto-close on success so the experience matches the official Puffco
+    // app's "tap save, modal disappears" feel. We give the user ~1.4s to
+    // see the "Saved" stamp before dismissing. Errors keep the modal
+    // open so the user can fix and retry.
+    setTimeout(() => {
+      if (pendingAutoCloseIndex === index) {
+        pendingAutoCloseIndex = null;
+        profileSaveInFlight = null;
+        closeModal();
+      }
+    }, 1400);
+    pendingAutoCloseIndex = index;
+  }
+
+  function setSaveButtonsPending(pending) {
+    document.querySelectorAll('#profile-modal [data-device-command="set_profile"]').forEach((btn) => {
+      btn.disabled = pending;
+      btn.dataset.pending = pending ? '1' : '';
+    });
   }
 
   function currentProfilesPayload() {
@@ -4252,6 +4544,38 @@ const app = (() => {
       : 'readback did not match the requested write';
     appendLog(`Verification warning for ${target}: ${reason}`, 'warn');
     toast('Profile saved, but readback verification needs attention', 'warn');
+  }
+
+  // Routes a save-profile WebSocket response into the right UI state.
+  // The modal's readback panel shows "Saving…" → "Saved" / "Error", and
+  // the set_profile button is re-enabled as soon as we hear back.
+  function handleProfileSaveResponse(msg, isError) {
+    if (profileSaveInFlight == null) return;
+    const index = profileSaveInFlight;
+    profileSaveInFlight = null;
+    setSaveButtonsPending(false);
+    if (isError) {
+      // Errors keep the modal open and cancel the auto-close timer so
+      // the user has time to read the error and decide what to do next.
+      if (pendingAutoCloseIndex === index) pendingAutoCloseIndex = null;
+      markProfileReadbackError(msg?.message || 'Save failed');
+      return;
+    }
+    const stamp = new Date().toLocaleTimeString();
+    const verification = msg?.data?.write_verification;
+    if (verification && verification.ok) {
+      markProfileReadbackSaved(`Saved at ${stamp} — verified`);
+    } else if (verification && !verification.ok) {
+      const reason = Array.isArray(verification.mismatches) && verification.mismatches.length
+        ? verification.mismatches.join('; ')
+        : 'readback did not match';
+      markProfileReadbackSaved(`Saved at ${stamp} — ${reason}`);
+    } else {
+      markProfileReadbackSaved(`Saved at ${stamp}`);
+    }
+    // On success the auto-close timer (set in saveProfile) will dismiss
+    // the modal. We don't clear pendingAutoCloseIndex here so the timer
+    // can do its job.
   }
 
   function normalizeLogType(type) {
@@ -5591,24 +5915,154 @@ const app = (() => {
     return window.SpeechRecognition || window.webkitSpeechRecognition || null;
   }
 
+  // ---- Voice prefix (wake word) + intent persistence ----
+  //
+  // The "prefix" gates voice commands: when set, transcripts only fire
+  // a command if the wake word is detected. The remainder of the
+  // transcript (after the wake word) is sent to the matcher. The
+  // wake word can be anywhere in the transcript, but is stripped
+  // before matching so the matcher sees a clean command string.
+  //
+  // The "intent" remembers whether the user had voice on across
+  // page reloads. Browsers require a user gesture to start mic
+  // capture, so we can't truly auto-resume — but we can surface
+  // a "Voice was on" re-arm prompt that gets the user back to
+  // listening with one click.
+
+  function loadVoicePrefix() {
+    try {
+      const raw = localStorage.getItem(VOICE_PREFIX_KEY);
+      if (raw == null) return VOICE_DEFAULT_PREFIX; // default ON with "puffco"
+      const trimmed = String(raw).trim();
+      return trimmed || ''; // empty string = explicitly disabled
+    } catch {
+      return VOICE_DEFAULT_PREFIX;
+    }
+  }
+
+  function getVoicePrefix() {
+    return voicePrefix;
+  }
+
+  function setVoicePrefix(value) {
+    const next = String(value || '').trim();
+    voicePrefix = next;
+    try {
+      if (next) localStorage.setItem(VOICE_PREFIX_KEY, next);
+      else localStorage.removeItem(VOICE_PREFIX_KEY);
+    } catch { /* ignore quota / private mode */ }
+    syncVoicePrefixUI();
+    updateVoiceUI();
+  }
+
+  function loadVoiceIntent() {
+    try { return localStorage.getItem(VOICE_INTENT_KEY) === '1'; }
+    catch { return false; }
+  }
+
+  function setVoiceIntent(on) {
+    try {
+      if (on) localStorage.setItem(VOICE_INTENT_KEY, '1');
+      else localStorage.removeItem(VOICE_INTENT_KEY);
+    } catch { /* ignore */ }
+  }
+
+  // True when the user wants voice on and the wake word is set, so
+  // the UI can show "Armed · listening for [prefix]" instead of the
+  // generic "Listening" state.
+  function isVoiceArmed() {
+    return voiceIntentRunning && voiceListening && Boolean(voicePrefix);
+  }
+
+  // Build a regex that matches the wake word as a whole word, in any
+  // position in the transcript. Backslash-escapes any regex specials
+  // in the user's prefix so "puff.co" doesn't act as a regex. Returns
+  // null when there's no prefix to gate on.
+  function voicePrefixRegex() {
+    if (!voicePrefix) return null;
+    const escaped = voicePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|\\W)${escaped}(?:\\W|$)`, 'i');
+  }
+
+  // Pull the wake word out of the transcript and return the remainder
+  // trimmed of leading / trailing filler words ("hey", "ok", "please",
+  // "now") so the matcher sees a clean command. Returns null when the
+  // transcript doesn't contain the wake word, signalling the caller to
+  // ignore the result.
+  function stripVoicePrefix(transcript) {
+    const regex = voicePrefixRegex();
+    if (!regex) return transcript; // no gate configured
+    if (!regex.test(transcript)) return null; // wake word not heard
+    // Drop the wake word itself, leaving the rest.
+    let remainder = transcript.replace(regex, ' ').replace(/\s+/g, ' ').trim();
+    // Filler words that the user often trails before a command when
+    // using a wake word. Stripped from the front of the remainder so
+    // "puffco hey start heat" -> "start heat".
+    remainder = remainder.replace(/^(?:hey|ok(?:ay)?|please|now|um+|uh+|erm+)\b[\s,]*/i, '').trim();
+    return remainder;
+  }
+
+  // Wire the wake-word input to the state. Called from init() and
+  // after the DOM is rebuilt. Idempotent: repeated calls just re-sync
+  // the input value to the current state.
+  function syncVoicePrefixUI() {
+    const input = document.getElementById('voice-prefix-input');
+    if (!input) return;
+    if (document.activeElement !== input) {
+      input.value = voicePrefix || '';
+    }
+    input.placeholder = `Wake word (default: ${VOICE_DEFAULT_PREFIX})`;
+    input.classList.toggle('is-active', Boolean(voicePrefix));
+  }
+
+  // Show / hide the "Voice was on — click to resume" prompt. Only
+  // visible when the user previously had voice on AND the mic
+  // permission hasn't been re-granted this session (i.e. we can't
+  // auto-restart because of the user-gesture requirement).
+  function syncVoiceRearmPrompt() {
+    const prompt = document.getElementById('voice-rearm');
+    if (!prompt) return;
+    const wantsVoice = loadVoiceIntent();
+    const canListen = voiceIntentRunning && voiceListening;
+    const showPrompt = wantsVoice && !canListen && !voiceIntentRunning;
+    prompt.classList.toggle('hidden', !showPrompt);
+  }
+
+  function handleVoiceRearmClick() {
+    setVoiceIntent(true);
+    startVoiceCommands();
+  }
+
   function updateVoiceUI(message = null) {
     const button = document.getElementById('btn-voice');
     const state = document.getElementById('voice-state');
     if (button) button.textContent = voiceIntentRunning ? 'Stop Voice' : 'Enable Voice';
     if (state) {
-      state.textContent = message || (voiceListening ? 'Listening' : voicePermissionGranted ? 'Ready' : 'Permission required');
+      // Build a sensible default state label that reflects the wake-word
+      // mode. When a prefix is set and we're actually listening, the
+      // label says "Listening for [prefix]" so the user knows the
+      // system is armed but waiting for the wake word. Transient
+      // messages (passed in as `message`) always take precedence.
+      let label = null;
+      if (!message) {
+        if (isVoiceArmed()) label = `Armed · say "${voicePrefix}"`;
+        else if (voiceListening) label = 'Listening';
+        else if (voicePermissionGranted) label = 'Ready';
+        else label = 'Permission required';
+      }
+      state.textContent = message || label || 'Idle';
       state.classList.toggle('listening', voiceListening);
+      state.classList.toggle('armed', isVoiceArmed());
       const dataState = !voicePermissionGranted
         ? 'no-permission'
         : voiceBluetoothPending
           ? 'queued'
           : voiceListening
-            ? 'listening'
-            : voicePermissionGranted
-              ? 'ready'
-              : 'idle';
+            ? (voicePrefix ? 'armed' : 'listening')
+            : 'idle';
       state.dataset.state = dataState;
     }
+    syncVoiceRearmPrompt();
   }
 
   function setVoiceBluetoothPrompt(visible, message = null) {
@@ -6021,8 +6475,34 @@ const app = (() => {
   }
 
   function handleVoiceCommand(transcript) {
-    const text = String(transcript || '').toLowerCase().trim();
-    if (!text) return false;
+    const raw = String(transcript || '').toLowerCase().trim();
+    if (!raw) return false;
+    // Wake-word gate. When a prefix is configured, transcripts that
+    // don't contain it are ignored — the user hasn't asked for a
+    // command. We still update the heard/transcript preview so the
+    // user can see the mic is alive; we just don't fire commands.
+    const gated = stripVoicePrefix(raw);
+    if (gated === null) {
+      updateVoicePreview(raw, null);
+      setVoiceTranscript(`Heard: ${raw}`, false);
+      // The user spoke but didn't say the wake word. Don't log —
+      // that would flood the activity log with "Voice heard: …"
+      // for every stray word.
+      return false;
+    }
+    // The wake word was heard. Stamp the time so the UI can flash
+    // a brief "Puffco:" indicator.
+    if (voicePrefix && raw !== gated) voiceWakeFiredAt = Date.now();
+    const text = gated;
+    if (!text) {
+      // Wake word was heard but nothing after it. Surface as a
+      // "Puffco: …" prompt so the user knows the wake word was
+      // caught and the system is waiting for the rest.
+      updateVoicePreview(raw, null);
+      setVoiceTranscript(`Heard: ${raw} · say a command`, false);
+      updateVoiceUI(`${voicePrefix}?`);
+      return false;
+    }
     const now = Date.now();
     if (text === lastVoiceCommandText && now - lastVoiceCommandAt < VOICE_DEDUPE_MS) return false;
     lastVoiceCommandText = text;
@@ -6083,6 +6563,13 @@ const app = (() => {
     updateVoiceUI('Requesting mic');
     if (!(await ensureVoiceMic())) return;
     voiceIntentRunning = true;
+    // Persist intent so a page reload (or new tab) can offer a
+    // one-click re-arm prompt. Browsers require a user gesture
+    // to start the mic, so we can't auto-resume — but the
+    // prompt is one tap away from getting the user back to
+    // listening.
+    setVoiceIntent(true);
+    syncVoiceRearmPrompt();
     if (!Recognition) {
       voiceListening = true;
       runVoiceMeter();
@@ -6175,6 +6662,9 @@ const app = (() => {
     // Order matters: clear intent FIRST so onend's auto-restart short-circuits.
     voiceIntentRunning = false;
     voiceListening = false;
+    // Clear the persisted intent only if the user explicitly stopped.
+    // The page-load "Voice was on" prompt reads from this same key.
+    setVoiceIntent(false);
     try { voiceRecognition?.stop(); } catch {}
     cancelAnimationFrame(voiceMeterFrame);
     updateVoiceMeter(0);
@@ -6787,6 +7277,28 @@ const app = (() => {
     updateVoicePreview('—', null);
     showVoiceLastAction();
 
+    // Wire the wake-word (voice command prefix) input. The input is
+    // plain text — empty means "no prefix" (fire on any command),
+    // any other value is the wake word. Persisted on every change.
+    syncVoicePrefixUI();
+    const prefixInput = document.getElementById('voice-prefix-input');
+    if (prefixInput) {
+      prefixInput.addEventListener('input', (event) => {
+        setVoicePrefix(event.target.value);
+      });
+    }
+    const rearmBtn = document.getElementById('btn-voice-rearm');
+    if (rearmBtn) {
+      rearmBtn.addEventListener('click', handleVoiceRearmClick);
+    }
+    // If the user previously had voice on, surface a one-tap
+    // re-arm prompt now (browsers require a user gesture for mic
+    // access, so we can't auto-resume — but we can be one tap
+    // away from listening again).
+    if (loadVoiceIntent() && !voiceIntentRunning) {
+      syncVoiceRearmPrompt();
+    }
+
     initAppNavigation();
     initLabelTooltips();
     initColorControls();
@@ -6881,6 +7393,9 @@ const app = (() => {
     toggleAdvancedUser,
     handleVoiceCommand,
     testVoiceCommand,
+    setVoicePrefix,
+    getVoicePrefix,
+    handleVoiceRearmClick,
     heat,
     stop,
     boost,

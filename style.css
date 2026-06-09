@@ -4318,6 +4318,144 @@ summary { list-style: none; }
   padding: 0;
 }
 
+/* Temperature / duration combo: slider stacked above the numeric input
+   so users can drag for an approximate value and type for an exact one.
+   Synced both ways in app.js. */
+.dial-combo {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+}
+.dial-combo input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent, #c084fc) 0%, var(--accent, #c084fc) 50%, rgba(255,255,255,0.12) 50%, rgba(255,255,255,0.12) 100%);
+  outline: none;
+  cursor: pointer;
+  margin: 0;
+}
+.dial-combo input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent, #c084fc);
+  border: 2px solid rgba(255,255,255,0.85);
+  box-shadow: 0 0 0 4px rgba(192,132,252,0.18);
+  cursor: grab;
+}
+.dial-combo input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent, #c084fc);
+  border: 2px solid rgba(255,255,255,0.85);
+  box-shadow: 0 0 0 4px rgba(192,132,252,0.18);
+  cursor: grab;
+}
+.dial-combo input[type="range"]:focus-visible {
+  box-shadow: 0 0 0 3px rgba(192,132,252,0.35);
+}
+.dial-combo input[type="number"] {
+  font-size: 1.6rem;
+  font-weight: 850;
+  width: 4.5em;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+.dial-combo input[type="number"]::-webkit-outer-spin-button,
+.dial-combo input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.dial-field.is-invalid {
+  border-color: rgba(244, 63, 94, 0.55);
+  background:
+    linear-gradient(145deg, rgba(244, 63, 94, 0.08), transparent 58%),
+    rgba(0,0,0,0.18);
+}
+.dial-field em {
+  font-style: normal;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  margin-left: 8px;
+  text-transform: none;
+}
+.dial-field.is-invalid em {
+  color: rgba(244, 63, 94, 0.9);
+}
+
+/* Readback panel inside the editor: shows what the device is currently
+   reporting (chamber / boost / last save). Lets the user verify the
+   read and the write match without leaving the modal. */
+.profile-readback {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(255,255,255,0.1);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.025);
+  font-size: 0.8rem;
+}
+.readback-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 8px;
+}
+.readback-row span {
+  color: var(--text-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.7rem;
+}
+.readback-row strong {
+  color: var(--text-primary);
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.profile-readback.is-saved {
+  border-color: rgba(34, 197, 94, 0.45);
+  background:
+    linear-gradient(145deg, rgba(34, 197, 94, 0.06), transparent 60%),
+    rgba(0,0,0,0.18);
+}
+.profile-readback.is-error {
+  border-color: rgba(244, 63, 94, 0.55);
+  background:
+    linear-gradient(145deg, rgba(244, 63, 94, 0.08), transparent 60%),
+    rgba(0,0,0,0.18);
+}
+.profile-readback.is-saving {
+  border-color: rgba(192, 132, 252, 0.5);
+  background:
+    linear-gradient(145deg, rgba(192, 132, 252, 0.06), transparent 60%),
+    rgba(0,0,0,0.18);
+}
+.profile-readback .spinner-inline {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255,255,255,0.25);
+  border-top-color: var(--accent, #c084fc);
+  border-radius: 50%;
+  vertical-align: -2px;
+  margin-right: 6px;
+  animation: spin 0.9s linear infinite;
+}
+
 .dial-field select {
   grid-column: 1 / -1;
   min-width: 0;
@@ -4431,6 +4569,135 @@ summary { list-style: none; }
   border-color: rgba(148, 163, 184, 0.22);
   background: rgba(148, 163, 184, 0.08);
   color: var(--text-secondary);
+}
+
+/* Armed: a wake word is set and the recognizer is listening. The
+   border pulses gently so the user can tell at a glance that the
+   system is alive but waiting for the wake word. */
+.voice-state[data-state="armed"] {
+  border-color: rgba(192, 38, 211, 0.45);
+  background: rgba(192, 38, 211, 0.10);
+  color: #f0d6ff;
+  animation: voice-armed-pulse 1.6s ease-in-out infinite;
+}
+
+.voice-state.armed {
+  border-color: rgba(192, 38, 211, 0.45);
+  background: rgba(192, 38, 211, 0.10);
+  color: #f0d6ff;
+}
+
+@keyframes voice-armed-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(192, 38, 211, 0.30); }
+  50%      { box-shadow: 0 0 0 6px rgba(192, 38, 211, 0.00); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-state[data-state="armed"] { animation: none; }
+}
+
+/* Voice command prefix (wake word) input row. Sits between the
+   command panel and the test chips. The input is short by design —
+   wake words are short phrases. The hint text changes tone based
+   on whether a prefix is currently set. */
+.voice-prefix-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-glass);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.voice-prefix-label {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.voice-prefix-input {
+  flex: 0 1 220px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.voice-prefix-input.is-active {
+  border-color: rgba(192, 38, 211, 0.55);
+  background: rgba(192, 38, 211, 0.06);
+  box-shadow: 0 0 0 1px rgba(192, 38, 211, 0.20);
+}
+
+.voice-prefix-input::placeholder {
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.voice-prefix-input:focus {
+  outline: none;
+  border-color: rgba(192, 38, 211, 0.75);
+  box-shadow: 0 0 0 2px rgba(192, 38, 211, 0.30);
+}
+
+.voice-prefix-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Re-arm prompt: shown when the user previously had voice on but
+   the page reloaded (so mic permission is lost). One tap returns
+   to listening. Visually distinct from the always-on test row so
+   it doesn't get confused for a "type your command" field. */
+.voice-rearm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 214, 180, 0.40);
+  border-radius: var(--radius-md);
+  background: rgba(0, 214, 180, 0.08);
+  font-size: 0.8rem;
+  color: var(--text-primary);
+}
+
+.voice-rearm.hidden { display: none; }
+
+.voice-rearm > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  line-height: 1.3;
+}
+
+.voice-rearm strong {
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.voice-rearm-detail {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.voice-rearm .btn {
+  flex: 0 0 auto;
 }
 
 @keyframes voice-queued-pulse {

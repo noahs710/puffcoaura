@@ -499,6 +499,33 @@
           </div>
           <div class="voice-state" id="voice-state" data-state="idle">Permission required</div>
         </div>
+        <!-- Voice command prefix (a.k.a. wake word). When the input has a
+             value, the speech recognizer only fires a command if the
+             transcript contains the wake word — the wake word is stripped
+             and the remainder is matched against the command list. When
+             empty, the current "fire on any matching command" behavior is
+             preserved. Persisted in localStorage (puffco:voice-prefix). -->
+        <div class="voice-prefix-row">
+          <label for="voice-prefix-input" class="voice-prefix-label">Wake word</label>
+          <input type="text" id="voice-prefix-input" class="voice-prefix-input"
+                 autocomplete="off" autocapitalize="off" spellcheck="false"
+                 maxlength="24"
+                 aria-describedby="voice-prefix-hint"
+                 title="Only transcriptions that contain this word will fire a command. Leave blank to fire on any matching command." />
+          <span class="voice-prefix-hint" id="voice-prefix-hint">say e.g. &quot;puffco, start heat&quot;</span>
+        </div>
+        <!-- One-tap re-arm prompt. Visible only when the user previously
+             had voice on but mic permission hasn't been re-granted this
+             session (browsers require a user gesture, so we can't truly
+             auto-resume). The button calls startVoiceCommands which
+             re-prompts for mic permission. -->
+        <div class="voice-rearm hidden" id="voice-rearm" role="status" aria-live="polite">
+          <span>
+            <strong>Voice was on.</strong>
+            <span class="voice-rearm-detail">Tap to resume listening.</span>
+          </span>
+          <button class="btn btn-sm btn-primary" id="btn-voice-rearm" type="button">Resume listening</button>
+        </div>
         <div class="voice-preview">
           <div class="voice-meter" style="--voice-level:0;" aria-hidden="true">
             <div class="voice-meter-fill" id="voice-meter-fill"></div>
@@ -1085,14 +1112,20 @@
           </div>
           <div class="profile-dials">
             <label class="dial-field">
-              <span>Temperature</span>
-              <input type="number" id="modal-temp" min="250" max="700" step="5" placeholder="520" />
-              <strong>°F</strong>
+              <span>Temperature <em id="modal-temp-hint">250 – 700 °F</em></span>
+              <div class="dial-combo">
+                <input type="range" id="modal-temp-slider" min="250" max="700" step="5" value="520" aria-label="Temperature slider" />
+                <input type="number" id="modal-temp" min="250" max="700" step="5" placeholder="520" />
+                <strong>°F</strong>
+              </div>
             </label>
             <label class="dial-field">
-              <span>Duration</span>
-              <input type="number" id="modal-time" min="5" max="180" step="1" placeholder="60" />
-              <strong>s</strong>
+              <span>Duration <em id="modal-time-hint">5 – 180 s</em></span>
+              <div class="dial-combo">
+                <input type="range" id="modal-time-slider" min="5" max="180" step="1" value="60" aria-label="Duration slider" />
+                <input type="number" id="modal-time" min="5" max="180" step="1" placeholder="60" />
+                <strong>s</strong>
+              </div>
             </label>
             <label class="dial-field vapor-field">
               <span>Vapor Control</span>
@@ -1114,6 +1147,24 @@
             <input type="checkbox" id="modal-select" />
             <span>Make active after saving</span>
           </label>
+          <div class="profile-readback" id="modal-readback" aria-live="polite">
+            <div class="readback-row">
+              <span>Chamber</span>
+              <strong id="modal-chamber">—</strong>
+            </div>
+            <div class="readback-row">
+              <span>Boost temp</span>
+              <strong id="modal-boost-temp">—</strong>
+            </div>
+            <div class="readback-row">
+              <span>Boost time</span>
+              <strong id="modal-boost-time">—</strong>
+            </div>
+            <div class="readback-row">
+              <span>Last saved</span>
+              <strong id="modal-saved-stamp">—</strong>
+            </div>
+          </div>
         </section>
 
         <section class="editor-panel mood-studio">
@@ -1173,17 +1224,24 @@
       <input type="hidden" id="modal-index" />
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
-        <button class="btn btn-secondary" onclick="app.resetCurrentProfile()">Reset</button>
-        <button class="btn btn-secondary btn-danger" onclick="app.deleteCurrentProfile()">Delete</button>
-        <button class="btn btn-secondary" data-device-command="set_profile" onclick="app.saveProfile(true)">Save & Activate</button>
+        <button class="btn btn-secondary" onclick="app.reloadCurrentProfile()" title="Discard local changes and re-read this profile from the device">
+          Reload from device
+        </button>
+        <button class="btn btn-secondary" onclick="app.resetCurrentProfile()" title="Clear the form. Use 'Reset slot to default' to write default values to the device.">
+          Revert form
+        </button>
+        <button class="btn btn-secondary btn-danger" onclick="app.deleteCurrentProfile()" title="Write the default values (red, 520°F, 60s, Smooth) to this profile slot on the device.">
+          Reset slot to default
+        </button>
+        <button class="btn btn-secondary" data-device-command="set_profile" onclick="app.saveProfile(true)">Save &amp; Activate</button>
         <button class="btn btn-primary" data-device-command="set_profile" onclick="app.saveProfile()">Save</button>
       </div>
     </div>
   </div>
 
-  <script src="ble-client.js?v=11"></script>
-  <script src="Sortable.min.js?v=11"></script>
-  <script src="app.js?v=11"></script>
+  <script src="ble-client.js?v=12"></script>
+  <script src="Sortable.min.js?v=12"></script>
+  <script src="app.js?v=12"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(function(err) {
