@@ -1,0 +1,1 @@
+{"function": "() => { const cardContainer = document.querySelector('.app-container[data-card-order-key]'); return { hasInitFired: document.body.classList.contains('device-disconnected'), cardSortable: !!cardContainer?.__sortableCardInstance, hasProfileList: !!document.getElementById('profiles-grid'), appKeys: Object.keys(window.app || {}).slice(0, 30) }; }"}

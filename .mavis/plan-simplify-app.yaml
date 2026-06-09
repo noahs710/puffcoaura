@@ -1,0 +1,205 @@
+version: 1
+plan:
+  name: 'Simplify app.js — minimal PWA shell against the simplified ble-client'
+  max_concurrency: 1
+  max_consecutive_failures: 2
+  max_cycles: 4
+  auto_reject_retries: 1
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: 'simplify-app'
+    title: 'Rewrite app.js to a minimal PWA shell that talks to the simplified ble-client'
+    assigned_to: coder
+    verified_by: verifier
+    max_retries: 2
+    timeout_ms: 1500000
+    prompt: |
+      Rewrite `C:\PuffcoBLE\app.js` as a dramatically smaller, readable PWA that consumes the already-simplified `C:\PuffcoBLE\ble-client.js` and works for BOTH Puffco Peak Pro and Puffco Proxy.
+
+      ## Context
+      The current `app.js` is 6,103 lines / 244KB. It accumulated drag-and-drop profile reordering, mood-light editors, draw-strength visualizer, dynamic-inhale baselines, lorax debug tools, voice Bluetooth prompts, scan animation, and a WebSocket bridge fallback. The user said "the code is very very convoluted — simplify it as much as possible." Throw out the bloat.
+
+      `C:\PuffcoBLE\ble-client.js` is the **fixed contract** for this task. It is 35KB / 917 lines, exposes `window.PuffcoBrowserBleClient`, and dispatches the following commands through `handleCommand(cmd, params)`:
+        - `connect`, `disconnect`, `status`, `scan_devices`
+        - `heat`, `stop`, `boost`, `set_boost_options`
+        - `select_profile`, `set_profile`, `set_color`
+        - `brightness`, `lantern`, `stealth`
+      Read the new `ble-client.js` in full before writing app.js. Use EXACTLY these command names. Every method the app calls must exist on the client (or return a clear "not implemented" error if you accidentally call something the client no longer has — but you should not call anything outside the list above).
+
+      ## What app.js MUST render
+
+      ### Status card (top of page, in the existing layout)
+      Read from `data` (the result of `handleCommand('status')` → `.data`):
+      - `data.name` → `#device-name`
+      - `data.device_label` (e.g. "Puffco Peak Pro" / "Puffco Proxy") → `#device-identity-label`
+      - `data.firmware` → `#device-firmware` (or any element you create with that purpose — see "new container" below)
+      - `data.serial` → `#device-serial`
+      - `data.battery` (0-100) → `#battery-pct` text + `#battery-fill` width + `#battery-ring` (use existing CSS, just set the value)
+      - `data.charge` → `#charge-pill` text
+      - `data.state` → `#heat-status-text`
+      - `data.current_temperature_f` → `#heat-live-current`
+      - `data.target_temperature_f` → `#heat-live-target`
+      - `data.active_profile_temp_f` (or profile temp of `data.current_profile`) → `#heat-live-meta` (e.g. "Profile 1 · 520°F")
+      - `data.boost_time_s` and `data.boost_temperature_delta_f` → `#stat-boost` and `#session-boost` (format like "Boost +25°F for 15s" — see formatBoostSetting below)
+      - Connection state (`connected` boolean) → `#connection-badge` + `#connection-text`
+
+      ### Connect / Disconnect
+      - `#btn-connect` → `send('connect')` (which calls `handleCommand('connect')`)
+      - `#btn-disconnect` → `send('disconnect')`
+      - While pending, disable both and show a spinner. While connected, hide Connect and show Disconnect. On validation error, toast the error and stay disconnected.
+
+      ### Profile selector
+      - Render the 4 profiles from `data.profiles` as cards inside `#profiles-grid`. Each card:
+        - Shows the profile name, temp in °F, time in seconds, a small color swatch (background from `color_hex`).
+        - Has a `data-index` attribute.
+        - Active profile has a visible "active" class.
+        - Clicking calls `send('select_profile', { index: Number(card.dataset.index) })`.
+      - 4 profile cards. Exactly 4. If the device only returns fewer, render what you have and pad the rest as "Profile N" placeholders; but `data.profiles` should have exactly 4 entries on a working device.
+
+      ### Profile editor (modal)
+      - `#profile-modal` exists in `index.html`. Open it when a profile card is clicked OR when a "Edit" button on the card is clicked.
+      - The modal pre-fills `#modal-name`, `#modal-temp`, `#modal-time` from the selected profile.
+      - Save button (any selector — add a `<button class="modal-save">Save</button>` inside the modal if one doesn't exist) calls `send('set_profile', { index, name, temp_f, time_s, select: true })` then closes the modal.
+      - Color picker: `#modal-color` (an `<input type="color">`). On change, call `send('set_color', { index, hex })`. Show a `#modal-color-preview` swatch.
+
+      ### Action buttons
+      - `#btn-heat` → `send('heat')`
+      - `#btn-stop` → `send('stop')`
+      - `#btn-boost` → `send('boost')`
+      - All three are disabled while disconnected. `#btn-boost` is also hidden unless the device is in HEAT_CYCLE_PREHEAT or HEAT_CYCLE_ACTIVE state.
+      - The "Save Boost Options" button (in `#boost-options-panel`) calls `send('set_boost_options', { temp_delta_f: Number(#boost-temp-delta.value), time_s: Number(#boost-time-delta.value) })`. Validate ranges 0-120 °F and 0-180 s and toast on invalid input.
+      - The "Boost Options" toggle button (`#btn-boost-options`) shows/hides `#boost-options-panel` and updates its `aria-expanded` attribute.
+
+      ### Brightness slider
+      - `#slider-all` is the master slider (0-255). The four per-channel sliders `#slider-base`, `#slider-mid`, `#slider-glass`, `#slider-logo` exist already but you can keep them wired to the same handler.
+      - On change of any slider, call `send('brightness', { base: v, mid: v, glass: v, logo: v })` (use the same value for all four). Update `#val-all` text.
+
+      ### Lantern / Stealth toggles
+      - The previous code had two buttons/segments in `#controls-grid` for these. The exact element IDs vary — read `index.html` to find them. If they exist (`btn-lantern`, `btn-stealth`, or similar), wire them to `send('lantern', { on: true|false })` and `send('stealth', { on: true|false })`. If they don't exist, add two `<button>`s inside `#controls-grid` and wire them.
+
+      ### Polling loop
+      - While connected, every 2000ms, call `handleCommand('status')` (or `client.snapshot(false)` directly) and re-render the status card + profile cards. Clear the interval on disconnect.
+      - Handle the GATT disconnect callback: clear the interval, set the UI back to the disconnected state, toast "Disconnected".
+
+      ### Toast helper
+      - The existing `toast()` helper and `#toast-container` element exist. Keep them. If `toast()` is not exposed, write a tiny one (`function toast(msg, kind) { ... }`).
+
+      ### Activity log
+      - `#activity-log` shows recent status messages. Append a line on connect, disconnect, command sent, command result.
+
+      ## Hard requirements
+      - Single `<script>` block (one top-level IIFE or set of top-level functions), no modules, no build step.
+      - No jQuery, no React, no Vue, no Svelte, no framework. Vanilla JS.
+      - `node --check C:\PuffcoBLE\app.js` must exit 0.
+      - **Do NOT touch `index.html` or `style.css`**, EXCEPT: if an element you need genuinely doesn't exist (lantern/stealth toggles, a Save button inside the modal), you may add the minimum HTML to `index.html` (one `<button>` per missing piece) and the minimum CSS hook to `style.css` (one class). Document every change to those two files in your final report.
+      - The simplified `ble-client.js` is the contract — read it first. Use exactly the method names it exposes. Don't invent new commands.
+
+      ## What to REMOVE (do not port — these features are gone)
+      - All Python / `start.bat` / `puffcussy.py` references.
+      - WebSocket bridge mode — drop `connectBridge`, `initWebSocket`, `defaultBridgeUrl`, `setBridgeNote`, `bridge-url`, `bridge-url-group`, `btn-bridge`, `transport-mode` UI, `use-mac-address`, `device-mac-row`, `device-scan-results`, `btn-scan`, the whole `isLocalFrontend` / `normalizeBridgeUrl` machinery.
+      - Profile drag-and-drop reordering UI and the `reorder_profiles` command.
+      - Mood-light editor (`mood-add-color`, `mood-color-range`, `mood-colors`, `mood-dynamic`, `mood-import-file`, `mood-name`, `mood-presets`, `mood-tempo`, `mood-tempo-value`, `mood-tempo-wrap`) and the `mood_light` / `lantern_color` commands.
+      - Draw-strength visualizer / heat-probe lab UI (`draw-sensor-chip`, `draw-sensor-chip-label`, `draw-strength-label`, `draw-strength-panel`, `draw-strength-source`, `btn-draw-clear-source`, `btn-draw-rescan`) and the `draw_strength_observe` / `draw_strength_source` / `heat_observe` / `heat_probe` commands.
+      - Lorax debug tools — drop the whole `loraxRead` / `loraxWrite` / `loraxProbe` / `loraxObserve` / `loraxAction` / `loraxRegistry` / `loraxRead` panel and ALL the `lorax-*` element IDs (`lorax-category-filter`, `lorax-content`, `lorax-details-panel`, `lorax-empty`, `lorax-path-list`, `lorax-read-container`, `lorax-read-offset`, `lorax-read-size`, `lorax-search`, `lorax-status-filter`, `lorax-write-offset`, `lorax-write-type`, `lorax-write-value`, `btn-reload-lorax`, `dev-lorax-*`).
+      - Voice Bluetooth prompt and `btn-voice` / `voice-*` elements.
+      - `official_attributes` debug command and `dev-official-*` UI.
+      - `temperature_source` debug command.
+      - `power` (sleep / power off) command.
+      - `scan_devices` device-scanner UI (the command still exists on the client for `status` calls, but the UI panel showing scan results is gone).
+      - `show_battery` / `show_version` LED blink commands (the data is in `status` already).
+      - `dynamicInhale` baseline code.
+      - Profile library import (`profile-import-file`, `profile-library-grid`).
+      - Capability panel (`ble-capability`, `ble-capability-copy`, `ble-capability-hint`, `ble-capability-tags`, `ble-capability-title`).
+      - The huge BLE capability explainer copy.
+      - All `theme-popover` / `btn-settings` / `btn-extend` / `advanced-panel` / `advanced-user-toggle` / `advanced-actions-card` / `advanced-*` settings UI.
+      - All `dev-action-confirm`, `dev-command-output`, `dev-promote-temp`, `dev-temp-encoding`, `dev-temp-path` debug panels.
+      - `browser-debug-log`, `backend-*` elements (backend card), `debug-*` elements.
+      - `capability-strip`, `capability-*` (the top capability badge is gone — replace with a simple `#connection-badge` text indicator).
+      - `Sortable.min.js` import (since drag-and-drop is gone). The `tools/Sortable.min.js` file can stay on disk but app.js no longer loads it.
+      - `tools/server.py` references.
+
+      ## Files
+      - **Read first** (these are your contract): `C:\PuffcoBLE\ble-client.js` (full), `C:\PuffcoBLE\index.html` (full — you need to know what element IDs exist), `C:\PuffcoBLE\style.css` (skim — you need to know which classes you can reuse).
+      - **Skim**: `C:\PuffcoBLE\app.js` (skim the parts that call `send(cmd, ...)` so you know the exact command names and parameter shapes; do NOT try to read 6,000 lines, just grep for `send(` and `getElementById`).
+      - **Output**: rewrite `C:\PuffcoBLE\app.js` in place. If you need to add a missing element (lantern/stealth toggle, save button), add the minimum HTML to `index.html` and the minimum CSS to `style.css` and document it.
+      - **Do not** touch `ble-client.js` (it's done), `manifest.json`, `sw.js`, `README.md`, `server.py`, `puffcussy.py`, or anything in `tools/` except to drop a Sortable reference if you find one in the script tags.
+
+      ## Stop condition
+      - File parses: `node --check C:\PuffcoBLE\app.js` exits 0.
+      - File size is dramatically smaller. Target: under 30KB / 1,200 lines. Hard ceiling: 1,500 lines.
+      - All the MUST-DO UI elements above are present and wired to the correct `handleCommand` call.
+      - The polling loop runs while connected and stops on disconnect.
+      - Report: line count before/after, list of removed features, list of UI elements rendered, every `handleCommand` call the new app makes, and every change you made to `index.html` / `style.css` (if any).
+
+    verify_prompt: |
+      Independently verify the rewritten `C:\PuffcoBLE\app.js`. **Do not be lenient.** The previous attempt at simplifying ble-client.js dropped the boost options and the verifier caught it correctly. Apply the same rigor here.
+
+      ### Step 1 — Mechanical checks
+      1. Run `node --check C:\PuffcoBLE\app.js`. Must exit 0.
+      2. Confirm the file is dramatically smaller. Old was 244KB / 6,103 lines. New must be under 30KB / 1,200 lines (hard ceiling 1,500). Report exact bytes + line count.
+      3. Open `C:\PuffcoBLE\ble-client.js` and list its `handleCommand` cases. List every `send(...)` / `handleCommand(...)` call in the new app.js. Every app.js call must have a matching case in ble-client.js's `handleCommand` (or one of its direct methods). If the app calls a command the client doesn't support, FAIL with the exact line.
+
+      ### Step 2 — Removed features
+      Grep the new file for these symbols / element IDs. NONE of them should appear:
+      - `connectBridge`, `initWebSocket`, `defaultBridgeUrl`, `setBridgeNote`, `bridge-url`, `bridge-url-group`, `btn-bridge`, `bridge-note`
+      - `Sortable`, `sortable`
+      - `MOOD_PRESET`, `mood-presets`, `mood_light`, `moodLight`, `setMoodLight`
+      - `loraxRegistry`, `loraxRead`, `loraxWrite`, `loraxProbe`, `loraxObserve`, `loraxAction`, `lorax-read-container`, `lorax-path-list`
+      - `dynamicInhale`, `dynamic_inhale`
+      - `drawStrengthObserve`, `draw_strength_observe`, `draw_strength_source`, `draw-sensor-chip`, `draw-strength-panel`
+      - `reorderProfiles`, `reorder_profiles`
+      - `puffco_draw_strength_source`
+      - `voice-bluetooth`, `btn-voice`, `voiceState`, `voiceTranscript`
+      - `ble-capability-copy`, `ble-capability-tags`, `ble-capability-title`
+      - `dev-temp-path`, `dev-promote-temp`, `dev-action-confirm`, `dev-command-output`
+      - `official_attributes`, `officialAttributes`
+      - `temperatureSource`, `temperature_source`
+      - `use-mac-address`, `device-mac-row`
+      - `puffco_device_mac`, `puffco_device_name` (localStorage keys)
+      - `profile-library-grid`, `profile-import-file`
+      - `advanced-panel`, `advanced-user-toggle`, `btn-settings`, `btn-extend`
+      - `browser-debug-log`, `backend-card`, `backend-*` (any backend-* getElementById)
+      - `capability-strip`, `capability-*`
+      - `puffcussy.py`, `start.bat`, `server.py` references
+
+      (If a producer renamed a removed feature to something functionally equivalent, flag it but don't auto-fail. If they kept the bloat under a new name, FAIL.)
+
+      ### Step 3 — Must-keep UI
+      Confirm the new app.js wires up (or at least references) these element IDs. At minimum, these must all be present in the file's `getElementById` calls OR equivalent code that creates them dynamically:
+      - `#btn-connect`, `#btn-disconnect`
+      - `#btn-heat`, `#btn-stop`, `#btn-boost`, `#btn-boost-options`
+      - `#boost-options-panel`, `#boost-temp-delta`, `#boost-time-delta`
+      - `#profiles-grid` (and code that renders 4 profile cards into it from `data.profiles`)
+      - `#profile-modal` + `#modal-name`, `#modal-temp`, `#modal-time`, `#modal-color` (or equivalent color input), `#modal-color-preview`
+      - `#slider-all`, `#slider-base`, `#slider-mid`, `#slider-glass`, `#slider-logo`, `#val-all`
+      - Lantern + Stealth toggle: confirm the app calls `send('lantern', ...)` AND `send('stealth', ...)` at least once each.
+      - `#battery-pct` (or other battery indicator), `#heat-status-text`, `#heat-live-current`, `#heat-live-target`, `#heat-live-meta`
+      - `#stat-boost` (or `#session-boost`) — must read `data.boost_time_s` AND `data.boost_temperature_delta_f`
+      - `#connection-badge` or `#connection-text`
+      - `#device-name`, `#device-identity-label` (or equivalent model label element)
+      - `#toast-container` (or a `toast()` function the producer wrote)
+      - `#activity-log` (or equivalent)
+
+      ### Step 4 — Required ble-client calls
+      The new app.js must call, at minimum:
+      - `send('connect')` and `send('disconnect')`
+      - `send('heat')`, `send('stop')`, `send('boost')`
+      - `send('set_boost_options', ...)`
+      - `send('select_profile', ...)`
+      - `send('set_profile', ...)`
+      - `send('set_color', ...)`
+      - `send('brightness', ...)`
+      - `send('lantern', ...)` AND `send('stealth', ...)`
+      - A polling call to `handleCommand('status')` or `getBrowserBle().snapshot()` inside a `setInterval` (or `setTimeout` chain) guarded by a `connected` check.
+
+      ### Step 5 — Index.html / style.css collateral
+      Open `C:\PuffcoBLE\index.html` and `C:\PuffcoBLE\style.css`. Confirm:
+      - The new app.js does not import `Sortable.min.js` (or any `tools/Sortable.min.js` reference).
+      - If the producer added any elements to `index.html`, they're minimal (≤3 new elements total). More than 3 → FAIL with the diff.
+      - If the producer added any CSS rules, they're minimal (≤10 lines). More → FAIL.
+
+      ### Verdict
+      - PASS only if all of Steps 1-5 hold.
+      - FAIL with the specific line / symbol / missing element that breaks, plus a one-line reason. The producer gets a second attempt and a third — make the failure reason sharp enough that they can fix it on the first retry.

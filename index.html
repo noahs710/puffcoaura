@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="description" content="Control your Puffco Peak Pro via Bluetooth: profiles, heat, lighting, brightness, power, and diagnostics." />
+  <meta name="description" content="Control your Puffco device via Bluetooth: profiles, heat, lighting, brightness, power, and diagnostics." />
   <meta name="theme-color" content="#07070c" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#e8edf4" media="(prefers-color-scheme: light)" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -12,7 +12,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Puffco Controller</title>
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="style.css?v=6" />
+  <link rel="stylesheet" href="style.css?v=11" />
   <style>
     @media (min-width: 701px) { .app-menu { display: none !important; } }
     /* Round 2: hold the card surface-in animation until the
@@ -174,6 +174,36 @@
       <a href="#advanced-panel" data-advanced-only>Advanced</a>
     </nav>
 
+    <!-- Drag-and-drop sort guide. Sits at the top of the app container
+         so every section can be reordered. Carries no data-card-id, so
+         Sortable treats it as a static sibling and never tries to drag
+         it. Dismissed state persists in localStorage. -->
+    <aside class="sort-guide" id="sort-guide" role="note" aria-label="Drag and drop sort guide">
+      <div class="sort-guide-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/>
+          <circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/>
+        </svg>
+      </div>
+      <div class="sort-guide-body">
+        <strong class="sort-guide-title">Drag to reorder</strong>
+        <span class="sort-guide-text">
+          Grab any card by its handle to rearrange sections, or
+          <kbd>Tab</kbd> to a card and press
+          <kbd>Space</kbd> to pick up + <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move.
+        </span>
+      </div>
+      <div class="sort-guide-actions">
+        <button type="button" class="sort-guide-reset" id="btn-sort-guide-reset"
+                aria-label="Reset the card order to the default"
+                onclick="app.resetCardOrder()">Reset order</button>
+        <button type="button" class="sort-guide-close" id="btn-sort-guide-close"
+                aria-label="Dismiss the drag and drop sort guide"
+                title="Dismiss this tip"
+                onclick="app.dismissSortGuide()">&times;</button>
+      </div>
+    </aside>
+
     <!-- Connection Card -->
     <section class="card" id="connect-card" data-card-id="connect-card">
       <div class="card-header">
@@ -210,8 +240,8 @@
         <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
           Connect Puffco
         </button>
-        <button class="btn btn-secondary" id="btn-scan" onclick="app.scanDevices()">
-          Scan Peak Pros
+        <button class="btn btn-secondary hidden" id="btn-scan" onclick="app.scanDevices()">
+          Scan Puffcos
         </button>
         <button class="btn btn-danger hidden" id="btn-disconnect" onclick="app.disconnect()">
           Disconnect
@@ -250,7 +280,7 @@
                 <circle cx="32" cy="52" r="3" fill="currentColor" />
                 <path d="M28 6 Q32 2 36 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
               </svg>
-              <span class="art-name">Puffco Peak Pro</span>
+              <span class="art-name">Puffco device</span>
               <span class="art-caption">Connect to unlock live controls</span>
             </div>
           </div>
@@ -337,18 +367,25 @@
               <span id="heat-live-meta">Waiting for device</span>
             </div>
           </div>
-          <div class="draw-strength-panel" id="draw-strength-panel" style="--draw-strength: 0;">
+          <div class="draw-strength-panel" id="draw-strength-panel" role="progressbar" aria-label="Dynamic inhale draw strength" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Disconnected" style="--draw-strength: 0;">
             <div class="draw-strength-head">
               <span>Dynamic Inhale</span>
-              <strong id="draw-strength-label">Idle</strong>
+              <div class="draw-strength-head-meta">
+                <span class="draw-strength-readout" id="draw-strength-readout" aria-hidden="true">—</span>
+                <strong id="draw-strength-label">Idle</strong>
+              </div>
             </div>
-            <div class="draw-strength-track" aria-hidden="true">
+            <div class="draw-strength-track">
               <div class="draw-strength-fill" id="draw-strength-fill"></div>
+              <div class="draw-strength-peak" id="draw-strength-peak" aria-hidden="true"></div>
+              <div class="draw-strength-threshold" aria-hidden="true"></div>
             </div>
             <div class="draw-strength-source" id="draw-strength-source">Path search pending</div>
+            <div class="draw-strength-diagnostic hidden" id="draw-strength-diagnostic" aria-live="polite"></div>
             <div class="draw-strength-actions">
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-draw-rescan" onclick="app.rescanDrawStrength()">Rescan</button>
-              <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-draw-clear-source" onclick="app.clearDrawStrengthSource()">Clear pinned</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-draw-rescan" aria-label="Rescan dynamic inhale path" onclick="app.rescanDrawStrength()">Rescan</button>
+              <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-draw-clear-source" aria-label="Clear pinned dynamic inhale source" onclick="app.clearDrawStrengthSource()">Clear pinned</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-draw-redetect" aria-label="Force redetect dynamic inhale encoding" title="Clear the cached encoding and re-probe the dynamic inhale path with all known encodings (float32, uint8, int8, uint32)" onclick="app.redetectDynamicInhale()">Force redetect</button>
             </div>
           </div>
           <div class="session-metrics" id="session-metrics">
@@ -402,6 +439,18 @@
             <div class="stat-value" id="stat-chamber">—</div>
           </div>
           <div class="stat-item">
+            <div class="stat-label">Firmware</div>
+            <div class="stat-value" id="stat-firmware-display">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Serial</div>
+            <div class="stat-value" id="stat-serial-display">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Boost</div>
+            <div class="stat-value" id="stat-boost">—</div>
+          </div>
+          <div class="stat-item">
             <div class="stat-label">Last Connected</div>
             <div class="stat-value" id="stat-last-connected">—</div>
           </div>
@@ -416,6 +465,7 @@
       <div class="card-header">
         <h2><span class="icon icon-profile"></span> Profiles</h2>
         <div class="inline-actions">
+          <button class="btn btn-sm btn-primary" onclick="app.addNewProfile()">+ New Profile</button>
           <button class="btn btn-sm btn-secondary" onclick="app.exportProfiles()">Export</button>
           <button class="btn btn-sm btn-secondary" onclick="app.openProfileImport()">Import</button>
           <button class="btn btn-sm btn-secondary" onclick="app.restoreProfileBackup()">Restore Backup</button>
@@ -434,27 +484,6 @@
     </section>
 
     <div class="section-grid" id="controls-grid" data-card-id="controls-grid">
-      <!-- Lighting -->
-      <section class="card connected-only" id="lighting-card">
-        <div class="card-header">
-          <h2><span class="icon icon-light"></span> Lighting</h2>
-        </div>
-        <div class="compact-control-stack">
-          <div class="toggle-wrap">
-            <button class="toggle" id="toggle-lantern" type="button" onclick="app.toggleLantern()" aria-pressed="false" aria-label="Toggle lantern mode"></button>
-            <span class="toggle-label">Lantern Mode</span>
-          </div>
-          <div class="toggle-wrap">
-            <button class="toggle" id="toggle-stealth" type="button" onclick="app.toggleStealth()" aria-pressed="false" aria-label="Toggle stealth mode"></button>
-            <span class="toggle-label">Stealth Mode</span>
-          </div>
-          <div class="inline-actions">
-            <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Show Battery</button>
-            <button class="btn btn-sm btn-secondary" onclick="app.applyMoodToLantern()">Apply Mood</button>
-          </div>
-        </div>
-      </section>
-
       <section class="card" id="voice-card">
         <div class="card-header">
           <h2><span class="icon icon-status"></span> Voice Commands</h2>
@@ -466,7 +495,7 @@
         <div class="voice-command-panel">
           <div>
             <div class="stat-label">Priority Commands</div>
-            <div class="voice-command-list">open bluetooth · connect peak pro · start heat · stop · boost · profile one-four · battery · lantern · stealth · brightness 70</div>
+            <div class="voice-command-list">find device · disconnect · resync · start heat · stop · boost · profile one-four · battery · lantern · stealth · brightness 70</div>
           </div>
           <div class="voice-state" id="voice-state" data-state="idle">Permission required</div>
         </div>
@@ -480,8 +509,9 @@
           </div>
         </div>
         <div class="voice-command-chips" aria-label="Test voice commands">
-          <button class="btn btn-sm btn-primary" data-voice-cmd="open bluetooth" onclick="app.openBluetoothFromVoice()">Open Bluetooth</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="connect peak pro" onclick="app.handleVoiceCommand('connect peak pro')">Connect Peak Pro</button>
+          <button class="btn btn-sm btn-primary" data-voice-cmd="find device" onclick="app.handleVoiceCommand('find device')">Find Device</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="resync" onclick="app.handleVoiceCommand('resync')">Resync</button>
+          <button class="btn btn-sm btn-secondary" data-voice-cmd="disconnect" onclick="app.handleVoiceCommand('disconnect')">Disconnect</button>
           <button class="btn btn-sm btn-secondary" data-voice-cmd="status" onclick="app.handleVoiceCommand('status')">Status</button>
           <button class="btn btn-sm btn-secondary" data-voice-cmd="start heat" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
           <button class="btn btn-sm btn-secondary" data-voice-cmd="stop" onclick="app.handleVoiceCommand('stop')">Stop</button>
@@ -498,9 +528,8 @@
             <div>
               <div class="stat-label">Connection</div>
               <ul>
-                <li><code>open bluetooth</code> · <code>connect peak pro</code> · <code>find device</code></li>
+                <li><code>find device</code></li>
                 <li><code>disconnect</code> · <code>unpair</code></li>
-                <li><code>browser bluetooth</code> · <code>bridge mode</code></li>
                 <li><code>resync</code></li>
               </ul>
             </div>
@@ -535,10 +564,10 @@
         </details>
         <div class="voice-bluetooth-prompt hidden" id="voice-bluetooth-prompt">
           <div>
-            <strong>Bluetooth chooser queued</strong>
+            <strong>Find device queued</strong>
             <span id="voice-bluetooth-note">Browsers need one tap to open the device selector.</span>
           </div>
-          <button class="btn btn-sm btn-primary" id="voice-open-bluetooth" onclick="app.openBluetoothFromVoice()">Open Chooser</button>
+          <button class="btn btn-sm btn-primary" id="voice-open-bluetooth" onclick="app.openBluetoothFromVoice()">Find Device</button>
         </div>
         <div class="voice-test-row">
           <input type="text" id="voice-test-command" placeholder="Try: start heat" />
@@ -587,6 +616,18 @@
       <div class="power-controls">
         <button class="btn btn-secondary" onclick="app.power('sleep')">Sleep</button>
         <button class="btn btn-danger" onclick="app.power('off')">⏻ Power Off</button>
+      </div>
+      <div class="power-light-controls">
+        <div class="toggle-wrap">
+          <button class="toggle" id="toggle-lantern" type="button" onclick="app.toggleLantern()" aria-pressed="false" aria-label="Toggle lantern mode"></button>
+          <span class="toggle-label">Lantern</span>
+        </div>
+        <div class="toggle-wrap">
+          <button class="toggle" id="toggle-stealth" type="button" onclick="app.toggleStealth()" aria-pressed="false" aria-label="Toggle stealth mode"></button>
+          <span class="toggle-label">Stealth</span>
+        </div>
+        <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Show Battery</button>
+        <button class="btn btn-sm btn-secondary" onclick="app.applyMoodToLantern()">Apply Mood</button>
       </div>
     </section>
 
@@ -674,6 +715,82 @@
           <div class="stat-item">
             <div class="stat-label">Max Battery</div>
             <div class="stat-value" id="stat-max-battery">—</div>
+          </div>
+        </div>
+
+        <h3 class="backend-section-heading">Hardware Diagnostics</h3>
+        <div class="backend-summary-grid">
+          <div class="stat-item">
+            <div class="stat-label">Battery Voltage</div>
+            <div class="stat-value" id="stat-battery-voltage">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Current</div>
+            <div class="stat-value" id="stat-battery-current">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Temperature</div>
+            <div class="stat-value" id="stat-battery-temperature">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Capacity</div>
+            <div class="stat-value" id="stat-battery-capacity">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Heater Power</div>
+            <div class="stat-value" id="stat-heater-power">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Heater Resistance</div>
+            <div class="stat-value" id="stat-heater-resistance">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Heater Voltage</div>
+            <div class="stat-value" id="stat-heater-voltage">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge Source</div>
+            <div class="stat-value" id="stat-charge-source">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge Rate</div>
+            <div class="stat-value" id="stat-charge-rate">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge Elapsed</div>
+            <div class="stat-value" id="stat-charge-elapsed">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Cable</div>
+            <div class="stat-value" id="stat-cable-attached">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Mode</div>
+            <div class="stat-value" id="stat-mode">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Days Owned</div>
+            <div class="stat-value" id="stat-days-owned">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Device UTC</div>
+            <div class="stat-value" id="stat-device-utc">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Fault End Index</div>
+            <div class="stat-value" id="stat-fault-end">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">BLE Faults (abs)</div>
+            <div class="stat-value" id="stat-ble-fault-abs">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">BLE Faults (cr)</div>
+            <div class="stat-value" id="stat-ble-fault-cr">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Avg Time / Dab</div>
+            <div class="stat-value" id="stat-avg-time-dab">—</div>
           </div>
         </div>
         <div class="backend-json-grid mt-md">
@@ -901,6 +1018,17 @@
             </div>
           </div>
 
+          <div class="lorax-quick-actions" id="lorax-quick-actions">
+            <span class="lorax-quick-actions-label">Quick tests</span>
+            <button class="btn btn-sm btn-secondary" onclick="app.testDynamicInhalePath()">Test dynamic inhale</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.testHeaterSensorPaths()">Test heater sensors</button>
+            <button class="btn btn-sm btn-secondary btn-lorax-test-copy hidden" id="btn-lorax-test-copy" disabled
+                    aria-label="Copy the latest path test results to the clipboard"
+                    title="Run a path test, then copy the per-path results to the clipboard"
+                    onclick="app.copyLoraxTestResults()">Copy results</button>
+            <span class="lorax-quick-actions-status" id="lorax-quick-actions-status">Idle</span>
+          </div>
+
           <div class="lorax-explorer-layout">
             <!-- Left Panel: Path List -->
             <div class="lorax-path-panel">
@@ -969,12 +1097,17 @@
             <label class="dial-field vapor-field">
               <span>Vapor Control</span>
               <select id="modal-vapor">
-                <option value="standard">Balanced</option>
-                <option value="high">High Vapor</option>
-                <option value="max">Max Vapor</option>
-                <option value="xl">XL Vapor</option>
+                <option value="standard">Smooth</option>
+                <option value="high">Bold</option>
+                <option value="max">Intense</option>
+                <option value="xl">Extreme</option>
               </select>
               <div class="vapor-presets" id="modal-vapor-presets" aria-label="Vapor presets"></div>
+            </label>
+            <label class="dial-field color-field">
+              <span>Color</span>
+              <input type="color" id="modal-color" value="#ff0000" />
+              <strong id="modal-color-swatch">#FF0000</strong>
             </label>
           </div>
           <label class="check-row">
@@ -1040,13 +1173,23 @@
       <input type="hidden" id="modal-index" />
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+        <button class="btn btn-secondary" onclick="app.resetCurrentProfile()">Reset</button>
+        <button class="btn btn-secondary btn-danger" onclick="app.deleteCurrentProfile()">Delete</button>
         <button class="btn btn-secondary" data-device-command="set_profile" onclick="app.saveProfile(true)">Save & Activate</button>
         <button class="btn btn-primary" data-device-command="set_profile" onclick="app.saveProfile()">Save</button>
       </div>
     </div>
   </div>
 
-  <script src="ble-client.js?v=6"></script>
-  <script src="app.js?v=6"></script>
+  <script src="ble-client.js?v=11"></script>
+  <script src="Sortable.min.js?v=11"></script>
+  <script src="app.js?v=11"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(function(err) {
+        console.warn('SW registration failed:', err);
+      });
+    }
+  </script>
 </body>
 </html>

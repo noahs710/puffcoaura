@@ -66,7 +66,9 @@ const app = (() => {
   const MOOD_LIBRARY_KEY = 'puffco_mood_library_v1';
   const LAST_CONNECTED_KEY = 'puffco_last_connected';
   const ADVANCED_USER_KEY = 'puffco:advanced-user';
-  const PEAK_PRO_MAC_PREFIX = 'F0:AD';
+  const PUFFCO_MANUFACTURER_MAC_PREFIX = 'F0:AD:4E';
+  const PUFFCO_MANUFACTURER_MAC_PREFIXES = [PUFFCO_MANUFACTURER_MAC_PREFIX];
+  const SCAN_BUTTON_TEXT = 'Scan Puffcos';
   // Round 2 polish: persisted card reorder. Keyed under puffco:* to
   // match the existing puffco:theme / puffco:accent / puffco_transport_mode
   // style. Read by the inline pre-paint script in <head> and by
@@ -75,12 +77,29 @@ const app = (() => {
   const CARD_ORDER_KEY = 'puffco:card-order';
   const CARD_DRAG_INDICATOR_MS = 180;
   const DRAW_SESSION_KEY = 'puffco:draw-session';
+  // Vapor presets — display-only labels. The IDs are stable so saved
+  // profiles in localStorage keep working. Intensity 0-1 maps to the
+  // dynamic inhale (diFrac) field in the mood light payload, which
+  // tells the firmware how aggressively to modulate chamber power
+  // during a draw. Smooth is the firmware default (no diFrac boost).
+  // Bold / Intense / Extreme turn dynamic inhale on with increasing
+  // strength. Extreme is the 3D XL chamber mode.
   const VAPOR_PRESETS = [
-    { id: 'standard', name: 'Balanced', short: 'Balanced', desc: 'Smooth everyday vapor' },
-    { id: 'high', name: 'High Vapor', short: 'High', desc: 'Fuller clouds' },
-    { id: 'max', name: 'Max Vapor', short: 'Max', desc: 'Densest pull' },
-    { id: 'xl', name: 'XL Vapor', short: 'XL', desc: '3D XL chamber mode' },
+    { id: 'standard', name: 'Smooth',   short: 'Smooth',   desc: 'Default power curve, no draw modulation' },
+    { id: 'high',     name: 'Bold',     short: 'Bold',     desc: 'Light draw response, ~33% modulation' },
+    { id: 'max',      name: 'Intense',  short: 'Intense',  desc: 'Strong draw response, ~66% modulation' },
+    { id: 'xl',       name: 'Extreme',  short: 'Extreme',  desc: 'Max draw response, 3D XL chamber mode' },
   ];
+  // Lookup table for the dynamic inhale intensity each vapor preset
+  // sends to the device. Smooth (0) means dynamic_inhale:false on the
+  // mood light payload. The other three enable dynamic inhale with
+  // increasing diFrac values.
+  const VAPOR_INTENSITY = {
+    standard: 0.0,
+    high:     0.33,
+    max:      0.66,
+    xl:       1.0,
+  };
   const VISIBLE_BLE_POLL_MS = 1000;
   const HIDDEN_BLE_POLL_MS = 8000;
   const VISIBLE_RECONNECT_MS = 2000;
@@ -424,7 +443,7 @@ const app = (() => {
         browserSupported ? 'online' : 'offline',
       );
     } else if (advanced) {
-      setBridgeNote(`Local bridge scans only Peak Pro manufacturer prefix ${PEAK_PRO_MAC_PREFIX}.`, 'online');
+      setBridgeNote(`Local bridge scans Puffco devices with MAC prefix ${PUFFCO_MANUFACTURER_MAC_PREFIX}.`, 'online');
     }
     updateBleCapabilityPanel();
     renderBrowserDebugSummary();
@@ -438,8 +457,10 @@ const app = (() => {
   function updateScanButtonVisibility() {
     const btnScan = document.getElementById('btn-scan');
     if (!btnScan) return;
-    btnScan.classList.toggle('hidden', connected || !scanAvailableInCurrentMode());
-    btnScan.disabled = connected || !scanAvailableInCurrentMode() || scanPending;
+    const available = scanAvailableInCurrentMode();
+    btnScan.classList.toggle('hidden', connected || !available);
+    btnScan.disabled = connected || !available || scanPending;
+    if (!scanPending) btnScan.textContent = SCAN_BUTTON_TEXT;
   }
 
   function renderBrowserDebugSummary() {
@@ -646,7 +667,7 @@ const app = (() => {
         message: `Browser socket connected to local backend at ${url}.`,
         timestamp: new Date().toISOString(),
       };
-      setBridgeNote(`Bridge connected: ${url}`, 'online');
+      setBridgeNote(`Bridge connected: ${url}. Scans show Puffco devices with MAC prefix ${PUFFCO_MANUFACTURER_MAC_PREFIX}.`, 'online');
       renderBackendMirror();
       requestLoraxRegistry();
       if (reconnectTimer) {
@@ -728,7 +749,7 @@ const app = (() => {
       let detail = err?.message || String(err);
       if (err?.name === 'NotFoundError') detail = 'Bluetooth chooser was canceled.';
       if (cmd === 'connect' && err?.name === 'NotAllowedError') {
-        setVoiceBluetoothPrompt(true, 'Chrome blocked the chooser. Tap Open Chooser while this page is active.');
+        setVoiceBluetoothPrompt(true, 'Chrome blocked the chooser. Tap Find Device while this page is active.');
       }
       if (!options.quiet) {
         expandBleCapability();
@@ -872,6 +893,18 @@ const app = (() => {
             appendLog(`Dynamic inhale source pinned: ${msg.data.path} (${mode})`, 'info');
           } else {
             appendLog('Dynamic inhale pin cleared — falling back to discovery', 'info');
+          }
+          renderDevResult(msg.type, msg.data);
+          send('status');
+          break;
+        case 'draw_strength_redetect':
+          // Re-probe just completed. Surface what the device exposed so
+          // the user can tell which encoding actually works on their
+          // firmware.
+          if (msg.data?.encoding) {
+            appendLog(`Dynamic inhale encoding detected: ${msg.data.encoding}${msg.data.error ? ` (${msg.data.error})` : ''}`, 'success');
+          } else {
+            appendLog(`Dynamic inhale redetect failed: ${msg.data?.error || 'no working encoding'}`, 'warn');
           }
           renderDevResult(msg.type, msg.data);
           send('status');
@@ -1155,7 +1188,7 @@ const app = (() => {
         btnConnect.disabled = false;
       }
       if (btnScan) {
-        btnScan.textContent = 'Scan';
+        btnScan.textContent = SCAN_BUTTON_TEXT;
       }
       updateScanButtonVisibility();
       if (btnDisconnect) btnDisconnect.classList.add('hidden');
@@ -1184,7 +1217,77 @@ const app = (() => {
   }
 
   function isMacAddressString(value) {
-    return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(value || '').trim());
+    return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(normalizeMacAddress(value));
+  }
+
+  function normalizeMacAddress(value) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (!raw) return '';
+    const compact = raw.replace(/[^0-9A-F]/g, '');
+    if (compact.length !== 12) return raw.replace(/-/g, ':');
+    return compact.match(/.{1,2}/g).join(':');
+  }
+
+  function normalizeMacPrefix(value) {
+    const raw = String(value || '').trim().toUpperCase();
+    const compact = raw.replace(/[^0-9A-F]/g, '');
+    if (compact.length >= 6) return compact.slice(0, 6).match(/.{1,2}/g).join(':');
+    const parts = normalizeMacAddress(value).split(':').filter(Boolean);
+    return parts.length >= 3 ? parts.slice(0, 3).join(':') : '';
+  }
+
+  function scanManufacturerPrefixes(data) {
+    const explicit = Array.isArray(data?.manufacturer_prefixes)
+      ? data.manufacturer_prefixes
+      : Array.isArray(data?.mac_prefixes)
+        ? data.mac_prefixes
+        : data?.manufacturer_prefix
+          ? [data.manufacturer_prefix]
+          : PUFFCO_MANUFACTURER_MAC_PREFIXES;
+    const normalized = explicit.map(normalizeMacPrefix).filter(Boolean);
+    return normalized.length ? [...new Set(normalized)] : PUFFCO_MANUFACTURER_MAC_PREFIXES;
+  }
+
+  function deviceScanAddress(item) {
+    return normalizeMacAddress(item?.address || item?.mac || item?.mac_address || item?.bdaddr || '');
+  }
+
+  function matchesPuffcoManufacturerPrefix(address, prefixes = PUFFCO_MANUFACTURER_MAC_PREFIXES) {
+    const normalized = normalizeMacAddress(address);
+    const normalizedPrefixes = (Array.isArray(prefixes) ? prefixes : [prefixes])
+      .map(normalizeMacPrefix)
+      .filter(Boolean);
+    const effectivePrefixes = normalizedPrefixes.length ? normalizedPrefixes : PUFFCO_MANUFACTURER_MAC_PREFIXES;
+    return effectivePrefixes.some((prefix) => normalized.startsWith(`${prefix}:`));
+  }
+
+  // Bridge scan no longer filters by manufacturer prefix. We return every
+  // device and decorate each row with a `likely_puffco` boolean so the UI
+  // can still surface the best candidates. The Puffco hardware has shipped
+  // under multiple Bluetooth identifiers and we don't want to hide a user's
+  // device because its MAC prefix changed.
+  function filterPuffcoScanDevices(devices, prefixes = PUFFCO_MANUFACTURER_MAC_PREFIXES) {
+    return (Array.isArray(devices) ? devices : [])
+      .map((item) => {
+        const address = deviceScanAddress(item);
+        const name = String(item?.name || '').toLowerCase();
+        const likelyByName = /(peak|pearl|puffco|proxy|lorax)/i.test(name);
+        const likelyByMac = matchesPuffcoManufacturerPrefix(address, prefixes);
+        return {
+          ...(item && typeof item === 'object' ? item : {}),
+          address,
+          likely_puffco: Boolean(item?.likely_puffco ?? likelyByName ?? likelyByMac),
+          likely_by_name: likelyByName,
+          likely_by_mac: likelyByMac,
+        };
+      })
+      // Sort likely Puffcos first, then by RSSI (strongest signal first)
+      .sort((a, b) => {
+        if (a.likely_puffco !== b.likely_puffco) return a.likely_puffco ? -1 : 1;
+        const ar = Number(a.rssi) || -999;
+        const br = Number(b.rssi) || -999;
+        return br - ar;
+      });
   }
 
   function syncIdentityModeUI() {
@@ -1193,7 +1296,7 @@ const app = (() => {
     const input = document.getElementById('device-name');
     if (label) label.textContent = macMode ? 'MAC Address' : 'Device Name';
     if (input) {
-      input.placeholder = macMode ? 'F0:AD:4E:00:00:00' : 'Peak';
+      input.placeholder = macMode ? `${PUFFCO_MANUFACTURER_MAC_PREFIX}:00:00:00` : 'Puffco';
       input.setAttribute('aria-label', macMode ? 'Device MAC address' : 'Device name');
     }
   }
@@ -1207,7 +1310,7 @@ const app = (() => {
       if (input) input.value = localStorage.getItem('puffco_device_mac') || '';
     } else {
       if (isMacAddressString(current)) localStorage.setItem('puffco_device_mac', current);
-      if (input) input.value = localStorage.getItem('puffco_device_name') || 'Peak';
+      if (input) input.value = localStorage.getItem('puffco_device_name') || 'Puffco';
     }
     localStorage.setItem('puffco_use_mac_address', macMode ? '1' : '0');
     syncIdentityModeUI();
@@ -1215,10 +1318,14 @@ const app = (() => {
 
   function currentDeviceIdentity() {
     const value = document.getElementById('device-name')?.value.trim() || '';
-    if (usingMacAddress()) {
-      return { device: 'Peak', mac: value || undefined, display: value || 'MAC address' };
+    if (!isAdvancedUser()) {
+      return { device: 'Puffco', mac: undefined, display: 'Puffco' };
     }
-    return { device: value || 'Peak', mac: undefined, display: value || 'Peak' };
+    if (usingMacAddress()) {
+      const mac = isMacAddressString(value) ? normalizeMacAddress(value) : value;
+      return { device: 'Puffco', mac: mac || undefined, display: mac || 'MAC address' };
+    }
+    return { device: value || 'Puffco', mac: undefined, display: value || 'Puffco' };
   }
 
   function updateControlAvailability(isConnected) {
@@ -1352,6 +1459,19 @@ const app = (() => {
       updateHeroTelemetry(null);
       updateHeatLiveUI(data);
       applyCapabilityGates(null);
+      // Clear every backend-mirror stat-* so a stale value doesn't linger
+      // after a disconnect.
+      const mirrorIds = [
+        'stat-battery-source', 'stat-charge-eta', 'stat-lantern-time', 'stat-low-battery', 'stat-max-battery',
+        'stat-firmware', 'stat-bootloader', 'stat-serial', 'stat-name',
+        'stat-dpd', 'stat-drem', 'stat-total-dabs',
+        'stat-battery-voltage', 'stat-battery-current', 'stat-battery-temperature', 'stat-battery-capacity',
+        'stat-heater-power', 'stat-heater-resistance', 'stat-heater-voltage',
+        'stat-charge-source', 'stat-charge-rate', 'stat-charge-elapsed',
+        'stat-cable-attached', 'stat-mode', 'stat-days-owned', 'stat-device-utc',
+        'stat-fault-end', 'stat-ble-fault-abs', 'stat-ble-fault-cr', 'stat-avg-time-dab',
+      ];
+      mirrorIds.forEach((id) => setText(id, '—'));
       document.getElementById('boost-options-panel')?.classList.add('hidden');
       return;
     }
@@ -1391,6 +1511,8 @@ const app = (() => {
     setText('stat-chamber', labels.chamber ?? formatChamber(data.chamber));
     setText('stat-device-model', formatDeviceIdentity(data));
     setText('stat-firmware-inline', data.firmware || data.software_version || '—');
+    setText('stat-firmware-display', data.firmware || data.software_version || '—');
+    setText('stat-serial-display', data.serial ?? '—');
     setText('stat-last-connected', lastConnectedLabel());
     setText('stat-charge', chargeLabel);
     updateTelemetryFields(data);
@@ -1401,6 +1523,28 @@ const app = (() => {
     setText('stat-drem', labels.dabs_left ?? formatMetric(data.dabs_left, 0));
     setText('stat-total-dabs', labels.total_dabs ?? formatMetric(data.total_dabs, 0));
     setText('stat-name', data.name ?? '—');
+    // Hardware diagnostics — every value below is sourced from an
+    // OFFICIAL_ATTRIBUTE_SPECS Lorax path. When the path didn't read,
+    // the field is null and we fall back to "—".
+    const hw = data;
+    setText('stat-battery-voltage',   labels.battery_voltage  ?? (hw.battery_voltage_v  == null ? '—' : `${hw.battery_voltage_v.toFixed(2)} V`));
+    setText('stat-battery-current',   labels.battery_current  ?? (hw.battery_current_a  == null ? '—' : `${(Math.abs(hw.battery_current_a) * 1000).toFixed(0)} mA`));
+    setText('stat-battery-temperature', labels.battery_temperature ?? (hw.battery_temperature_c == null ? '—' : `${hw.battery_temperature_c.toFixed(1)} °C`));
+    setText('stat-battery-capacity',  labels.battery_capacity ?? (hw.battery_capacity   == null ? '—' : `${Math.round(hw.battery_capacity)} mAh`));
+    setText('stat-heater-power',      labels.heater_power     ?? (hw.heater_power_w     == null ? '—' : `${hw.heater_power_w.toFixed(1)} W`));
+    setText('stat-heater-resistance', labels.heater_resistance?? (hw.heater_resistance_ohm == null ? '—' : `${hw.heater_resistance_ohm.toFixed(2)} Ω`));
+    setText('stat-heater-voltage',    labels.heater_voltage   ?? (hw.heater_voltage_v   == null ? '—' : `${hw.heater_voltage_v.toFixed(2)} V`));
+    setText('stat-charge-source',     labels.charge_source    ?? (hw.charge_source_label ?? (hw.charge_source == null ? '—' : 'Source ' + hw.charge_source)));
+    setText('stat-charge-rate',       labels.charge_rate      ?? (hw.charge_rate_w      == null ? '—' : `${hw.charge_rate_w} W`));
+    setText('stat-charge-elapsed',    hw.charge_elapsed_time_s == null ? '—' : formatSecondsLabel(hw.charge_elapsed_time_s));
+    setText('stat-cable-attached',    labels.cable_attached   ?? (hw.cable_attached === true ? 'Cable attached' : hw.cable_attached === false ? 'On battery' : '—'));
+    setText('stat-mode',              labels.mode             ?? (hw.mode == null ? '—' : hw.mode.toFixed(2)));
+    setText('stat-days-owned',        labels.days_owned       ?? (hw.days_owned == null ? '—' : `${hw.days_owned} day${hw.days_owned === 1 ? '' : 's'}`));
+    setText('stat-device-utc',        hw.device_utc_time      ?? '—');
+    setText('stat-fault-end',         hw.fault_end_index      == null ? '—' : String(hw.fault_end_index));
+    setText('stat-ble-fault-abs',     hw.ble_fault_absolute_count == null ? '—' : String(hw.ble_fault_absolute_count));
+    setText('stat-ble-fault-cr',      hw.ble_fault_credit_count   == null ? '—' : String(hw.ble_fault_credit_count));
+    setText('stat-avg-time-dab',      hw.avg_seconds_per_dab == null ? '—' : formatSecondsLabel(hw.avg_seconds_per_dab));
     updateHeroTelemetry(data);
 
     // Heat indicator
@@ -1517,6 +1661,139 @@ const app = (() => {
     setText('session-chamber', data?.connected ? formatChamber(data.chamber) : '—');
   }
 
+  // ---- Draw strength bar smoothing ----
+  //
+  // The draw strength sensor reports percent via the regular 1-second
+  // status poll. With a pure CSS transition, the bar rises smoothly on
+  // the inhale but snaps back to the next poll's value on the way down
+  // — which looks like a flicker, not a real bar. Instead we keep two
+  // values: a "target" set from the latest data, and a "displayed"
+  // value that animates toward the target on each animation frame.
+  //
+  // Attack (rising) is fast so the bar feels responsive to a hard
+  // pull: 0.32 of the gap per frame, which fills from 0→100% in ~6
+  // frames (~100ms at 60fps). Release (falling) is much slower at
+  // 0.045 per frame, so a 100→0% drop takes ~110 frames (~1.85s) —
+  // long enough that a brief pause between hits doesn't fully
+  // empty the bar. Peak hold snaps a tick to the highest seen
+  // value and slowly lets it fall, so you can see the strongest
+  // part of the hit even after the bar starts dropping.
+  //
+  // The peak-marker is a separate element (.draw-strength-peak) and
+  // uses an independent CSS variable (--draw-peak) so the two don't
+  // fight for the same transform.
+  const DRAW_BAR_RISE_PER_FRAME = 0.32;   // toward target when current < target
+  const DRAW_BAR_FALL_PER_FRAME = 0.045;  // toward target when current > target
+  const DRAW_PEAK_RISE_PER_FRAME = 0.55;  // peak catches up fast to a new high
+  const DRAW_PEAK_HOLD_MS = 800;          // how long the peak stays put before falling
+  const DRAW_PEAK_FALL_PER_FRAME = 0.04;  // peak decays over ~1s once the hold expires
+  const drawBarState = {
+    current: 0,
+    target: 0,
+    peak: 0,
+    peakHeldUntil: 0,
+    raf: 0,
+    lastFrameMs: 0,
+    connected: false,
+    // Cached last integer percent written to #draw-strength-readout so the
+    // rAF tick can skip the DOM write when the value hasn't changed.
+    lastReadoutPct: null,
+  };
+  // Airflow-detection polish: when the panel has been stuck in the
+  // "no source" state for this long, fire a single-shot toast so
+  // the silence doesn't look like the bar is just slow. Reset on
+  // any successful read, on a manual rescan, or on disconnect.
+  const DRAW_NOT_FOUND_TOAST_MS = 5_000;
+  const drawNotFoundState = {
+    since: 0,           // Date.now() when we first entered not_found this run
+    fired: false,       // whether the toast has already fired
+    lastHeat: null,     // last data.heat value we saw (for transition detection)
+  };
+
+  function tickDrawStrengthBar(nowMs) {
+    const panel = document.getElementById('draw-strength-panel');
+    if (!panel) {
+      drawBarState.raf = 0;
+      return;
+    }
+    const last = drawBarState.lastFrameMs || nowMs;
+    const dt = Math.max(0, Math.min(80, nowMs - last)); // clamp to 80ms gaps
+    drawBarState.lastFrameMs = nowMs;
+
+    // Per-frame interpolation factor scales with elapsed time so the
+    // bar still feels right on 30Hz displays or paused tabs.
+    const dtScale = dt / 16.6667;
+    if (drawBarState.current < drawBarState.target) {
+      const step = (drawBarState.target - drawBarState.current) * DRAW_BAR_RISE_PER_FRAME * dtScale;
+      drawBarState.current = Math.min(drawBarState.target, drawBarState.current + step);
+    } else if (drawBarState.current > drawBarState.target) {
+      const step = (drawBarState.current - drawBarState.target) * DRAW_BAR_FALL_PER_FRAME * dtScale;
+      drawBarState.current = Math.max(drawBarState.target, drawBarState.current - step);
+    }
+
+    // Peak hold: track the highest current value seen, snap up
+    // quickly, hold for a beat, then fall. If disconnected, peak
+    // decays to 0 so the marker doesn't get stuck.
+    // Peak-snap behavior: when a new hit exceeds the previous peak,
+    // `peak = max(peak + rise, current)` snaps the marker up to the
+    // current value on the very next frame so a sharp inhale can
+    // never "under-read" the previous high.
+    if (drawBarState.current >= drawBarState.peak - 0.01) {
+      // New high or matched the previous peak: snap up and reset hold.
+      const rise = (drawBarState.current - drawBarState.peak) * DRAW_PEAK_RISE_PER_FRAME * dtScale;
+      drawBarState.peak = Math.max(drawBarState.peak + rise, drawBarState.current);
+      drawBarState.peakHeldUntil = nowMs + DRAW_PEAK_HOLD_MS;
+    } else if (nowMs > drawBarState.peakHeldUntil) {
+      // Holding period elapsed, decay toward current.
+      const drop = (drawBarState.peak - drawBarState.current) * DRAW_PEAK_FALL_PER_FRAME * dtScale;
+      drawBarState.peak = Math.max(drawBarState.current, drawBarState.peak - drop);
+    }
+
+    panel.style.setProperty('--draw-strength', drawBarState.current.toFixed(2));
+    panel.style.setProperty('--draw-peak', drawBarState.peak.toFixed(2));
+    // Keep the big numeric readout in lockstep with the smoothed
+    // --draw-strength so the visible number matches the bar (not the
+    // raw target). Skipped while disconnected so the em dash sticks.
+    if (drawBarState.connected) {
+      const intPct = Math.round(drawBarState.current);
+      if (intPct !== drawBarState.lastReadoutPct) {
+        drawBarState.lastReadoutPct = intPct;
+        const readout = document.getElementById('draw-strength-readout');
+        if (readout) readout.textContent = `${intPct}%`;
+      }
+      panel.setAttribute('aria-valuenow', String(intPct));
+    }
+    // Active CSS class is sticky once lit so a single 0 reading
+    // between two real samples doesn't visually flicker off.
+    panel.classList.toggle('bar-active', drawBarState.current >= 8);
+    panel.classList.toggle('bar-hot', drawBarState.current >= 60);
+    // Maxed-out state — airflow pinned at the top of the bar.
+    // Triggers a strong glow + "MAX" suffix in the label.
+    panel.classList.toggle('bar-maxed', drawBarState.current >= 95);
+    panel.classList.toggle('bar-peak', drawBarState.peak - drawBarState.current >= 6);
+
+    drawBarState.raf = window.requestAnimationFrame(tickDrawStrengthBar);
+  }
+
+  function startDrawBarLoop() {
+    if (drawBarState.raf) return;
+    drawBarState.lastFrameMs = 0;
+    drawBarState.raf = window.requestAnimationFrame(tickDrawStrengthBar);
+  }
+
+  function resetDrawBarState() {
+    drawBarState.current = 0;
+    drawBarState.target = 0;
+    drawBarState.peak = 0;
+    drawBarState.peakHeldUntil = 0;
+    drawBarState.lastReadoutPct = null;
+    const panel = document.getElementById('draw-strength-panel');
+    if (panel) {
+      panel.style.setProperty('--draw-strength', '0');
+      panel.style.setProperty('--draw-peak', '0');
+    }
+  }
+
   function updateDrawStrengthUI(data) {
     const panel = document.getElementById('draw-strength-panel');
     const label = document.getElementById('draw-strength-label');
@@ -1527,7 +1804,25 @@ const app = (() => {
     const active = Boolean(data?.draw_strength_active || percent >= 8);
     const dynamicInhale = data?.draw_strength_mode === 'dynamic_inhale' || data?.draw_strength_source === '/p/app/htr/inh';
     const wasActive = panel.classList.contains('active');
-    panel.style.setProperty('--draw-strength', String(percent));
+
+    // Feed the smoothing loop. The loop is responsible for the actual
+    // --draw-strength CSS variable, so we don't set it here directly.
+    if (data?.connected) {
+      drawBarState.connected = true;
+      drawBarState.target = percent;
+      // First data point of a session: snap the bar to the value so
+      // the user doesn't wait for it to ramp from 0.
+      if (!wasActive && active && drawBarState.current === 0) {
+        drawBarState.current = percent;
+      }
+      startDrawBarLoop();
+    } else {
+      drawBarState.connected = false;
+      drawBarState.target = 0;
+      // Let the bar naturally decay to 0 in the loop rather than
+      // snapping. The loop keeps running until the panel disappears.
+      startDrawBarLoop();
+    }
     panel.classList.toggle('active', active);
     panel.classList.toggle('found', Boolean(data?.draw_strength_source));
     const mapping = data?.draw_strength_source_mapping;
@@ -1540,15 +1835,58 @@ const app = (() => {
     } else {
       panel.classList.remove('heating');
     }
-    label.textContent = data?.connected ? (active ? `${percent}% ${dynamicInhale ? 'inhale' : 'draw'}` : 'Idle') : 'Disconnected';
+    label.textContent = data?.connected
+      ? (active
+          ? (percent >= 95 ? `${percent}% MAX ${dynamicInhale ? 'inhale' : 'draw'}` : `${percent}% ${dynamicInhale ? 'inhale' : 'draw'}`)
+          : 'Idle')
+      : 'Disconnected';
+    // Big numeric readout + screen-reader status. The readout is the
+    // smoothed (visual) value and is driven by the rAF tick; here we
+    // only handle the edge cases the tick can't see on its own
+    // (disconnected -> em dash, idle -> 0%) and the verb portion of
+    // aria-valuetext.
+    const readout = document.getElementById('draw-strength-readout');
+    if (readout) {
+      if (!data?.connected) {
+        readout.textContent = '—';
+        drawBarState.lastReadoutPct = null;
+      } else if (!active) {
+        if (drawBarState.lastReadoutPct !== 0) {
+          readout.textContent = '0%';
+          drawBarState.lastReadoutPct = 0;
+        }
+      }
+      // While active the rAF tick owns the readout so it tracks the
+      // smoothed bar value frame-by-frame; nothing to write here.
+    }
+    if (data?.connected) {
+      const verb = dynamicInhale ? 'inhale' : 'draw';
+      panel.setAttribute('aria-valuetext',
+        active
+          ? `${percent} percent, active ${verb}${panel.classList.contains('heating') ? ', heating' : ''}`
+          : 'Idle');
+    } else {
+      panel.setAttribute('aria-valuetext', 'Disconnected');
+      panel.setAttribute('aria-valuenow', '0');
+    }
     const mode = dynamicInhale
       ? 'dynamic inhale'
-      : data?.draw_strength_mode === 'heater_power_proxy'
-        ? 'heater power proxy'
-        : data?.draw_strength_mode;
+      : data?.draw_strength_mode;
     if (data?.draw_strength_source) {
       const pinnedTag = mapping?.path && mapping.path === data.draw_strength_source ? ' · pinned' : '';
-      source.textContent = `${mode || 'direct'} · ${data.draw_strength_source}${pinnedTag}`;
+      const rawTag = dynamicInhale && Number.isFinite(Number(data.draw_strength_raw_percent))
+        ? ` · raw ${Math.round(Number(data.draw_strength_raw_percent))}%`
+        : '';
+      const baselineTag = dynamicInhale && Number.isFinite(Number(data.draw_strength_baseline_percent))
+        ? ` · idle ${Math.round(Number(data.draw_strength_baseline_percent))}%`
+        : '';
+      const encodingTag = data.draw_strength_encoding
+        ? ` · ${data.draw_strength_encoding}`
+        : '';
+      const errorTag = data.draw_strength_read_error
+        ? ` · read error: ${data.draw_strength_read_error}`
+        : '';
+      source.textContent = `${mode || 'direct'} · ${data.draw_strength_source}${encodingTag}${errorTag}${rawTag}${baselineTag}${pinnedTag}`;
     } else if (!data?.connected) {
       source.textContent = 'Connect to scan for an inhale sensor';
     } else if (data.heat === 'HEATING') {
@@ -1556,8 +1894,94 @@ const app = (() => {
     } else {
       source.textContent = 'Scanning direct inhale paths';
     }
+    // Airflow-detection polish: the diagnostic sub-line lives under
+    // the source label and only shows up when the scan envelope
+    // tells us something interesting. Three states:
+    //   - source found       -> hidden
+    //   - source not found   -> "scanned N paths, K responded · last error: ..."
+    //   - still scanning     -> hidden (the source label already says
+    //                            "Scanning direct inhale paths")
+    const diagnostic = document.getElementById('draw-strength-diagnostic');
+    if (diagnostic) {
+      const scan = data?.draw_strength_scan_diagnostics;
+      const haveSource = Boolean(data?.draw_strength_source);
+      const heating = data?.heat === 'HEATING';
+      if (!haveSource && data?.connected && scan) {
+        const tried = scan.tried_count || 0;
+        const ok = scan.tried_ok || 0;
+        const skipped = (scan.skipped_paths || []).length;
+        const scanned = Math.round(scan.scanned_ms || 0);
+        const lastErr = scan.last_error || data.draw_strength_read_error || null;
+        const parts = [];
+        if (tried > 0) {
+          parts.push(`scanned ${tried} path${tried === 1 ? '' : 's'}, ${ok} responded`);
+        } else {
+          parts.push('no candidate paths');
+        }
+        if (skipped > 0) parts.push(`${skipped} in cooldown`);
+        if (scanned > 0) parts.push(`${scanned} ms`);
+        if (lastErr && !heating) parts.push(`last error: ${lastErr}`);
+        diagnostic.textContent = parts.join(' · ');
+        diagnostic.classList.remove('hidden');
+        diagnostic.classList.toggle('has-error', Boolean(lastErr));
+      } else {
+        diagnostic.textContent = '';
+        diagnostic.classList.add('hidden');
+        diagnostic.classList.remove('has-error');
+      }
+    }
+    // Panel states. .scanning = we have a connection but no source
+    // yet, the bar is alive and the chip should keep pulsing (the
+    // CSS reads this class). .unavailable = we've been stuck without
+    // a source for a meaningful stretch — render the muted/warning
+    // treatment. These are mutually exclusive: scanning wins during
+    // the first few seconds, unavailable kicks in if we never find
+    // anything.
+    const isScanning = Boolean(data?.connected) && !data?.draw_strength_source;
+    const isUnavailable = isScanning && (data?.draw_strength_scan_diagnostics?.tried_count || 0) > 0;
+    panel.classList.toggle('scanning', isScanning);
+    panel.classList.toggle('unavailable', isUnavailable);
     if (clearBtn) {
       clearBtn.classList.toggle('hidden', !(mapping && mapping.path));
+    }
+
+    // Airflow-detection polish: single-shot toast + heat-entry rescan.
+    // We track how long the panel has been in not_found; after
+    // DRAW_NOT_FOUND_TOAST_MS, a single toast fires explaining what
+    // we tried and pointing at the Rescan button. The toast is reset
+    // by any successful read, by a manual rescan, or by disconnect.
+    if (data?.connected) {
+      if (isScanning) {
+        if (!drawNotFoundState.since) drawNotFoundState.since = Date.now();
+        if (!drawNotFoundState.fired
+            && (Date.now() - drawNotFoundState.since) >= DRAW_NOT_FOUND_TOAST_MS) {
+          drawNotFoundState.fired = true;
+          const tried = data?.draw_strength_scan_diagnostics?.tried_count || 0;
+          const summary = tried > 0
+            ? `No airflow path responded on this device (tried ${tried}).`
+            : 'No airflow path responded on this device.';
+          toast(`${summary} Try Rescan while inhaling.`, 'warn');
+        }
+      } else {
+        // Found a source — reset the timer / fired flag.
+        drawNotFoundState.since = 0;
+        drawNotFoundState.fired = false;
+      }
+      // Heat-entry transition: if we just entered HEATING and still
+      // have no source, fire a redetect so a firmware that only
+      // exposes airflow during heat gets another chance to wake up.
+      const wasHeat = drawNotFoundState.lastHeat;
+      const nowHeat = data.heat;
+      if (wasHeat !== 'HEATING' && nowHeat === 'HEATING' && isScanning) {
+        try { send('draw_strength_redetect'); } catch (_) { /* ignore */ }
+      }
+      drawNotFoundState.lastHeat = nowHeat;
+    } else {
+      // Disconnected — wipe the not-found timer so a fresh connect
+      // doesn't fire a stale toast.
+      drawNotFoundState.since = 0;
+      drawNotFoundState.fired = false;
+      drawNotFoundState.lastHeat = null;
     }
 
     // Round 2: bump the per-session draw counter when a draw starts.
@@ -1585,6 +2009,12 @@ const app = (() => {
       button.disabled = true;
       button.textContent = 'Scanning…';
     }
+    // Airflow-detection polish: a manual rescan is the user's
+    // "I just changed something" signal — reset the not-found
+    // toast latch so a fresh round of probing can fire a new
+    // toast if it still can't find an airflow path.
+    drawNotFoundState.since = 0;
+    drawNotFoundState.fired = false;
     toast('Inhale during the next ~6 s so dynamic inhale can be confirmed', 'info');
     const sent = send('draw_strength_observe', {
       samples: 4,
@@ -1610,6 +2040,34 @@ const app = (() => {
       return;
     }
     send('draw_strength_source', { clear: true });
+  }
+
+  // Clear the cached dynamic-inhale encoding and re-probe the path
+  // with every known encoding (float32, uint8, int8, uint32). Useful
+  // when the bar is stuck on a wrong encoding, or when the firmware
+  // was updated and a different read method is now correct.
+  function redetectDynamicInhale() {
+    if (!connected) {
+      toast('Connect to a Puffco before re-detecting the dynamic inhale path', 'error');
+      return;
+    }
+    const btn = document.getElementById('btn-draw-redetect');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Probing…';
+    }
+    toast('Re-probing /p/app/htr/inh with all encodings', 'info');
+    const sent = send('draw_strength_redetect');
+    if (!sent && btn) {
+      btn.disabled = false;
+      btn.textContent = 'Force redetect';
+    }
+    // Re-enable the button in case the response never comes.
+    setTimeout(() => {
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = 'Force redetect';
+    }, 6_000);
   }
 
   function updateTelemetryFields(data) {
@@ -1736,7 +2194,9 @@ const app = (() => {
       card.className = 'profile-card' + (isActive ? ' active' : '') + (isPending ? ' pending' : '');
       card.style.setProperty('--profile-color', profileColor);
       card.tabIndex = 0;
-      card.draggable = true;
+      // Native HTML5 dragstart/drop are now handled by Sortable on the
+      // grid container (see wireProfilesSortable). We still need the
+      // data attribute for the reorder callback to identify the slot.
       card.dataset.profileIndex = String(profileIndex);
       card.setAttribute('role', 'button');
       card.setAttribute('aria-label', `Select ${p.name || `Profile ${profileIndex}`}`);
@@ -1749,21 +2209,6 @@ const app = (() => {
           event.preventDefault();
           selectProfile(profileIndex);
         }
-      });
-      card.addEventListener('dragstart', (event) => {
-        card.classList.add('dragging');
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/profile-index', String(profileIndex));
-      });
-      card.addEventListener('dragend', () => card.classList.remove('dragging'));
-      card.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-      });
-      card.addEventListener('drop', (event) => {
-        event.preventDefault();
-        const from = event.dataTransfer.getData('text/profile-index');
-        if (from !== '') reorderProfiles(Number(from), profileIndex);
       });
 
       card.innerHTML = `
@@ -1801,6 +2246,43 @@ const app = (() => {
       }
     });
     renderProfileLibrary();
+    wireProfilesSortable(grid);
+  }
+
+  // Wire Sortable on the device-profiles grid. Idempotent: subsequent
+  // renders reuse the existing instance, but only the new children
+  // are draggable thanks to Sortable's event delegation.
+  function wireProfilesSortable(grid) {
+    if (!grid || typeof Sortable === 'undefined') return;
+    if (grid.__sortableProfileInstance) return;
+    const instance = Sortable.create(grid, {
+      animation: 180,
+      draggable: '.profile-card',
+      handle: '.profile-drag-handle, .profile-card',
+      filter: 'button, input, .profile-actions',
+      preventOnFilter: true,
+      ghostClass: 'profile-drag-ghost',
+      chosenClass: 'profile-drag-chosen',
+      dragClass: 'profile-drag-active',
+      onEnd(evt) {
+        if (evt.oldIndex === evt.newIndex) return;
+        // Read the new order straight from the DOM and re-order the
+        // deviceState.profiles array to match. This avoids the
+        // "find the displaced target" trick — the DOM already
+        // reflects the desired order.
+        const orderedIds = Array.from(grid.children)
+          .map((el) => Number(el.dataset?.profileIndex))
+          .filter((n) => Number.isInteger(n));
+        const profiles = deviceState?.profiles;
+        if (!Array.isArray(profiles) || !profiles.length) return;
+        const next = orderedIds.map((idx) =>
+          profiles.find((p, fallback) => Number(p.index ?? fallback) === idx)
+        );
+        if (next.some((p) => !p)) return;
+        commitDeviceProfileOrder(next, Number(evt.item?.dataset?.profileIndex));
+      },
+    });
+    grid.__sortableProfileInstance = instance;
   }
 
   function applySavedProfileOrder(profiles) {
@@ -1984,21 +2466,61 @@ const app = (() => {
       ? profileOrValue.vapor ?? profileOrValue.vapor_preset ?? profileOrValue.xl_vapor ?? profileOrValue.vaporControl
       : profileOrValue;
     const value = String(raw ?? 'standard').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+    // Map common words and the new display labels onto the four preset
+    // IDs. The order in VAPOR_PRESETS is the official progression —
+    // Smooth → Bold → Intense → Extreme.
     const aliases = {
+      // New display names
+      smooth: 'standard',
+      bold: 'high',
+      intense: 'max',
+      extreme: 'xl',
+      // Old display names (kept so exported/imported backups still work)
       normal: 'standard',
       balanced: 'standard',
       default: 'standard',
       low: 'standard',
       more: 'high',
       boosted: 'high',
+      high_vapor: 'high',
       maximum: 'max',
+      max_vapor: 'max',
       full: 'max',
       xlarge: 'xl',
       '3d_xl': 'xl',
       xl_vapor: 'xl',
+      // Common industry synonyms
+      mild: 'standard',
+      medium: 'high',
+      strong: 'max',
+      ultra: 'xl',
     };
     const id = aliases[value] || value;
     return VAPOR_PRESETS.some((preset) => preset.id === id) ? id : 'standard';
+  }
+
+  // Returns the dynamic-inhale payload the device should receive for a
+  // given vapor preset. Smooth (standard) means "no draw modulation" —
+  // dynamic_inhale stays false and the firmware uses the default power
+  // curve. The other three set dynamic_inhale: true and supply a
+  // fractional intensity (diFrac) between 0.33 and 1.0 that the
+  // firmware maps to a more aggressive chamber response during a draw.
+  // The intensity value is included in the mood light payload as
+  // tempo_frac so the server's mood_light_payload picks it up via the
+  // existing dynamic_inhale pathway. Callers that want the raw field
+  // should use vaporIntensityFor() instead.
+  function vaporDynamicInhaleFor(profileOrValue) {
+    const id = normalizeVaporPreset(profileOrValue);
+    const intensity = VAPOR_INTENSITY[id] ?? 0.0;
+    if (intensity <= 0) {
+      return { dynamic_inhale: false, di_frac: 0 };
+    }
+    return { dynamic_inhale: true, di_frac: Number(intensity.toFixed(2)) };
+  }
+
+  function vaporIntensityFor(profileOrValue) {
+    const id = normalizeVaporPreset(profileOrValue);
+    return VAPOR_INTENSITY[id] ?? 0.0;
   }
 
   function vaporPresetMeta(profileOrValue) {
@@ -2307,23 +2829,36 @@ const app = (() => {
         }
         editLocalProfile(card.dataset.localProfileId);
       });
-      card.addEventListener('dragstart', (event) => {
-        card.classList.add('dragging');
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', card.dataset.localProfileId);
-      });
-      card.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-      });
-      card.addEventListener('drop', (event) => {
-        event.preventDefault();
-        const fromId = event.dataTransfer.getData('text/plain');
-        const toId = card.dataset.localProfileId;
-        reorderLocalProfiles(fromId, toId);
-      });
-      card.addEventListener('dragend', () => card.classList.remove('dragging'));
     });
+    wireProfileLibrarySortable(grid);
+  }
+
+  // Wire Sortable on the local-profile-library grid. Idempotent.
+  function wireProfileLibrarySortable(grid) {
+    if (!grid || typeof Sortable === 'undefined') return;
+    if (grid.__sortableLibraryInstance) return;
+    const instance = Sortable.create(grid, {
+      animation: 180,
+      draggable: '.local-profile-card',
+      handle: '.profile-drag-handle, .local-profile-card',
+      filter: 'button, input, .profile-actions',
+      preventOnFilter: true,
+      ghostClass: 'profile-drag-ghost',
+      chosenClass: 'profile-drag-chosen',
+      dragClass: 'profile-drag-active',
+      onEnd(evt) {
+        if (evt.oldIndex === evt.newIndex) return;
+        const fromId = evt.item?.dataset?.localProfileId;
+        // The "to" id is the id of the card now at the newIndex-1
+        // (or newIndex+1 if moved up) — i.e. the displaced card.
+        const movedDown = evt.newIndex > evt.oldIndex;
+        const neighbor = movedDown ? evt.newIndex - 1 : evt.newIndex + 1;
+        const neighborEl = grid.children[neighbor];
+        const toId = neighborEl?.dataset?.localProfileId;
+        if (fromId && toId) reorderLocalProfiles(fromId, toId);
+      },
+    });
+    grid.__sortableLibraryInstance = instance;
   }
 
   function reorderLocalProfiles(fromId, toId) {
@@ -2356,6 +2891,31 @@ const app = (() => {
     renderProfileLibrary();
   }
 
+  function addNewProfile() {
+    const profile = profileForStorage({
+      id: `local-${Date.now()}`,
+      source: 'local',
+      name: 'New Profile',
+      temp_f: 520,
+      time_s: 60,
+      vapor: 'standard',
+      mood: {
+        preset: 'no_animation',
+        name: 'Static color',
+        colors: ['#ff0000'],
+        tempoFrac: 0.5,
+        dynamicInhale: false,
+        sourcePreset: 'no_animation',
+      },
+    }, 'local');
+    const library = readProfileLibrary().profiles;
+    library.unshift(profile);
+    writeProfileLibrary(library);
+    renderProfileLibrary();
+    editLocalProfile(profile.id);
+    toast('New local profile created', 'success');
+  }
+
   function editLocalProfile(id) {
     const profile = readProfileLibrary().profiles.find((item) => item.id === id);
     if (!profile) return;
@@ -2384,6 +2944,54 @@ const app = (() => {
     modal?.classList.add('visible');
   }
 
+  function resetCurrentProfile() {
+    if (editingLocalProfileId) {
+      const profile = readProfileLibrary().profiles.find((item) => item.id === editingLocalProfileId);
+      if (profile) editLocalProfile(profile.id);
+      return;
+    }
+    if (editingProfileIndex != null) {
+      editProfile(editingProfileIndex);
+      return;
+    }
+    document.getElementById('modal-name').value = 'New Profile';
+    document.getElementById('modal-temp').value = '520';
+    document.getElementById('modal-time').value = '60';
+    document.getElementById('modal-vapor').value = 'standard';
+    setMoodPreset('no_animation');
+    renderVaporControls();
+    renderModalSummary();
+  }
+
+  function deleteCurrentProfile() {
+    if (editingLocalProfileId) {
+      const id = editingLocalProfileId;
+      archiveLocalProfile(id);
+      closeModal();
+      toast('Local profile archived', 'success');
+      return;
+    }
+    if (editingProfileIndex == null) return;
+    const index = Number(editingProfileIndex);
+    saveProfileBackup('before_reset_profile_slot');
+    writeProfileVaporOverride(index, 'standard');
+    send('set_profile', {
+      index,
+      name: `Profile ${index}`,
+      temp_f: 520,
+      time_s: 60,
+      vapor: 'standard',
+      mood_light: {
+        preset: 'no_animation',
+        colors: ['#ff0000'],
+        tempo_frac: 0.5,
+        dynamic_inhale: false,
+      },
+    });
+    closeModal();
+    toast('Profile slot reset', 'success');
+  }
+
   function saveLocalProfileFromModal() {
     const library = readProfileLibrary().profiles;
     const index = library.findIndex((profile) => profile.id === editingLocalProfileId);
@@ -2392,8 +3000,18 @@ const app = (() => {
     const temp = parseFloat(document.getElementById('modal-temp').value);
     const time = parseFloat(document.getElementById('modal-time').value);
     const vapor = normalizeVaporPreset(document.getElementById('modal-vapor')?.value);
+    const vaporDi = vaporDynamicInhaleFor(vapor);
     const mood = moodParams();
     if (!mood) return;
+    // Merge vapor into the mood payload so the stored profile carries
+    // both the user's mood setting and the vapor choice. When vapor
+    // is Smooth (standard) we keep whatever dynamic_inhale the mood
+    // editor had set. When vapor is Bold/Intense/Extreme, vapor wins.
+    const mergedMood = {
+      ...mood,
+      dynamic_inhale: vaporDi.dynamic_inhale || Boolean(mood.dynamic_inhale),
+      di_frac: vaporDi.di_frac,
+    };
     const profile = {
       ...library[index],
       name,
@@ -2401,7 +3019,7 @@ const app = (() => {
       time_s: time,
       vapor,
       color: null,
-      mood: normalizeProfileMood({ mood }),
+      mood: normalizeProfileMood({ mood: mergedMood }),
       saved_at: new Date().toISOString(),
     };
     const validation = validateProfile(profile);
@@ -2433,24 +3051,48 @@ const app = (() => {
       return;
     }
     saveProfileBackup('before_copy_local_to_device');
+    const vaporId = normalizeVaporPreset(profile);
+    const vaporDi = vaporDynamicInhaleFor(vaporId);
     const params = {
       index,
       name: profile.name,
       temp_f: Number(profile.temp_f),
       time_s: Number(profile.time_s),
-      vapor: normalizeVaporPreset(profile),
+      vapor: vaporId,
     };
     const mood = normalizeProfileMood(profile);
     if (mood) {
+      // Vapor is the source of truth for dynamic inhale intensity.
+      // Smooth turns it off, Bold/Intense/Extreme turn it on with the
+      // matching diFrac. We OR-merge with the mood editor's flag so a
+      // user-set dynamic inhale checkbox is preserved when vapor is
+      // Smooth (e.g. a profile that wants pulsing lights but Smooth
+      // power).
+      const useVapor = vaporDi.dynamic_inhale
+        || (mood.dynamicInhale ?? mood.dynamic_inhale ?? false);
       params.mood_light = {
         preset: mood.sourcePreset || mood.preset,
         colors: mood.colors,
         tempo_frac: mood.tempoFrac ?? mood.tempo_frac ?? 0.5,
-        dynamic_inhale: mood.dynamicInhale ?? mood.dynamic_inhale ?? false,
+        dynamic_inhale: useVapor,
+        di_frac: vaporDi.di_frac,
+      };
+    } else if (vaporDi.dynamic_inhale) {
+      // No mood editor on the profile but the vapor setting wants
+      // dynamic inhale — send a no_animation mood light payload with
+      // the matching diFrac. The firmware's profile-colour write is
+      // what actually stores the dynamicInhale flag.
+      params.mood_light = {
+        preset: 'no_animation',
+        colors: ['#ff0000'],
+        tempo_frac: 0.5,
+        dynamic_inhale: true,
+        di_frac: vaporDi.di_frac,
       };
     }
     writeProfileVaporOverride(index, params.vapor);
     send('set_profile', params);
+    toast(`Profile copied with ${vaporPresetMeta(vaporId).name} vapor`, 'info');
   }
 
   function restoreProfileBackup() {
@@ -2527,17 +3169,17 @@ const app = (() => {
 
     // Modal color sync
     const modalColor = document.getElementById('modal-color');
-    const modalHex = document.getElementById('modal-hex');
-    if (modalColor && modalHex) {
+    const modalSwatch = document.getElementById('modal-color-swatch');
+    if (modalColor) {
       modalColor.addEventListener('input', () => {
-        modalHex.value = modalColor.value.toUpperCase();
-      });
-      modalHex.addEventListener('input', () => {
-        let val = modalHex.value.trim();
-        if (!val.startsWith('#')) val = '#' + val;
-        if (/^#[0-9a-fA-F]{6}$/.test(val)) {
-          modalColor.value = val;
-        }
+        const value = modalColor.value.toLowerCase();
+        if (wheel) wheel.value = value;
+        if (hexInput) hexInput.value = value.toUpperCase();
+        if (modalSwatch) modalSwatch.textContent = value.toUpperCase();
+        setMoodPreview(value);
+        moodEditor.colors[0] = value;
+        renderMoodColors();
+        renderModalSummary();
       });
     }
 
@@ -2591,9 +3233,12 @@ const app = (() => {
     const color = moodEditor.colors[0] || '#ff0000';
     const wheel = document.getElementById('color-wheel');
     const hexInput = document.getElementById('hex-input');
-    const preview = document.getElementById('color-preview');
+    const modalColor = document.getElementById('modal-color');
+    const modalSwatch = document.getElementById('modal-color-swatch');
     if (wheel) wheel.value = color;
     if (hexInput) hexInput.value = color.toUpperCase();
+    if (modalColor) modalColor.value = color;
+    if (modalSwatch) modalSwatch.textContent = color.toUpperCase();
     setMoodPreview(color);
   }
 
@@ -2680,29 +3325,9 @@ const app = (() => {
         renderMoodColors();
         renderModalSummary();
       });
-      slot.addEventListener('dragstart', (event) => {
-        slot.classList.add('dragging');
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/mood-color-index', String(index));
-      });
-      slot.addEventListener('dragend', () => slot.classList.remove('dragging'));
-      slot.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-      });
-      slot.addEventListener('drop', (event) => {
-        event.preventDefault();
-        const from = Number(event.dataTransfer.getData('text/mood-color-index'));
-        if (!Number.isInteger(from) || from === index) return;
-        const [moved] = moodEditor.colors.splice(from, 1);
-        moodEditor.colors.splice(index, 0, moved);
-        syncPickerToMoodColor();
-        renderMoodColors();
-        renderModalSummary();
-      });
       wrap.appendChild(slot);
     });
-
+    wireMoodColorsSortable(wrap);
     const add = document.getElementById('mood-add-color');
     if (add) {
       add.disabled = moodEditor.colors.length >= preset.max;
@@ -2710,6 +3335,37 @@ const app = (() => {
     }
     const range = document.getElementById('mood-color-range');
     if (range) range.textContent = `${preset.min}-${preset.max} colors`;
+  }
+
+  // Wire Sortable on the mood-colors wrap. Idempotent. The reorder
+  // uses the newIndex directly so we can splice the colors array in
+  // a single shot and re-render to refresh the color values.
+  function wireMoodColorsSortable(wrap) {
+    if (!wrap || typeof Sortable === 'undefined') return;
+    if (wrap.__sortableMoodInstance) return;
+    const instance = Sortable.create(wrap, {
+      animation: 160,
+      draggable: '.mood-color-slot',
+      handle: '.mood-drag-handle, .mood-color-slot',
+      filter: 'input, button, .mood-remove',
+      preventOnFilter: true,
+      ghostClass: 'mood-drag-ghost',
+      chosenClass: 'mood-drag-chosen',
+      dragClass: 'mood-drag-active',
+      onEnd(evt) {
+        const from = evt.oldIndex;
+        const to = evt.newIndex;
+        if (from === to) return;
+        if (from < 0 || to < 0) return;
+        if (from >= moodEditor.colors.length || to >= moodEditor.colors.length) return;
+        const [moved] = moodEditor.colors.splice(from, 1);
+        moodEditor.colors.splice(to, 0, moved);
+        syncPickerToMoodColor();
+        renderMoodColors();
+        renderModalSummary();
+      },
+    });
+    wrap.__sortableMoodInstance = instance;
   }
 
   function renderMoodTempo() {
@@ -3012,7 +3668,16 @@ const app = (() => {
     }
     const mood = moodParams();
     if (!mood) return;
-    params.mood_light = mood;
+    // Merge vapor into the mood payload so the device sees the right
+    // dynamic inhale + di_frac. Vapor is the source of truth: Bold /
+    // Intense / Extreme force dynamic_inhale: true with a matching
+    // intensity. Smooth preserves whatever the mood editor set.
+    const vaporDi = vaporDynamicInhaleFor(vapor);
+    params.mood_light = {
+      ...mood,
+      dynamic_inhale: vaporDi.dynamic_inhale || Boolean(mood.dynamic_inhale),
+      di_frac: vaporDi.di_frac,
+    };
     if (forceSelect || document.getElementById('modal-select').checked) params.select = true;
 
     saveProfileBackup('before_set_profile');
@@ -3266,7 +3931,20 @@ const app = (() => {
       results.innerHTML = '';
       results.classList.add('active');
     }
-    if (!send('scan_devices', { timeout: 6, puffco_only: true, manufacturer_prefix: PEAK_PRO_MAC_PREFIX })) {
+    if (!send('scan_devices', {
+      timeout: 6,
+      // Show every device the bridge finds. The Puffco hardware has
+      // shipped under multiple Bluetooth identifiers and at least one
+      // user-reported case where the Puffco's MAC prefix is not the
+      // historical F0:AD:4E range. We still highlight likely Puffcos in
+      // the result list, but no longer hide anything.
+      puffco_only: false,
+      // These fields are sent for back-compat with the bridge, but the
+      // server-side filter is bypassed because puffco_only is false.
+      manufacturer_prefix: PUFFCO_MANUFACTURER_MAC_PREFIX,
+      manufacturer_prefixes: PUFFCO_MANUFACTURER_MAC_PREFIXES,
+      mac_prefixes: PUFFCO_MANUFACTURER_MAC_PREFIXES,
+    })) {
       finishDeviceScan();
       return false;
     }
@@ -3277,7 +3955,7 @@ const app = (() => {
     scanPending = false;
     const button = document.getElementById('btn-scan');
     if (button) {
-      button.textContent = 'Scan';
+      button.textContent = SCAN_BUTTON_TEXT;
     }
     updateScanButtonVisibility();
   }
@@ -3286,15 +3964,22 @@ const app = (() => {
     finishDeviceScan();
     const results = document.getElementById('device-scan-results');
     if (!results) return;
-    const devices = Array.isArray(data?.devices) ? data.devices : [];
+    const allDevices = Array.isArray(data?.devices) ? data.devices : [];
+    const prefixes = scanManufacturerPrefixes(data);
+    const prefixLabel = prefixes.join(', ');
+    const devices = filterPuffcoScanDevices(allDevices, prefixes);
+    const filteredOut = Math.max(0, allDevices.length - devices.length);
     if (!devices.length) {
-      results.innerHTML = `<div class="scan-empty">${escapeHtml(data?.note || `No Peak Pro devices found with MAC prefix ${PEAK_PRO_MAC_PREFIX}`)}</div>`;
+      const noteText = data?.note || (devices.length
+        ? `Found ${devices.length} nearby BLE device${devices.length === 1 ? '' : 's'}.`
+        : 'No devices discovered. Make sure Bluetooth is enabled and try again.');
+      results.innerHTML = `<div class="scan-empty">${escapeHtml(noteText)}</div>`;
       results.classList.add('active');
-      appendLog(data?.note || `No Peak Pro devices found with MAC prefix ${PEAK_PRO_MAC_PREFIX}`, 'info');
+      appendLog(data?.note || `No Puffco devices found with MAC prefix ${prefixLabel}`, 'info');
       return;
     }
     results.innerHTML = devices.map((item) => {
-      const name = escapeHtml(item.name || 'Unknown BLE device');
+      const name = escapeHtml(item.name || 'Puffco device');
       const address = escapeHtml(item.address || '');
       const rssi = item.rssi == null ? '' : `<span>${escapeHtml(String(item.rssi))} dBm</span>`;
       return `
@@ -3311,7 +3996,7 @@ const app = (() => {
     results.classList.add('active');
     results.querySelectorAll('.scan-result').forEach((button) => {
       button.addEventListener('click', () => {
-        const name = button.dataset.name || 'Peak';
+        const name = button.dataset.name || 'Puffco';
         const address = button.dataset.address || '';
         document.getElementById('device-name').value = address || name;
         const macToggle = document.getElementById('use-mac-address');
@@ -3326,7 +4011,8 @@ const app = (() => {
         setTimeout(() => connectDevice(), 50);
       });
     });
-    appendLog(`Found ${devices.length} Peak Pro candidate${devices.length === 1 ? '' : 's'} with ${data?.manufacturer_prefix || PEAK_PRO_MAC_PREFIX}`, 'success');
+    const extra = filteredOut ? ` (${filteredOut} non-matching BLE device${filteredOut === 1 ? '' : 's'} hidden)` : '';
+    appendLog(`Found ${devices.length} Puffco device${devices.length === 1 ? '' : 's'} with MAC prefix ${prefixLabel}${extra}`, 'success');
   }
 
   function refreshStatus() {
@@ -3914,6 +4600,63 @@ const app = (() => {
     if (!payload.heat_report) {
       payload.heat_report = buildClientHeatReport(payload);
     }
+    // Bridge mode keeps the OFFICIAL_ATTRIBUTE_SPECS reads under
+    // data.official_attributes. Web Bluetooth mode flattens them at
+    // read time. Unify the two so the rest of the app can stay transport-
+    // agnostic and the new hardware-diagnostics stat-* fields always
+    // see a flat payload.
+    const official = payload.official_attributes;
+    if (official && typeof official === 'object') {
+      const map = {
+        mode: 'mode',
+        lowBatteryIndicator: 'low_battery_indicator',
+        chargeSource: 'charge_source',
+        chargeCurrent: 'charge_current_a',
+        chargeElapsedTime: 'charge_elapsed_time_s',
+        batteryCapacity: 'battery_capacity',
+        batteryCurrent: 'battery_current_a',
+        batteryVoltage: 'battery_voltage_v',
+        batteryTemperature: 'battery_temperature_c',
+        heaterPower: 'heater_power_w',
+        heaterResistance: 'heater_resistance_ohm',
+        heaterVoltage: 'heater_voltage_v',
+        cableHandshakeDetected: 'cable_handshake_detected',
+        faultEndIndex: 'fault_end_index',
+        dateOfBirth: 'date_of_birth_unix',
+        utcTime: 'utc_time_unix',
+        dabTotalTime: 'dab_total_time_s',
+      };
+      Object.entries(map).forEach(([src, dst]) => {
+        if (payload[dst] == null && official[src] != null) payload[dst] = official[src];
+      });
+      // BLE fault counts are nested objects: data.official_attributes.bleFault.absoluteCount
+      if (official.bleFault && typeof official.bleFault === 'object') {
+        if (payload.ble_fault_absolute_count == null && official.bleFault.absoluteCount != null) {
+          payload.ble_fault_absolute_count = official.bleFault.absoluteCount;
+        }
+        if (payload.ble_fault_credit_count == null && official.bleFault.creditCount != null) {
+          payload.ble_fault_credit_count = official.bleFault.creditCount;
+        }
+      }
+    }
+    // Derived fields computed from the flat payload. These are simple
+    // honest derivations, not faked sensors.
+    if (payload.battery_voltage_v != null && payload.battery_current_a != null && payload.charge_rate_w == null) {
+      payload.charge_rate_w = Math.round(Math.abs(payload.battery_voltage_v * payload.battery_current_a) * 10) / 10;
+    }
+    if (payload.cable_handshake_detected != null && payload.cable_attached == null) {
+      payload.cable_attached = payload.cable_handshake_detected !== 0;
+    }
+    if (payload.date_of_birth_unix != null && payload.date_of_birth_unix > 0 && payload.days_owned == null) {
+      payload.days_owned = Math.max(0, Math.floor((Date.now() / 1000 - payload.date_of_birth_unix) / 86400));
+    }
+    if (payload.utc_time_unix != null && payload.utc_time_unix > 0 && payload.device_utc_time == null) {
+      payload.device_utc_time = new Date(payload.utc_time_unix * 1000)
+        .toISOString().replace('T', ' ').replace(/\..+$/, '');
+    }
+    if (payload.dab_total_time_s != null && payload.total_dabs > 0 && payload.avg_seconds_per_dab == null) {
+      payload.avg_seconds_per_dab = Math.round(payload.dab_total_time_s / payload.total_dabs);
+    }
     return payload;
   }
 
@@ -4180,6 +4923,191 @@ const app = (() => {
       btn.textContent = 'Loading...';
     }
     requestLoraxRegistry(true);
+  }
+
+  // ---- Dynamic inhale + heater sensor path probes ----
+  //
+  // These quick-action helpers let you verify a Lorax path is actually
+  // reachable on the connected device, not just present in the
+  // registry. The dynamic inhale path (/p/app/htr/inh) is in the
+  // OFFICIAL spec but the firmware may not respond on every Puffco
+  // model — the test prints what came back so the user can see
+  // whether their hardware exposes it.
+  const DYNAMIC_INHALE_TEST_PATHS = [
+    { path: '/p/app/htr/inh',  name: 'dynamic_inhale',         encoding: 'float32', category: 'heater' },
+    { path: '/p/app/htr/draw', name: 'draw_strength',          encoding: 'float32', category: 'heater' },
+    { path: '/p/app/htr/air',  name: 'heater_airflow',         encoding: 'float32', category: 'heater' },
+    { path: '/p/htr/air',      name: 'raw_airflow',            encoding: 'float32', category: 'heater' },
+    { path: '/p/htr/flow',     name: 'raw_flow',               encoding: 'float32', category: 'heater' },
+  ];
+  const HEATER_SENSOR_TEST_PATHS = [
+    { path: '/p/htr/pwr',  name: 'heater_power',        encoding: 'float32' },
+    { path: '/p/htr/res',  name: 'heater_resistance',   encoding: 'float32' },
+    { path: '/p/htr/vavg', name: 'heater_voltage',      encoding: 'float32' },
+    { path: '/p/htr/temp', name: 'heater_temperature',  encoding: 'float32' },
+    { path: '/p/htr/tcmd', name: 'heater_target_temperature', encoding: 'float32' },
+  ];
+
+  function setLoraxQuickActionsStatus(text, kind = '') {
+    const el = document.getElementById('lorax-quick-actions-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'lorax-quick-actions-status' + (kind ? ' ' + kind : '');
+  }
+
+  function formatLoraxReadValue(data) {
+    if (!data) return 'no response';
+    if (data.error) return `error: ${data.error}`;
+    if (data.value != null && data.value !== '') {
+      const hex = Array.isArray(data.bytes)
+        ? data.bytes.map(b => (b & 0xff).toString(16).padStart(2, '0')).join(' ')
+        : null;
+      return hex ? `${data.value} (bytes: ${hex})` : String(data.value);
+    }
+    if (data.raw != null) return `raw: ${data.raw}`;
+    return 'no value returned';
+  }
+
+  // Latest run summary, kept around so the user can copy the full
+  // path-by-path result set with a single click. Cleared at the start
+  // of every test so a stale "last run" doesn't leak into the next.
+  let latestLoraxTestSummary = '';
+  let latestLoraxTestLabel = '';
+
+  function buildLoraxTestSummary(label, rows) {
+    const header = [
+      `PuffcoBLE Lorax path test — ${label}`,
+      `Time: ${new Date().toISOString()}`,
+      `Transport: ${transportMode === 'browser_ble' ? 'Browser Bluetooth' : 'Local bridge'}`,
+      '',
+      ...rows.map((r) => {
+        const result = r.result == null ? 'timeout' : formatLoraxReadValue(r.result);
+        return `${r.path}  (${r.name}, ${r.encoding})  =  ${result}`;
+      }),
+    ];
+    return header.join('\n');
+  }
+
+  function setLatestLoraxTestSummary(label, rows) {
+    latestLoraxTestLabel = label;
+    latestLoraxTestSummary = buildLoraxTestSummary(label, rows);
+    // Reflect "ready to copy" state in the UI.
+    const btn = document.getElementById('btn-lorax-test-copy');
+    if (btn) {
+      btn.disabled = !latestLoraxTestSummary;
+      btn.classList.toggle('hidden', !latestLoraxTestSummary);
+      btn.title = latestLoraxTestSummary
+        ? `Copy the latest ${label} results to the clipboard`
+        : '';
+    }
+  }
+
+  // Sends a sequence of read requests and aggregates the results. Each
+  // path test writes a row into the status line, then appends a single
+  // summary row to the activity log so the user can see history.
+  function runLoraxPathTests(paths, label) {
+    if (!connected) {
+      setLoraxQuickActionsStatus('Connect to a device first', 'warn');
+      toast('Connect to a Puffco before running path tests', 'error');
+      return;
+    }
+    setLoraxQuickActionsStatus(`Testing ${paths.length} ${label}…`, 'busy');
+    // Clear the cached summary so a stale "last run" can't be copied
+    // mid-test.
+    latestLoraxTestSummary = '';
+    const copyBtn = document.getElementById('btn-lorax-test-copy');
+    if (copyBtn) {
+      copyBtn.disabled = true;
+      copyBtn.classList.add('hidden');
+    }
+    appendLog(`Probing ${label} on device:`, 'info');
+    let outstanding = paths.length;
+    const rows = paths.map((entry) => ({ ...entry, result: null }));
+    const finish = () => {
+      const summary = rows.map((r) => `${r.path} = ${r.result == null ? 'timeout' : formatLoraxReadValue(r.result)}`).join('\n');
+      setLoraxQuickActionsStatus(`${rows.length} tested`, 'done');
+      appendLog(`${label} probe complete:\n${summary}`, rows.every((r) => r.result && !r.result.error) ? 'success' : 'warn');
+      setLatestLoraxTestSummary(label, rows);
+    };
+    let timer = window.setTimeout(() => {
+      outstanding = 0;
+      finish();
+    }, 4000);
+    paths.forEach((entry, idx) => {
+      const queued = send('lorax_read', { path: entry.path, size: 4, type: entry.encoding });
+      if (!queued) {
+        rows[idx].result = { error: 'send failed (no transport)' };
+        outstanding -= 1;
+        if (outstanding <= 0) {
+          window.clearTimeout(timer);
+          finish();
+        }
+        return;
+      }
+      const onResponse = (data) => {
+        if (!data || data.path !== entry.path) return false;
+        rows[idx].result = data;
+        outstanding -= 1;
+        if (outstanding <= 0) {
+          window.clearTimeout(timer);
+          finish();
+        }
+        return true;
+      };
+      pendingLoraxTestResponses.push(onResponse);
+    });
+  }
+
+  async function copyLoraxTestResults() {
+    if (!latestLoraxTestSummary) {
+      toast('Run a path test first, then copy', 'info');
+      return;
+    }
+    const text = latestLoraxTestSummary;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // Fallback for non-secure contexts: a hidden textarea + execCommand.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      toast(`Copied ${latestLoraxTestLabel} results`, 'success');
+      appendLog(`Copied ${latestLoraxTestLabel} results to clipboard (${text.length} chars)`, 'success');
+    } catch (err) {
+      toast('Clipboard copy failed', 'error');
+      appendLog(`Clipboard copy failed: ${err?.message || err}`, 'error');
+    }
+  }
+
+  const pendingLoraxTestResponses = [];
+
+  function testDynamicInhalePath() {
+    runLoraxPathTests(DYNAMIC_INHALE_TEST_PATHS, 'dynamic inhale / airflow paths');
+  }
+
+  function testHeaterSensorPaths() {
+    runLoraxPathTests(HEATER_SENSOR_TEST_PATHS, 'heater sensor paths');
+  }
+
+  // Called by the central message handler when a lorax_read response
+  // arrives. Lets pending path tests match their target path and
+  // remove themselves.
+  function consumeLoraxTestResponse(data) {
+    for (let i = 0; i < pendingLoraxTestResponses.length; i += 1) {
+      if (pendingLoraxTestResponses[i](data)) {
+        pendingLoraxTestResponses.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
   }
 
   function requestLoraxRegistry(force = false) {
@@ -4553,6 +5481,12 @@ const app = (() => {
 
   function handleLoraxRead(data) {
     if (!data) return;
+    // Quick-action path tests (testDynamicInhalePath, testHeaterSensorPaths)
+    // register a one-shot listener before sending the read. If a test
+    // claimed this response, skip the global handler.
+    if (typeof consumeLoraxTestResponse === 'function' && consumeLoraxTestResponse(data)) {
+      return;
+    }
     const normalized = {
       ...data,
       value: data.value ?? data.decoded,
@@ -4784,20 +5718,20 @@ const app = (() => {
     if (!hasUserActivation) {
       const message = 'Chrome requires one page tap before it can show Bluetooth devices.';
       setVoiceBluetoothPrompt(true, message);
-      updateVoiceUI('Tap Open Chooser');
-      setVoiceTranscript(`Heard: ${text} · Bluetooth chooser queued`, true);
-      appendLog('Voice queued Bluetooth chooser; browser requires a trusted tap to open it.', 'warn');
+      updateVoiceUI('Tap Find Device');
+      setVoiceTranscript(`Heard: ${text} · find device queued`, true);
+      appendLog('Voice queued Find Device; browser requires a trusted tap to open it.', 'warn');
       return true;
     }
     setVoiceBluetoothPrompt(false);
-    updateVoiceUI('Opening Bluetooth chooser');
-    setVoiceTranscript('Opening Bluetooth chooser for Peak Pro', true);
+    updateVoiceUI('Finding device');
+    setVoiceTranscript('Finding Puffco device', true);
     connectDevice();
     return true;
   }
 
   function openBluetoothFromVoice() {
-    const text = voiceBluetoothPending ? 'queued bluetooth selector' : 'open bluetooth selector';
+    const text = voiceBluetoothPending ? 'queued find device' : 'find device';
     lastVoiceCommandText = '';
     lastVoiceCommandAt = 0;
     updateVoicePreview(text, null);
@@ -4816,32 +5750,16 @@ const app = (() => {
   // the transcript without firing the action.
   const VOICE_COMMANDS = [
     {
-      id: 'mode_browser_ble',
-      label: 'Switch to browser Bluetooth',
-      icon: 'bt',
-      match: /\b(?:browser|web)\s*(?:bluetooth|ble)(?:\s*mode)?\b/,
-      run: () => { setTransportMode('browser_ble'); return { ok: true, detail: 'Browser Bluetooth mode' }; },
-    },
-    {
-      id: 'mode_bridge',
-      label: 'Switch to bridge mode',
-      icon: 'bridge',
-      match: /\b(?:local|windows|backend|bridge)\s*(?:bridge|mode)?\b/,
-      run: () => { setTransportMode('bridge'); return { ok: true, detail: 'Bridge mode' }; },
-    },
-    {
-      id: 'connect',
-      label: 'Open Bluetooth chooser',
+      id: 'find_device',
+      label: 'Find device',
       icon: 'bt',
       match: (text) => (
-        /\b(?:open|show|start|launch)\s+(?:the\s+)?(?:bluetooth|ble)\s*(?:selector|chooser|pairing)?\b/.test(text)
-        || /\b(?:connect|pair|find|scan|search)\b.*\b(?:peak|peak\s*pro|puffco|device|bluetooth|ble)\b/.test(text)
+        /\b(?:find|scan|search)\b.*\b(?:peak|peak\s*pro|puffco|device)\b/.test(text)
         || /\b(?:scan|find|search)\s*(?:devices?|peak|puffco)?\b/.test(text)
-        || /\b(?:connect|pair)\b/.test(text)
       ) ? [text] : null,
       run: (text) => {
         const accepted = runVoiceConnect(text);
-        return { ok: accepted, detail: accepted ? 'Bluetooth chooser open' : 'Bluetooth chooser blocked' };
+        return { ok: accepted, detail: accepted ? 'Find device started' : 'Find device blocked' };
       },
     },
     {
@@ -5591,91 +6509,41 @@ const app = (() => {
   function wireCardDragHandlers() {
     const container = getCardOrderContainer();
     if (!container) return;
-    let dragging = null;
-    let lastZone = null;
-
-    function setDropZone(target, zone) {
-      if (!target) return;
-      if (lastZone && lastZone !== target) {
-        lastZone.removeAttribute('data-drop-zone');
-      }
-      if (zone) {
-        target.setAttribute('data-drop-zone', zone);
-      } else {
-        target.removeAttribute('data-drop-zone');
-      }
-      lastZone = zone ? target : null;
-    }
-
-    function clearAllDropZones() {
-      Array.from(container.children).forEach((el) => {
-        el.removeAttribute('data-drop-zone');
-      });
-      lastZone = null;
-    }
-
-    function isCard(el) {
-      return el && el.parentNode === container && el.getAttribute('data-card-id');
-    }
-
-    function midpointOf(el) {
-      const rect = el.getBoundingClientRect();
-      return rect.top + rect.height / 2;
-    }
-
-    Array.from(container.children).forEach((el) => {
-      if (!el.getAttribute || !el.getAttribute('data-card-id')) return;
-      el.setAttribute('data-draggable', 'true');
-      el.setAttribute('draggable', 'true');
-
-      el.addEventListener('dragstart', (event) => {
-        dragging = el;
-        el.setAttribute('data-dragging', 'true');
+    if (typeof Sortable === 'undefined') return;
+    // Idempotent: if a previous init already wired Sortable on this
+    // container, do nothing.
+    if (container.__sortableCardInstance) return;
+    // Only the elements that carry data-card-id are draggable. The
+    // sort guide, header, nav, and other siblings stay put.
+    const instance = Sortable.create(container, {
+      animation: 160,
+      draggable: '[data-card-id]',
+      filter: '.sort-guide, .app-header, .app-menu, .app-footer, script, style',
+      preventOnFilter: true,
+      ghostClass: 'card-drag-ghost',
+      chosenClass: 'card-drag-chosen',
+      dragClass: 'card-drag-active',
+      forceFallback: false,
+      onStart(evt) {
         container.classList.add('is-dragging');
-        try {
-          event.dataTransfer.effectAllowed = 'move';
-          event.dataTransfer.setData('text/plain', el.getAttribute('data-card-id'));
-        } catch (_) { /* some browsers throw on setData without data */ }
-      });
-
-      el.addEventListener('dragend', () => {
-        if (el) el.removeAttribute('data-dragging');
+        try { evt.item.setAttribute('data-dragging', 'true'); } catch (_) { /* ignore */ }
+      },
+      onEnd(evt) {
         container.classList.remove('is-dragging');
-        clearAllDropZones();
-        dragging = null;
-      });
-
-      el.addEventListener('dragover', (event) => {
-        if (!dragging || dragging === el) return;
-        event.preventDefault();
-        try { event.dataTransfer.dropEffect = 'move'; } catch (_) { /* ignore */ }
-        const mid = midpointOf(el);
-        const zone = event.clientY < mid ? 'above' : 'below';
-        setDropZone(el, zone);
-      });
-
-      el.addEventListener('dragleave', () => {
-        if (lastZone === el) setDropZone(el, null);
-      });
-
-      el.addEventListener('drop', (event) => {
-        if (!dragging || dragging === el) return;
-        event.preventDefault();
-        const mid = midpointOf(el);
-        const zone = lastZone || (event.clientY < mid ? 'above' : 'below');
-        if (zone === 'above') {
-          container.insertBefore(dragging, el);
-        } else {
-          const after = el.nextSibling;
-          container.insertBefore(dragging, after);
-        }
-        clearAllDropZones();
+        try { evt.item.removeAttribute('data-dragging'); } catch (_) { /* ignore */ }
+        // Persist the new order and flash the moved card.
         persistCardOrderFromDom();
-        flashCardSnap(dragging);
+        flashCardSnap(evt.item);
         updateCardMoveButtonStates();
-        dragging = null;
-      });
+        if (typeof announceSortChange === 'function') {
+          const names = Array.from(container.children)
+            .filter((el) => el.getAttribute && el.getAttribute('data-card-id'))
+            .map((el, i) => `${i + 1}. ${el.getAttribute('data-card-id')}`);
+          announceSortChange(`Card order updated. ${names.join(', ')}`);
+        }
+      },
     });
+    container.__sortableCardInstance = instance;
   }
 
   function initCardOrder() {
@@ -5713,9 +6581,76 @@ const app = (() => {
     applyCardOrder(defaults);
     persistCardOrderFromDom();
     updateCardMoveButtonStates();
+    // Re-show the sort guide so the user knows how the feature works
+    // again after a reset.
+    showSortGuide();
     if (typeof toast === 'function') {
       toast('Card layout reset to default', 'success');
     }
+  }
+
+  // ---- Sort guide banner ----
+  // The banner tells the user they can drag cards to reorder. The
+  // dismissed state is persisted in localStorage so the tip doesn't
+  // come back on every page load once the user has seen it.
+
+  const SORT_GUIDE_KEY = 'puffco:sort-guide-dismissed';
+
+  function isSortGuideDismissed() {
+    try { return localStorage.getItem(SORT_GUIDE_KEY) === '1'; }
+    catch (_) { return false; }
+  }
+
+  function setSortGuideDismissed(value) {
+    try {
+      if (value) localStorage.setItem(SORT_GUIDE_KEY, '1');
+      else localStorage.removeItem(SORT_GUIDE_KEY);
+    } catch (_) { /* ignore */ }
+  }
+
+  function syncSortGuideVisibility() {
+    const el = document.getElementById('sort-guide');
+    if (!el) return;
+    el.classList.toggle('is-hidden', isSortGuideDismissed());
+  }
+
+  function dismissSortGuide() {
+    setSortGuideDismissed(true);
+    syncSortGuideVisibility();
+    if (typeof toast === 'function') {
+      toast('Sort guide dismissed — drag the cards any time', 'info');
+    }
+  }
+
+  function showSortGuide() {
+    setSortGuideDismissed(false);
+    syncSortGuideVisibility();
+  }
+
+  // Polite live region for screen-reader announcements about
+  // reordering. Created lazily so the DOM stays clean until the
+  // first reorder happens.
+  let sortAnnounceRegion = null;
+  function ensureSortAnnounceRegion() {
+    if (sortAnnounceRegion && document.body.contains(sortAnnounceRegion)) {
+      return sortAnnounceRegion;
+    }
+    const el = document.createElement('div');
+    el.id = 'sort-announce';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    el.setAttribute('aria-atomic', 'true');
+    el.style.cssText = 'position:fixed;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);';
+    document.body.appendChild(el);
+    sortAnnounceRegion = el;
+    return el;
+  }
+  function announceSortChange(message) {
+    const el = ensureSortAnnounceRegion();
+    // Toggle textContent to retrigger the live region announcement
+    // even when the new value is the same as the old.
+    el.textContent = '';
+    setTimeout(() => { el.textContent = String(message || ''); }, 30);
   }
 
   // ---- Round 2 polish: draw-sensor presentation ----
@@ -5831,6 +6766,7 @@ const app = (() => {
     });
     restoreBrowserDebugLog();
     const savedName = localStorage.getItem('puffco_device_name');
+    const savedMac = localStorage.getItem('puffco_device_mac');
     bridgeUrl = normalizeBridgeUrl(localStorage.getItem('puffco_bridge_url'));
     transportMode = normalizeTransportMode(localStorage.getItem('puffco_transport_mode') || defaultTransportMode());
     initThemeSystem();
@@ -5840,7 +6776,7 @@ const app = (() => {
     if (macToggle) macToggle.addEventListener('change', toggleMacAddressMode);
     const identityInput = document.getElementById('device-name');
     if (identityInput) {
-      identityInput.value = savedMacMode ? (savedMac || '') : (savedName || 'Peak');
+      identityInput.value = savedMacMode ? (savedMac || '') : (savedName || 'Puffco');
     }
     syncIdentityModeUI();
     localMoodPresets = readMoodLibrary();
@@ -5854,6 +6790,7 @@ const app = (() => {
     initAppNavigation();
     initLabelTooltips();
     initColorControls();
+    syncSortGuideVisibility();
     const profileImport = document.getElementById('profile-import-file');
     if (profileImport) {
       profileImport.addEventListener('change', () => importProfileFile(profileImport.files?.[0]));
@@ -5899,11 +6836,17 @@ const app = (() => {
     refreshStatus,
     rescanDrawStrength,
     clearDrawStrengthSource,
+    redetectDynamicInhale,
     resetCardOrder,
+    dismissSortGuide,
+    showSortGuide,
     resetDrawSessionCount,
     toggleSettings,
     selectProfile,
     editProfile,
+    addNewProfile,
+    resetCurrentProfile,
+    deleteCurrentProfile,
     closeModal,
     saveProfile,
     exportProfiles,
@@ -5968,6 +6911,18 @@ const app = (() => {
     copyBrowserDebugLog,
     downloadBrowserDebugLog,
     getBrowserBle,
+    _filterPuffcoScanDevices: filterPuffcoScanDevices,
+    _matchesPuffcoManufacturerPrefix: matchesPuffcoManufacturerPrefix,
+    // Quick-action path tests for the Lorax inspector. The user can
+    // hit "Test dynamic inhale" to verify /p/app/htr/inh and the
+    // related airflow paths are reachable on their hardware, since
+    // the OFFICIAL spec lists them but the firmware may not respond
+    // on every Puffco model.
+    testDynamicInhalePath,
+    testHeaterSensorPaths,
+    runLoraxPathTests,
+    consumeLoraxTestResponse,
+    copyLoraxTestResults,
     // Test hook for the draw-sensor wiring (also used by the
     // smoke test in tools/draw_sensor_smoke.js).
     _simulateDrawStrength: (state) => updateDrawStrengthUI(state),

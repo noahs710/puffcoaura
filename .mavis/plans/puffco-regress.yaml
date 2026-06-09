@@ -1,0 +1,531 @@
+version: 1
+plan:
+  name: 'PuffcoBLE: restore regressed status fields, full profile editor, and drag-and-drop'
+  max_concurrency: 4
+  max_consecutive_failures: 2
+  max_cycles: 8
+  auto_reject_retries: 1
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: status-rendering
+    title: 'Restore status field rendering, profile selector, draw strength, and brightness'
+    assigned_to: coder
+    verified_by: verifier
+    max_retries: 2
+    prompt: |
+      Workspace: C:\PuffcoBLE. This is an open-source Web Bluetooth PWA. Do NOT touch
+      ble-client.js (locked) and do NOT touch Sortable.min.js script tag or drag/drop
+      CSS — that is owned by a parallel track. Do NOT touch the profile modal section
+      (openProfileModal, closeProfileModal, closeModal, saveProfile, applyModalColor,
+      any function with "Mood" or "Library" in its name) — that is owned by the
+      "profile-editor" track. You may freely edit everything else in app.js
+      (renderSnapshot, setDisconnectedUi, renderProfiles, cardHtml, setConnectedUi,
+      connect, disconnect, heat, stop, boost, brightnessValue, applyBrightness,
+      updateAllBrightness, updateSliderLabel, toggleLantern, toggleStealth,
+      startPolling, stopPolling, onGattDisconnected, plus new helpers you add).
+
+      Run `node --check app.js` before declaring done.
+
+      Symptoms to fix (all in app.js; the HTML slots already exist):
+
+      1. Target / Timer / Vapor / Time remaining are blank.
+         The hero strip has #hero-target-temp, #hero-heat-timer, #hero-vapor.
+         The live panel has #heat-countdown, #heat-live-phase. The session metrics
+         strip has #session-remaining. The status grid has #stat-vapor. Fill all of
+         them in renderSnapshot() and on the polling tick.
+
+         - Target temp: data.target_temperature_f (already used for heat-live-target
+           and hero-target-temp — reuse the helper).
+         - Timer / countdown: derive from data.state and data.active_profile_time_s.
+           If state is HEAT_CYCLE_PREHEAT or HEAT_CYCLE_ACTIVE, show the remaining
+           time as the active profile duration. If data does not include
+           active_profile_time_s, fall back to the matching entry in
+           data.profiles[activeIdx].time_s. While idle, show "Idle".
+         - Vapor: ble-client.js snapshot does not include a vapor field. The
+           profile editor modal uses `modal-vapor` (a select with values standard,
+           high, max, xl). The active profile's vapor setting should be read from
+           data.profiles[activeIdx].vapor when the device reports it, else default
+           to "standard". If ble-client truly does not expose it yet, hardcode
+           "standard" with a TODO comment and do NOT fabricate readings. Show
+           "Balanced" as the human label.
+         - Time remaining: same as Timer above; bind to #session-remaining.
+
+      2. Chamber recognition not working.
+         Status grid has #stat-chamber. If the device exposes chamber info (check
+         data.chamber or data.attachment or fall back to "Standard" / "XL" based on
+         any chamber-style field), render it. If ble-client.js does NOT expose
+         chamber yet, render "Standard chamber" as a sensible default with a TODO
+         comment — do not leave it blank. Never fake a temperature.
+
+      3. Brightness not working.
+         Status grid has #stat-led-brightness. The brightness sliders
+         (#slider-all, #slider-base, #slider-mid, #slider-glass, #slider-logo) are
+         bound to per-channel values. ble-client.js does not return a current
+         brightness reading. The fix is:
+           - Show "All LEDs: <pct>%" (or "Per-channel: base X% · mid Y% · glass Z% ·
+             logo W%") in #stat-led-brightness based on slider positions, so the
+             user always sees what they last set.
+           - On the polling tick, do NOT overwrite the sliders — the slider is the
+             source of truth on the UI (ble-client does not push it back).
+           - Make sure applyBrightness() runs on slider input (it does — keep the
+             existing oninput wiring).
+           - When the user changes a single per-channel slider
+             (#slider-base/mid/glass/logo), call applyBrightness() with that
+             channel as the dominant one (base/mid/glass/logo) and the others
+             taken from #slider-all, so the device receives a per-channel
+             command. Currently updateSliderLabel only updates the label; extend
+             it to also call applyBrightness() with the new per-channel value.
+
+      4. Last connected not working.
+         Status grid has #stat-last-connected. Persist the timestamp of the last
+         successful connect() (when result.type === "connected") to
+         localStorage["puffco:last-connected"]. Read it on bootstrap and render
+         it in #stat-last-connected as a localized date/time. Update it again on
+         every successful connect. Do not write to it on disconnect.
+
+      5. Profiles selector is broken.
+         Clicking a profile card should fire `app.selectProfile(index)` (a NEW
+         public function you add). That function must call `send("select_profile",
+         { index })`. On every successful select_profile round-trip (when the
+         snapshot returns), the matching card must get the `.active` class and
+         every other card must lose it. The current code adds the active class
+         based on p.active from the snapshot; verify the snapshot actually
+         includes an `active: true` field on the selected profile. If ble-client
+         does not, derive it: the card whose index === data.current_profile
+         is active. Fix renderProfiles() to honour that.
+
+         Also wire a "Save & Activate" affordance: the modal already has buttons
+         labelled "Save" and "Save & Activate" calling app.saveProfile() and
+         app.saveProfile(true). Do not modify saveProfile itself, but make sure
+         selectAfter=true actually calls send("select_profile", { index }) after
+         send("set_profile", ...) returns. If the current saveProfile does not
+         do that, the parallel "profile-editor" track owns that file. Post a
+         note in the deliverable if the integration needs the editor track to
+         add the select-after-save.
+
+      6. Dynamic inhale indicator does not work.
+         The draw strength panel is in the HTML (#draw-strength-panel,
+         #draw-strength-label, #draw-strength-fill, #draw-strength-source,
+         #draw-sensor-chip, #draw-sensor-chip-label). ble-client.js does not
+         currently expose a draw_strength reading. Build a minimal viable
+         implementation:
+           - Add a function `tickDrawStrength()` that runs every 2 s alongside
+             the status poll.
+           - If `data.draw_strength` exists, use it (0-1). Otherwise, set the
+             bar width to 0 and the label to "Idle". Do NOT fabricate values.
+           - Update the chip (#draw-sensor-chip) to show "Inhale sensor:
+             listening" when connected and "—" when not.
+           - The "Rescan" / "Clear pinned" buttons may stay as toast stubs (that
+             is a separate feature).
+
+      7. Keep all existing behaviour: toast, activity log, polling,
+         ble-client.js command surface (connect, disconnect, status, heat, stop,
+         boost, set_boost_options, select_profile, set_profile, set_color,
+         brightness, lantern, stealth), GATT disconnect handling.
+
+      8. No redundant code. Do not add a second DOM helper, a second polling
+         loop, a second copy of formatTempF, etc. Reuse what's there.
+
+      9. Add `app.selectProfile = selectProfile` to the `realApp` object inside
+         init() (alongside the other exports), so inline onclick handlers can
+         call it.
+
+      Deliverable: write a short deliverable.md (under 60 lines) in the team
+      outputs directory describing: which IDs you wired, the new helpers you
+      added (with one-line purpose each), the localStorage key for last
+      connected, and the TODOs you left for ble-client or the editor track.
+    verify_prompt: |
+      Workspace: C:\PuffcoBLE. Run these checks and PASS/FAIL each:
+
+      1. Syntax: `node --check app.js` exits 0. (FAIL if not.)
+      2. Grep that each previously-blank ID is now referenced as setText target
+         (case-sensitive) inside app.js:
+            stat-vapor, stat-chamber, stat-led-brightness, stat-last-connected,
+            hero-vapor, hero-heat-timer, heat-countdown, session-remaining,
+            draw-sensor-chip, draw-sensor-chip-label, draw-strength-label,
+            draw-strength-fill, draw-strength-source.
+         (PASS if all 12 are present. FAIL with the missing list.)
+      3. Verify `app.selectProfile` is exposed in the realApp object inside
+         init() (search for `selectProfile` in app.js). FAIL if missing.
+      4. Verify renderProfiles() sets the `.active` class on the card whose
+         index matches data.current_profile. Read the function and confirm.
+         FAIL if the active class is only ever assigned from p.active without
+         a fallback.
+      5. Confirm `puffco:last-connected` localStorage key is written on
+         successful connect and read on bootstrap. FAIL if missing.
+      6. Confirm no edit was made to ble-client.js (`git diff ble-client.js`
+         returns empty), the profile modal section (openProfileModal etc.
+         unchanged), or the Sortable drag/drop script tag. FAIL if any of
+         those were touched.
+      7. Confirm there is no second polling loop, no duplicate formatTempF,
+         no duplicate $ helper. PASS if all unique.
+      8. Spot-check: open the file, count functions. There should be no
+         near-duplicate function bodies. FAIL if you see obvious copy-paste.
+
+      Report PASS/FAIL with the specific check number and the evidence line.
+
+  - id: profile-editor
+    title: 'Wire the full-featured profile editor modal (vapor, mood, color library)'
+    assigned_to: coder
+    verified_by: verifier
+    max_retries: 2
+    prompt: |
+      Workspace: C:\PuffcoBLE. Open-source Web Bluetooth PWA. Do NOT touch
+      ble-client.js (locked), the Sortable drag/drop script/CSS, or the
+      status rendering functions (renderSnapshot, setDisconnectedUi,
+      renderProfiles, cardHtml, draw strength helpers, brightness helpers,
+      connect, disconnect, heat, stop, boost, polling) — that is owned by the
+      "status-rendering" track.
+
+      You OWN the profile modal section in app.js:
+        - openProfileModal()
+        - closeProfileModal()
+        - closeModal()
+        - saveProfile()
+        - applyModalColor()
+        - escapeHtml() (only the new code you add inside the modal flow)
+        - Any new helper functions scoped to the editor (mood library,
+          color swatches, vapor presets, dynamic inhale checkbox).
+
+      You MAY add a script block to index.html inside the <div id="profile-modal">
+      IF a helper variable (e.g. modal-color wheel live update) is cleaner
+      there; but prefer to keep it all in app.js. You MAY add CSS to style.css
+      for any new visual element you need, but keep it minimal — reuse the
+      existing .dial-field, .vapor-field, .mood-* classes that are already
+      present.
+
+      Run `node --check app.js` before declaring done.
+
+      The modal HTML (see index.html around line 943) already has every control
+      wired up by ID. The current app.js opens the modal but only fills in
+      name, temp, time, and color. You must:
+
+      1. Vapor control (#modal-vapor).
+         - On openProfileModal(), if the active profile (look up
+           data.profiles[activeIdx].vapor) has a vapor value, select it.
+           Default to "standard" if not present.
+         - The four options are: standard, high, max, xl.
+         - On saveProfile(), include `vapor: $("modal-vapor").value` in the
+           params to send("set_profile", {...}). ble-client.js does not yet
+           accept vapor; that is fine — it will be ignored, but the value
+           must be in the payload so the contract is forward-compatible.
+         - Render the human label into #stat-vapor (NO — that's the
+           status-rendering track; DO NOT touch stat-vapor). Just populate
+           the modal select.
+         - Render the human label in the modal under the select using
+           #modal-vapor-presets. Use the existing .vapor-presets container:
+           show four small chips ("Balanced", "High", "Max", "XL") with the
+           active one highlighted, click to set the select. CSS for
+           .vapor-preset already exists in style.css.
+
+      2. Color picker (#modal-color, #color-wheel, #hex-input, #color-preview,
+         #modal-color-preview, #modal-color-swatch).
+         - The existing applyModalColor() syncs the live preview to #modal-color
+           and pushes the color to the device. Extend it to also keep
+           #color-wheel and #hex-input in sync.
+         - On openProfileModal(), set #color-wheel and #hex-input to the
+           profile's color_hex. On user input to any of the three, sync the
+           other two and the preview swatches.
+         - Validate hex input: 6 hex digits prefixed with #, fall back to the
+           last valid value on blur if invalid.
+
+      3. Color library / swatches (#color-swatches).
+         - Define a small palette (8-12 colors) — use the existing design
+           system accents: teal, orange, violet, pink, cyan, gold, plus
+           a few extras like emerald, amber, indigo, rose.
+         - Render them as buttons in #color-swatches. Clicking a swatch
+           sets the modal color to that hex, syncs the inputs, and pushes
+           the color to the device.
+
+      4. Mood preset library (#mood-presets, #mood-name, save/delete/export/
+         import/defaults, #mood-import-file).
+         - Maintain a mood library in localStorage["puffco:moods"] as
+           `[{ name, color, secondColor?, vapor?, tempo?, dynamic? }, ...]`.
+         - Render the library as cards in #mood-presets. Each card has the
+           preset name, a color dot, and Delete. Clicking the card applies
+           the preset to the modal (sets #modal-color, #modal-vapor, the
+           mood tempo, and the dynamic inhale checkbox).
+         - "Save Mood" (#mood-name + saveMoodPreset()): reads
+           #modal-color, #modal-vapor, #mood-tempo, #mood-dynamic, and the
+           name from #mood-name, pushes to the library, re-renders, persists
+           to localStorage. If name is empty, toast "Enter a mood name"
+           and abort.
+         - "Delete" (deleteMoodPreset()): removes the currently-highlighted
+           mood (track the last clicked mood card index in a module-level
+           variable). Re-render and persist.
+         - "Export" (exportMoods()): download puffco-moods.json with the
+           library.
+         - "Import" (openMoodImport() → #mood-import-file): on change,
+           read the file as JSON, validate shape, merge into the library,
+           persist.
+         - "Defaults" (restoreDefaultMoods()): reset to 4 default moods
+           (e.g. "Sunset" orange, "Ocean" cyan, "Forest" emerald,
+           "Aurora" violet), persist.
+         - All five buttons are already wired to app.saveMoodPreset etc.
+           in index.html; just implement the functions properly.
+
+      5. Mood tempo slider (#mood-tempo) and dynamic inhale checkbox
+         (#mood-dynamic).
+         - On openProfileModal(), populate #mood-tempo with the profile's
+           saved tempo (default 50) and #mood-dynamic with the profile's
+           saved dynamic flag (default false).
+         - On input, update #mood-tempo-value label.
+         - On saveProfile(), include `tempo: Number($("mood-tempo").value)`
+           and `dynamic: $("mood-dynamic").checked` in the payload (will be
+           ignored by ble-client until supported, but the contract is
+           forward-compatible).
+
+      6. "Make active after saving" checkbox (#modal-select).
+         - On openProfileModal(), default to checked.
+         - On saveProfile(selectAfter), use this checkbox as the source of
+           truth for the `select` param, but the existing `selectAfter`
+           argument from the button onclick (true for "Save & Activate",
+           false for "Save") still takes priority. Actually — to keep the
+           existing button behaviour: pass the checkbox value into the
+           select flag when selectAfter is true. (i.e. saveProfile(true)
+           forces select=true regardless of the checkbox.)
+         - Add `app.selectProfile = selectProfile` is NOT your job — the
+           status-rendering track owns that. Just call send("select_profile",
+           { index }) from saveProfile() when selectAfter is true.
+
+      7. Cancel button: app.closeModal() → closeProfileModal() — already
+         works. Make sure ESC key and backdrop click also close the modal.
+
+      8. No redundant code. Reuse the existing cardHtml pattern only if
+         you actually need it for mood cards; otherwise build a simple
+         string template. Do not duplicate formatTempF or the $ helper.
+
+      9. Keep file size reasonable (no need to optimize for a hard cap
+         per the user; do avoid obvious duplication).
+
+      Deliverable: a short deliverable.md listing the new helpers, the
+      localStorage key, and any cross-track integration notes (especially
+      around saveProfile + select_after wiring).
+    verify_prompt: |
+      Workspace: C:\PuffcoBLE. PASS/FAIL each check:
+
+      1. `node --check app.js` exits 0.
+      2. The five mood functions exist in app.js and do not all just toast
+         "not yet implemented": `saveMoodPreset`, `deleteMoodPreset`,
+         `exportMoods`, `openMoodImport` (calls click on file input),
+         `restoreDefaultMoods`. FAIL if any is still a stub.
+      3. The saveProfile() function includes `vapor`, `tempo`, `dynamic`
+         in its send("set_profile", ...) payload. FAIL if missing any.
+      4. The saveProfile(selectAfter) function calls
+         `send("select_profile", { index: idx })` when selectAfter is
+         true. FAIL if missing.
+      5. The color picker sync exists: applyModalColor() (or a renamed
+         equivalent) updates #color-wheel and #hex-input. FAIL if missing.
+      6. Vapor presets container #modal-vapor-presets is populated with
+         four chips, and clicking a chip sets the #modal-vapor select.
+         FAIL if missing.
+      7. localStorage key "puffco:moods" is used. FAIL if a different key.
+      8. No edit to ble-client.js, no edit to the status rendering
+         functions (renderSnapshot, setDisconnectedUi, renderProfiles,
+         cardHtml, draw strength, brightness). FAIL if any of those were
+         touched.
+      9. Color swatches container #color-swatches is populated with at
+         least 8 swatches and clicking one updates the modal color.
+         FAIL if missing.
+
+  - id: drag-and-drop
+    title: 'Re-add drag-and-drop card reordering via SortableJS'
+    assigned_to: coder
+    verified_by: verifier
+    max_retries: 1
+    prompt: |
+      Workspace: C:\PuffcoBLE. Open-source Web Bluetooth PWA. Do NOT touch
+      ble-client.js (locked), the status rendering in app.js (owned by
+      status-rendering track), or the profile modal in app.js (owned by
+      profile-editor track).
+
+      You OWN:
+        - The Sortable.min.js script tag in index.html
+        - Any CSS for the drag visual state in style.css
+        - ONE new function in app.js appended to the end of the IIFE,
+          named `initCardDragDrop`, plus the call to it from
+          `init()`'s bootstrap.
+
+      Sortable.min.js (45 KB) is already in tools/Sortable.min.js. Copy it
+      to the project root (C:\PuffcoBLE\Sortable.min.js) and reference it
+      from index.html as `<script src="Sortable.min.js?v=10"></script>`,
+      placed BEFORE the `app.js` script tag.
+
+      The pre-paint code in index.html (lines ~30-80) already implements
+      the localStorage reapply and the html.pre-paint animation suppression
+      — DO NOT touch that. It uses keys `puffco:card-order` and
+      `data-card-order-key` and the container `.app-container`. Your job is
+      to wire SortableJS to that container.
+
+      Implementation:
+
+      1. Add a function at the end of the IIFE in app.js:
+
+         ```
+         function initCardDragDrop() {
+           if (typeof Sortable === 'undefined') return;
+           const container = document.querySelector('.app-container[data-card-order-key]');
+           if (!container) return;
+           Sortable.create(container, {
+             animation: 180,
+             handle: '.card, .advanced-panel',
+             filter: '.no-drag, input, button, select, textarea, a, [contenteditable]',
+             preventOnFilter: false,
+             ghostClass: 'card-drag-ghost',
+             chosenClass: 'card-drag-chosen',
+             dragClass: 'card-drag-active',
+             dataIdAttr: 'data-card-id',
+             onEnd: () => {
+               const order = Array.from(container.children)
+                 .map(el => el.getAttribute('data-card-id'))
+                 .filter(Boolean);
+               try { localStorage.setItem('puffco:card-order', JSON.stringify(order)); } catch (_) {}
+             },
+           });
+         }
+         ```
+
+         Call `initCardDragDrop()` from the existing `init()` function,
+         after the toast('Web Bluetooth requires...') call. Do NOT touch
+         the rest of init().
+
+      2. Add the corresponding CSS to style.css, appended near the end
+         (or in the .card section — your call):
+
+         ```
+         .card-drag-ghost {
+           opacity: 0.4;
+           background: var(--bg-glass-hover);
+           border-style: dashed;
+         }
+         .card-drag-chosen {
+           cursor: grabbing;
+         }
+         .card-drag-active {
+           box-shadow: 0 0 0 2px var(--accent-teal), var(--shadow-glow-teal);
+         }
+         ```
+
+      3. Confirm the existing pre-paint script reads `puffco:card-order`
+         and reorders by data-card-id — it does, so on a page reload the
+         user's saved order is restored before first paint. Do not modify
+         that block.
+
+      4. The resetCardOrder() function in app.js (called from the
+         settings popover) is already there. Confirm it works given your
+         Sortable setup. If it removes the localStorage key and reorders
+         to data-default-order, that is correct — leave it.
+
+      5. Run `node --check app.js` before declaring done.
+
+      Deliverable: a short deliverable.md confirming the file copy
+      (Sortable.min.js is now at project root), the new function name,
+      and the CSS class names.
+    verify_prompt: |
+      Workspace: C:\PuffcoBLE. PASS/FAIL each check:
+
+      1. C:\PuffcoBLE\Sortable.min.js exists at the project root and is
+         non-empty (>10 KB). FAIL if missing.
+      2. index.html has `<script src="Sortable.min.js?v=10"></script>`
+         BEFORE the `app.js` script tag. FAIL if missing or in the wrong
+         order.
+      3. app.js contains a top-level function `initCardDragDrop` (not
+         nested inside another function, and not a const arrow assigned
+         at module level). FAIL if not.
+      4. initCardDragDrop uses `Sortable.create` with the data-card-id
+         container. FAIL if the wrong selector.
+      5. The init() function calls initCardDragDrop(). FAIL if not called.
+      6. style.css contains rules for .card-drag-ghost, .card-drag-chosen,
+         and .card-drag-active. FAIL if any missing.
+      7. `node --check app.js` exits 0. FAIL if not.
+      8. No edit to ble-client.js, no edit to the status rendering
+         functions, no edit to the profile modal section. FAIL if any of
+         those were touched.
+
+  - id: final-integration-check
+    title: 'Final integration check: app loads, no regressions, contract intact'
+    role: verify-as-task
+    assigned_to: tester
+    depends_on: [status-rendering, profile-editor, drag-and-drop]
+    max_retries: 1
+    prompt: |
+      Workspace: C:\PuffcoBLE. The three parallel tracks have all reported
+      done. You are the integration gate. Do NOT modify product files —
+      only run checks and report.
+
+      Static checks (all must pass):
+
+      1. `node --check app.js` exits 0.
+      2. `node --check ble-client.js` exits 0.
+      3. `node --check Sortable.min.js` is not applicable; skip.
+      4. The IDs that were blank before are now referenced as setText
+         targets in app.js — search for ALL of these in app.js and
+         confirm each appears at least once:
+           stat-vapor, stat-chamber, stat-led-brightness, stat-last-connected,
+           hero-vapor, hero-heat-timer, heat-countdown, session-remaining,
+           draw-sensor-chip, draw-sensor-chip-label, draw-strength-label,
+           draw-strength-fill, draw-strength-source.
+         Count must be 12. FAIL with the missing list if not.
+      5. Confirm `app.selectProfile` is exported in the realApp object.
+      6. Confirm Sortable.min.js is loaded BEFORE app.js in index.html.
+      7. Confirm initCardDragDrop is defined AND called from init().
+      8. Confirm saveProfile() sends vapor, tempo, dynamic in the payload
+         AND calls send("select_profile", {index}) when selectAfter=true.
+      9. Confirm the five mood functions in app.js are NOT all stubs
+         (none of them may be a single toast that says "not yet
+         implemented"). FAIL if any is still a stub.
+      10. Confirm the profile modal Save button click still calls
+          app.saveProfile(false) and Save & Activate still calls
+          app.saveProfile(true). Check index.html.
+      11. Confirm localStorage keys "puffco:last-connected" and
+          "puffco:moods" are both referenced in app.js.
+      12. Confirm no duplicate polling loop, no duplicate formatTempF,
+          no duplicate $ helper.
+      13. Confirm no edit was made to ble-client.js.
+      14. Confirm no more Sortable.min.js script tag is duplicated in
+          index.html.
+      15. Confirm the pre-paint reordering code in index.html is still
+          intact (the puffco:card-order restore).
+      16. Serve the project root over plain http (e.g.
+          `python -m http.server 8421 --bind 127.0.0.1` in a background
+          process; kill it before reporting). Use curl or similar to
+          GET / and confirm HTTP 200, then GET /app.js, /ble-client.js,
+          /Sortable.min.js, /style.css, /index.html, and confirm all
+          return 200. FAIL on any 404.
+
+      Live checks (best-effort, since real Bluetooth needs a device and
+      a Linux/macOS host; we are on Windows so we may not be able to
+      connect — but you can mock):
+
+      17. Open the page in headless Chromium via the playwright MCP
+          (`mavis mcp call playwright browser_navigate` to
+          http://127.0.0.1:8421/) and take a screenshot of the initial
+          view. Confirm no JS errors in the console. The Disconnected
+          hero state should be visible.
+
+      Report PASS/FAIL for each numbered check with one-line evidence
+      (the grep result, the http status, the playwright console output,
+      etc.). If any FAIL, name the responsible track (status-rendering,
+      profile-editor, or drag-and-drop).
+    verify_prompt: |
+      Workspace: C:\PuffcoBLE. Re-derive the final integration verdict
+      independently — do NOT just re-read the producer's report. Run:
+
+      1. `node --check app.js` — must exit 0.
+      2. `node --check ble-client.js` — must exit 0.
+      3. Grep the 12 stat/hero/live IDs in app.js — must all appear.
+      4. Confirm Sortable.min.js script tag is in index.html before
+         app.js script tag.
+      5. Use the playwright MCP to navigate to http://127.0.0.1:8421/
+         (start `python -m http.server 8421 --bind 127.0.0.1` in a
+         background process first; kill it after). Take a screenshot
+         and read the browser console. Any uncaught error is a FAIL.
+      6. Confirm the page shows the Disconnected state with no
+         JavaScript errors and the expected cards (Connection, Device
+         Status, Profiles, Voice Commands, LED Brightness, Power).
+      7. Confirm there is no second `<script src="app.js">` tag and no
+         `<script src="Sortable.min.js">` after the app.js tag.
+
+      Report final PASS/FAIL with evidence lines.

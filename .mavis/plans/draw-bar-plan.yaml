@@ -1,0 +1,128 @@
+version: 1
+plan:
+  name: "Improve PuffcoBLE draw strength bar"
+  max_concurrency: 2
+  max_consecutive_failures: 2
+  max_cycles: 6
+  auto_reject_retries: 1
+tasks:
+  - id: improve-bar
+    title: "Improve the existing draw strength bar (numeric readout, a11y, mobile, peak-hold, heating, polish)"
+    assigned_to: coder
+    max_retries: 2
+    verify_skip_reason: "Bounded UI change to one panel. Downstream smoke-bar task is the explicit verify-as-task closure: it runs the page in a browser, asserts ARIA, simulator-driven updates, mobile layout, peak-hold timing, and regression checks before PASS/FAIL. User explicitly asked for a 2-agent team (coder + tester) rather than a separate verifier."
+    prompt: |-
+      Improve the existing draw strength bar in the PuffcoBLE PWA. Do NOT redesign it from scratch and do NOT change the dynamic inhale path / encoding logic. Touch only these files:
+      - C:\PuffcoBLE\index.html (the .draw-strength-panel block at lines ~340-356)
+      - C:\PuffcoBLE\app.js (updateDrawStrengthUI at ~1764, tickDrawStrengthBar at ~1700, drawBarState at ~1690, smoothing constants at ~1685-1689)
+      - C:\PuffcoBLE\style.css (the .draw-strength-* rules at ~3094-3234)
+
+      Context (do not re-derive these — the data and CSS variables are already in place):
+      - The panel reads data.draw_strength_percent (0-100), data.draw_strength_active, data.draw_strength_source, data.draw_strength_mode, data.draw_strength_raw_percent, data.draw_strength_baseline_percent.
+      - Smoothing is driven by rAF tickDrawStrengthBar setting --draw-strength and --draw-peak CSS variables.
+      - .draw-strength-panel toggles classes: active, found, pinned, heating, bar-active, bar-hot, bar-peak.
+      - The track currently has aria-hidden="true" and the .draw-strength-fill is the only animated child.
+
+      Deliver these specific improvements:
+
+      1. Big numeric readout. Add a prominent "47%" style number inside or directly adjacent to the bar track so the value is readable at a glance. Update in lockstep with --draw-strength in the rAF tick (or in updateDrawStrengthUI when the target is set). The number should match the smoothed bar value, not the raw target. When idle, show "0%"; when disconnected, show an em dash. Format as integer percent.
+
+      2. Accessibility. Replace the track aria-hidden="true" with proper ARIA on the panel root:
+         - role="progressbar"
+         - aria-valuemin="0" aria-valuemax="100" aria-valuenow (the smoothed percent)
+         - aria-valuetext (e.g. "47 percent, active draw" or "idle")
+         - aria-label="Dynamic inhale draw strength"
+         Keep the track visuals the same; the ARIA is on the panel root.
+         Make sure the action buttons (Rescan, Clear pinned, Force redetect) have accessible names — titles are already there, add aria-label if needed.
+
+      3. Mobile responsiveness. The panel sits inside a live metrics grid. At narrow widths (under ~520px) it should still look good:
+         - The bar head (label + readout) should stack or shrink gracefully without truncation
+         - The action buttons should not overflow (wrap is already on, fine; just verify)
+         - The numeric readout should not push the track off-screen
+         Add a @media (max-width: 520px) block in style.css with the necessary overrides.
+
+      4. Better peak-hold decay. Current constants in app.js:
+         - DRAW_PEAK_HOLD_MS = 350 — bump to 800
+         - DRAW_PEAK_FALL_PER_FRAME = 0.025 — bump to 0.04 (peak decays slightly faster but still over ~1s)
+         Keep the rise fast. Also: when a new hit exceeds the previous peak by a large amount, snap the peak marker up immediately (the current code already does this with peak = max(peak + rise, current); verify and document in a comment if behavior is already correct).
+
+      5. Heating integration. Make the "heating" state (chamber firing while draw is active) more obvious on the bar:
+         - A subtle pulse animation on the fill (1.2s ease-in-out, opacity or filter, infinite). Stop pulsing when not active.
+         - Stronger box-shadow / glow that ties to the existing heat-live-panel orange.
+         - Do not introduce new color tokens; reuse the existing --accent-orange or rgba(251, 146, 60, …) values already in style.css.
+
+      6. Visual polish.
+         - The bar fill already gradients teal -> orange. Confirm the transition between idle and active feels smooth (no flicker when the active class toggles).
+         - The numeric readout should have a subtle active treatment when the bar is active (slightly bolder, accent color).
+
+      Constraints:
+      - Keep the existing rAF loop, drawBarState shape, and updateDrawStrengthUI signature.
+      - Keep the file size growth small. Aim for under +120 lines across the three files.
+      - No new external dependencies, no new build step.
+      - All existing tests / static checks should still pass (no syntax errors, no console errors on load).
+
+      Stop condition:
+      - All 6 improvements implemented.
+      - Open index.html in a headless browser (use the playwright MCP tool) and confirm: bar renders, numeric readout updates, ARIA attributes present, mobile width (375px) layout doesn't break, heating class adds the pulse animation.
+      - Report the diff summary (files changed, line counts, key additions) and the smoke check results in your final message.
+
+  - id: smoke-bar
+    title: "Smoke test the improved draw strength bar (browser trials, regression check)"
+    role: verify-as-task
+    assigned_to: tester
+    depends_on: [improve-bar]
+    max_retries: 1
+    prompt: |-
+      You are the verification gate. The coder just improved the draw strength bar (.draw-strength-panel) in C:\PuffcoBLE. Your job: prove the changes work, no regressions, and the bar is genuinely better — or fail it.
+
+      Run a local HTTP server first. server.py in C:\PuffcoBLE\ is the production server but it requires Windows Bluetooth and a real Puffco. For static bar testing, use `python -m http.server 8420 --bind 127.0.0.1` from C:\PuffcoBLE in the background (a separate process group; you'll kill it at the end). Open the page with the playwright MCP tool at http://127.0.0.1:8420/.
+
+      Test these specific things, in order, and record PASS/FAIL for each:
+
+      1. Initial render.
+         - Page loads with no console errors.
+         - #draw-strength-panel is present in the DOM.
+         - The numeric readout element is present (the coder added it; check by element id or by looking inside the panel).
+         - ARIA on the panel root: role="progressbar", aria-valuemin="0", aria-valuemax="100", aria-valuenow, aria-valuetext, aria-label. Use page.evaluate to read attributes.
+
+      2. Live update via simulator.
+         - In the page console, run app._simulateDrawStrength({ connected: true, draw_strength_source: '/p/app/htr/inh', draw_strength_percent: 35, draw_strength_active: true, draw_strength_mode: 'dynamic_inhale' }).
+         - The bar's --draw-strength CSS variable should ramp up to ~35 (allow 200-400ms for the rAF smoothing).
+         - The numeric readout should display "35%" (or "35 %").
+         - aria-valuenow should reflect 35.
+         - The .active class should be on the panel.
+         - Repeat with percent=80 — the bar should fill further, the readout should show "80%", the .bar-hot class should be present.
+
+      3. Idle / disconnected.
+         - Call _simulateDrawStrength with { connected: false, draw_strength_percent: 0 }.
+         - The bar should drop to 0, readout should show an em dash (or the documented idle text), .active class should be removed.
+
+      4. Mobile layout.
+         - Resize the browser to 375x800 (iPhone-ish).
+         - Verify the panel still renders correctly: head, bar, readout, source, action buttons all visible and not overlapping or cut off.
+         - Take a screenshot.
+
+      5. Peak hold.
+         - Trigger a sequence: percent=70, then percent=20 after 200ms, then percent=20 again 600ms later.
+         - The --draw-peak should rise to ~70 and stay near 70 for at least 800ms (the new hold time) before decaying. Use page.evaluate to read computed --draw-peak from the panel's style attribute over time.
+
+      6. Heating state.
+         - Call _simulateDrawStrength with { connected: true, draw_strength_source: '/p/app/htr/inh', draw_strength_percent: 50, draw_strength_active: true, draw_strength_mode: 'dynamic_inhale', heat: 'HEATING' }.
+         - The .heating class should be on the panel.
+         - The fill should have a visible pulse animation (read the computed animation-name on .draw-strength-fill, or check style.css for the new keyframe).
+
+      7. Regression check.
+         - Open the Connect / Disconnect / Scan controls — confirm the bar panel doesn't break them.
+         - Open the Profiles section — confirm the bar panel doesn't break profile switching.
+         - Click each of the bar's action buttons (Rescan, Clear pinned if visible, Force redetect). They should not throw; Rescan should show a toast.
+         - Confirm the existing draw-sensor chip (#draw-sensor-chip) and the device-stage .draw-ring still update from the same data.
+
+      Output format (your final message to the parent):
+      - A PASS/FAIL line at the top.
+      - For each of the 7 checks above: PASS/FAIL with one-line evidence (the value you read, the class you observed, the screenshot path).
+      - If FAIL, a one-sentence "fix suggestion" per failed check.
+      - The list of files the coder actually changed (verify by re-reading the diff against the original at C:\PuffcoBLE).
+
+      Do not implement fixes yourself. Your job is to verify and report. If the bar improvements are missing or broken, FAIL the plan.
+
+      Cleanup: kill the python http.server background process when you're done.

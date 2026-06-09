@@ -1,0 +1,1 @@
+{"function": "() => { const panel = document.getElementById('draw-strength-panel'); panel.scrollIntoView({ block: 'center' }); window.scrollBy(0, -100); window.app._simulateDrawStrength({ connected: true, draw_strength_source: '/p/app/htr/air', draw_strength_percent: 100, draw_strength_active: true, draw_strength_mode: 'dynamic_inhale', heat: 'HEATING' }); return 'scrolled'; }"}

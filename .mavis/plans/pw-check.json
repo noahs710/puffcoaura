@@ -1,0 +1,1 @@
+{"function": "() => ({ errors: window.__errors || [], warnings: window.__warnings || [], hasApp: typeof app !== 'undefined', hasSortable: typeof Sortable !== 'undefined' })"}

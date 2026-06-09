@@ -284,6 +284,10 @@ body {
   background-attachment: fixed;
 }
 
+body:not(.advanced-user) [data-advanced-only] {
+  display: none !important;
+}
+
 body.device-connected {
   background-image:
     radial-gradient(ellipse 65% 50% at 82% -8%, var(--halo-1), transparent 65%),
@@ -2278,6 +2282,8 @@ body.heat-active .peak-light {
   gap: 10px;
 }
 
+.profiles-empty { color: var(--muted, #888); font-size: 0.9em; padding: 1em; text-align: center; grid-column: 1 / -1; }
+
 .profile-library-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -3116,7 +3122,7 @@ input[type="range"]::-moz-range-thumb:hover {
   margin-bottom: 8px;
 }
 
-.draw-strength-head span {
+.draw-strength-head > span {
   color: var(--text-muted);
   font-size: 0.72rem;
   font-weight: 800;
@@ -3129,25 +3135,183 @@ input[type="range"]::-moz-range-thumb:hover {
   font-size: 0.92rem;
 }
 
+/* Big numeric readout (e.g. "47%") sitting in the head, paired with
+   the existing state label. Sized to dominate the bar at a glance. */
+.draw-strength-head-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.draw-strength-readout {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  font-weight: 800;
+  font-size: 1.1rem;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  line-height: 1;
+  white-space: nowrap;
+  transition: color 180ms ease, text-shadow 220ms ease;
+}
+
+/* When the bar is actively drawing, the readout adopts the active
+   teal accent so it visually agrees with the fill. */
+.draw-strength-panel.active .draw-strength-readout {
+  color: var(--accent-teal);
+  text-shadow: 0 0 12px rgba(0, 214, 180, 0.35);
+}
+
+.draw-strength-panel.bar-hot .draw-strength-readout {
+  color: var(--accent-orange);
+  text-shadow: 0 0 14px rgba(251, 146, 60, 0.45);
+}
+
+.draw-strength-panel.heating .draw-strength-readout {
+  color: var(--accent-orange);
+  text-shadow: 0 0 16px rgba(251, 146, 60, 0.55);
+}
+
+/* Maxed-out state — the airflow sensor is pinned at the top of the
+   bar (>= 95% sustained). Strong magenta-cyan glow + slow pulse so
+   the user sees "you're at the limit" without losing the rest of
+   the bar's color story. */
+.draw-strength-panel.bar-maxed {
+  border-color: rgba(192, 38, 211, 0.55);
+  background: linear-gradient(180deg, rgba(192, 38, 211, 0.10), rgba(0, 214, 180, 0.05));
+  box-shadow: 0 0 24px rgba(192, 38, 211, 0.30), 0 0 12px rgba(0, 214, 180, 0.20);
+  animation: draw-maxed-frame 1.2s ease-in-out infinite;
+}
+
+.draw-strength-panel.bar-maxed .draw-strength-fill {
+  background: linear-gradient(90deg, #14b8a6 0%, #f6a623 35%, #ef4444 70%, #c026d3 100%);
+  box-shadow: 0 0 28px rgba(192, 38, 211, 0.55), 0 0 12px rgba(246, 166, 35, 0.40);
+  animation: draw-maxed-pulse 0.8s ease-in-out infinite alternate;
+}
+
+.draw-strength-panel.bar-maxed .draw-strength-readout {
+  color: #e879f9;
+  text-shadow: 0 0 18px rgba(192, 38, 211, 0.65), 0 0 8px rgba(0, 214, 180, 0.45);
+  font-weight: 900;
+}
+
+.draw-strength-panel.bar-maxed .draw-strength-peak {
+  background: #e879f9;
+  box-shadow: 0 0 12px rgba(192, 38, 211, 0.85);
+}
+
+@keyframes draw-maxed-pulse {
+  from { filter: brightness(1.0) saturate(1.15); }
+  to   { filter: brightness(1.35) saturate(1.30); }
+}
+
+@keyframes draw-maxed-frame {
+  0%, 100% { box-shadow: 0 0 24px rgba(192, 38, 211, 0.30), 0 0 12px rgba(0, 214, 180, 0.20); }
+  50%      { box-shadow: 0 0 32px rgba(192, 38, 211, 0.55), 0 0 18px rgba(0, 214, 180, 0.35); }
+}
+
+/* Respect the user's reduced-motion preference: render the maxed
+   state with a static glow instead of an animated pulse. */
+@media (prefers-reduced-motion: reduce) {
+  .draw-strength-panel.bar-maxed,
+  .draw-strength-panel.bar-maxed .draw-strength-fill {
+    animation: none;
+  }
+}
+
 .draw-strength-track {
-  height: 12px;
-  overflow: hidden;
+  position: relative;
+  height: 14px;
   border-radius: var(--radius-full);
   background: var(--border-subtle);
   box-shadow: inset 0 1px 2px var(--bg-end);
 }
 
 .draw-strength-fill {
-  width: calc(var(--draw-strength) * 1%);
+  position: relative;
   height: 100%;
+  width: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--accent-teal), var(--accent-orange));
-  transition: width 160ms ease, box-shadow 160ms ease;
+  transform: scaleX(var(--draw-strength, 0));
+  transform-origin: left center;
+  /* transform animation is driven by the rAF loop in app.js, not CSS. */
+  transition: box-shadow 160ms ease, filter 200ms ease, background 200ms ease;
+  will-change: transform;
 }
 
 .draw-strength-panel.active .draw-strength-fill {
   box-shadow: 0 0 16px rgba(0, 214, 180, 0.34);
 }
+
+/* Hot: current draw is at or above 60% — gradient saturates and a
+   warmer glow makes a hard pull clearly stand out. */
+.draw-strength-panel.bar-hot .draw-strength-fill {
+  background: linear-gradient(90deg, #14b8a6, #f6a623 55%, #ef4444 100%);
+  box-shadow: 0 0 22px rgba(246, 166, 35, 0.55);
+  filter: saturate(1.15);
+}
+
+/* Heating (chamber firing while draw is active) — red-tinted glow
+   so the panel visually agrees with the heat-live-panel. A gentle
+   pulse animates the fill so the "heating" state is impossible to
+   miss while the chamber is firing. The animation is dropped by the
+   global prefers-reduced-motion override at the end of this file. */
+@keyframes draw-strength-heat-pulse {
+  0%, 100% {
+    filter: saturate(1.15) brightness(1);
+    box-shadow: 0 0 24px rgba(251, 146, 60, 0.55);
+  }
+  50% {
+    filter: saturate(1.35) brightness(1.12);
+    box-shadow: 0 0 32px rgba(251, 146, 60, 0.78);
+  }
+}
+
+.draw-strength-panel.heating.bar-active .draw-strength-fill {
+  background: linear-gradient(90deg, #14b8a6, #f6a623 50%, #ef4444 95%);
+  animation: draw-strength-heat-pulse 1.2s ease-in-out infinite;
+}
+
+/* Peak tick — a thin vertical line at the highest value reached
+   since the last reset. --draw-peak is the smoothed peak (0-100).
+   The line fades in once the peak is at least 6% above the current
+   value (i.e. you can see it hovering at the top of a decaying bar). */
+.draw-strength-peak {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+  opacity: 0;
+  transform: translateX(calc(var(--draw-peak, 0) * 1%)) translateX(-1px);
+  transform-origin: left center;
+  transition: opacity 200ms ease, transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
+  pointer-events: none;
+}
+
+.draw-strength-panel.bar-peak .draw-strength-peak {
+  opacity: 1;
+}
+
+/* Threshold marker — a small static notch at 8%, the "is active"
+   cut-off. Stays out of the way but gives a visual reference for
+   "this much is what counts as a draw". */
+.draw-strength-threshold {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 8%;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.20);
+  pointer-events: none;
+}
+
+
 
 .draw-strength-source {
   margin-top: 7px;
@@ -3155,6 +3319,69 @@ input[type="range"]::-moz-range-thumb:hover {
   font-size: 0.72rem;
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+/* Airflow-detection polish: a sub-line under the source label that
+   reports what the last scan actually did — paths tried, paths
+   skipped in cooldown, scan duration, and the most recent read
+   error. Hidden by default; the JS toggles it on only when there's
+   something useful to show. The "has-error" variant tints the line
+   amber so the user immediately sees that the silence isn't
+   "still loading" but "we tried and the device didn't respond". */
+.draw-strength-diagnostic {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  font-style: italic;
+  letter-spacing: 0.01em;
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+  transition: color 180ms ease, opacity 180ms ease;
+}
+
+.draw-strength-diagnostic.has-error {
+  color: #f6a623;
+  opacity: 1;
+  font-style: normal;
+}
+
+.draw-strength-diagnostic.hidden {
+  display: none;
+}
+
+/* .scanning = we have a connection but no airflow source yet, the
+   bar is alive and the panel border pulses to signal "we're
+   working on it". The pulse is gentle so it doesn't fight the
+   bar's own activity animation. The animation is dropped by the
+   global prefers-reduced-motion override. */
+@keyframes draw-strength-scanning-pulse {
+  0%, 100% { border-color: var(--border-glass); }
+  50%      { border-color: rgba(0, 214, 180, 0.45); }
+}
+
+.draw-strength-panel.scanning {
+  animation: draw-strength-scanning-pulse 1.6s ease-in-out infinite;
+}
+
+/* .unavailable = we tried, nothing on the device responded, and
+   the silence has lasted long enough that the user deserves a
+   distinct visual treatment. Muted amber border, desaturated
+   background, and a small caret to suggest "open me for the
+   diagnostic sub-line". Tells the user at a glance: this is not
+   a slow connection, the device just doesn't expose a path. */
+.draw-strength-panel.unavailable {
+  border-color: rgba(246, 166, 35, 0.45);
+  background: rgba(246, 166, 35, 0.06);
+  box-shadow: 0 0 16px rgba(246, 166, 35, 0.10);
+}
+
+.draw-strength-panel.unavailable .draw-strength-source {
+  color: #f6a623;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draw-strength-panel.scanning { animation: none; }
 }
 
 .draw-strength-actions {
@@ -3166,6 +3393,33 @@ input[type="range"]::-moz-range-thumb:hover {
 
 .draw-strength-actions .btn {
   flex: 0 0 auto;
+}
+
+/* Narrow viewport: stack the head, shrink the readout, and let the
+   action buttons take a full row so nothing overflows on phones. */
+@media (max-width: 520px) {
+  .draw-strength-head {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+  }
+  .draw-strength-head > span {
+    flex: 1 1 100%;
+  }
+  .draw-strength-head-meta {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+  .draw-strength-readout {
+    font-size: 1.4rem;
+  }
+  .draw-strength-track {
+    height: 12px;
+  }
+  .draw-strength-actions .btn {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 }
 
 .session-metrics {
@@ -3266,6 +3520,20 @@ input[type="range"]::-moz-range-thumb:hover {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.power-light-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.power-light-controls .toggle-wrap {
+  min-height: 36px;
 }
 
 .advanced-action-grid {
@@ -4687,6 +4955,44 @@ summary { list-style: none; }
   gap: 12px;
   margin-bottom: 20px;
 }
+.lorax-quick-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.lorax-quick-actions .btn-lorax-test-copy {
+  /* Subtle accent so the copy button is discoverable but not loud. */
+  border-color: rgba(0, 214, 180, 0.45);
+  color: var(--accent-teal);
+}
+
+.lorax-quick-actions .btn-lorax-test-copy:hover:not([disabled]) {
+  background: rgba(0, 214, 180, 0.12);
+  color: var(--text-primary);
+}
+
+.lorax-quick-actions .btn-lorax-test-copy[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+  .lorax-quick-actions-label {
+    font-size: 0.85em;
+    color: var(--muted, #888);
+    margin-right: 0.5em;
+  }
+  .lorax-quick-actions-status {
+    margin-left: auto;
+    font-size: 0.85em;
+    color: var(--muted, #888);
+    font-variant-numeric: tabular-nums;
+  }
+  .lorax-quick-actions-status.busy { color: #f6a623; }
+  .lorax-quick-actions-status.done { color: #22c55e; }
+  .lorax-quick-actions-status.warn { color: #f43f5e; }
+
 
 @media (max-width: 768px) {
   .lorax-filters {
@@ -5297,6 +5603,7 @@ input[type="checkbox"]:disabled {
 .heat-controls,
 .voice-command-chips,
 .power-controls,
+.power-light-controls,
 .advanced-action-grid,
 .mood-library-actions,
 .lorax-write-inputs,
@@ -5307,6 +5614,7 @@ input[type="checkbox"]:disabled {
 .heat-controls .btn,
 .voice-command-chips .btn,
 .power-controls .btn,
+.power-light-controls .btn,
 .mood-library-actions .btn {
   min-height: 42px;
   align-self: center;
@@ -5430,12 +5738,7 @@ input[type="checkbox"]:disabled {
   transition: transform 90ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-.draw-strength-fill {
-  transform-origin: left center;
-  width: 100%;
-  transform: scaleX(var(--draw-strength, 0));
-  transition: transform 200ms cubic-bezier(0.32, 0.72, 0, 1);
-}
+
 
 /* Toast: slide-down + fade in, fade out. */
 .toast {
@@ -5574,104 +5877,6 @@ html {
   display: none;
 }
 
-/* ---- Draggable card layout ----
-   The container (.app-container) is the drop zone. Direct children
-   that carry [data-card-id] are the drag handles. draggable="true"
-   is set by app.js on init. Visual feedback: 2px accent line on
-   the drop target, grab/grabbing cursor, scale + dim on drag. */
-.app-container[data-card-order-key] > [data-card-id] {
-  transition: transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
-              box-shadow 180ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-/* The advanced-panel + section-grid are not position: relative by
-   default; force it so the drop-indicator pseudo-elements anchor
-   to the card surface, not the page. */
-.app-container[data-card-order-key] > .section-grid,
-.app-container[data-card-order-key] > .advanced-panel {
-  position: relative;
-}
-
-.app-container[data-card-order-key] > [data-card-id][data-draggable="true"] {
-  cursor: grab;
-}
-
-.app-container[data-card-order-key] > [data-card-id][data-draggable="true"]:active {
-  cursor: grabbing;
-}
-
-.app-container[data-card-order-key] > [data-card-id][data-dragging="true"] {
-  z-index: 5;
-  cursor: grabbing;
-  opacity: 0.72;
-  transform: scale(0.995);
-  box-shadow: 0 0 0 1.5px rgba(0, 214, 180, 0.55), 0 12px 32px rgba(0, 0, 0, 0.18);
-  transition: transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
-              box-shadow 180ms cubic-bezier(0.32, 0.72, 0, 1),
-              opacity 140ms ease;
-}
-
-.app-container[data-card-order-key] > [data-card-id][data-drop-zone="above"]::before,
-.app-container[data-card-order-key] > [data-card-id][data-drop-zone="below"]::after {
-  content: '';
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  height: 2px;
-  background: var(--accent-teal);
-  border-radius: 2px;
-  box-shadow: 0 0 12px rgba(0, 214, 180, 0.55);
-  pointer-events: none;
-  z-index: 6;
-}
-
-.app-container[data-card-order-key] > [data-card-id][data-drop-zone="above"]::before {
-  top: -7px;
-  animation: drop-indicator-in 180ms cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
-.app-container[data-card-order-key] > [data-card-id][data-drop-zone="below"]::after {
-  bottom: -7px;
-  animation: drop-indicator-in 180ms cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
-@keyframes drop-indicator-in {
-  from { opacity: 0; transform: scaleX(0.6); }
-  to   { opacity: 1; transform: scaleX(1); }
-}
-
-/* During an active drag, the moved card snaps into the new
-   position with a 180ms ease-out (FLIP-style). */
-.app-container[data-card-order-key] > [data-card-id].flash-snap {
-  animation: card-snap 180ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-@keyframes card-snap {
-  from { transform: translateY(-6px); }
-  to   { transform: translateY(0); }
-}
-
-/* When the user is mid-drag, suppress the card surface-in keyframe
-   so the dragged card doesn't pulse. */
-.app-container[data-card-order-key].is-dragging > [data-card-id] {
-  transition: none;
-}
-
-.app-container[data-card-order-key].is-dragging > [data-card-id][data-dragging="true"] {
-  transition: transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
-              box-shadow 180ms cubic-bezier(0.32, 0.72, 0, 1),
-              opacity 140ms ease;
-}
-
-/* Touch users: HTML5 drag-and-drop is desktop-only. On touch
-   screens we let the cards behave normally and rely on the
-   grab cursor + a subtle hover affordance. */
-@media (hover: none) and (pointer: coarse) {
-  .app-container[data-card-order-key] > [data-card-id][data-draggable="true"] {
-    cursor: default;
-  }
-}
-
 /* ---- Theme popover: reset-layout button ---- */
 .theme-popover-footer .reset-layout-btn {
   display: inline-flex;
@@ -5729,3 +5934,188 @@ html {
   opacity: 0;
   padding: 0;
 }
+
+.dial-field.color-field input[type="color"] {
+  width: 64px;
+  height: 64px;
+  padding: 4px;
+  border-radius: 12px;
+  cursor: pointer;
+  background: rgba(255,255,255,0.05);
+  font-size: 1rem;
+}
+.dial-field.color-field #modal-color-swatch {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  align-self: center;
+  color: var(--text-primary);
+}
+
+/* ---- Sortable drag states ---- */
+
+/* Sort guide banner — sits at the top of the app container, tells the
+   user how to drag. Hidden once dismissed (state stored in
+   localStorage). No data-card-id, so Sortable leaves it alone. */
+.sort-guide {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(0, 214, 180, 0.30);
+  border-radius: var(--radius-md);
+  background: rgba(0, 214, 180, 0.06);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+.sort-guide.is-hidden { display: none; }
+.sort-guide-icon {
+  flex: 0 0 auto;
+  color: var(--accent-teal);
+  display: grid;
+  place-items: center;
+}
+.sort-guide-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sort-guide-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-teal);
+}
+.sort-guide-text { color: var(--text-muted); }
+.sort-guide-text kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 1px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--text-primary);
+}
+.sort-guide-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.sort-guide-reset,
+.sort-guide-close {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+.sort-guide-reset { color: var(--accent-teal); border-color: rgba(0, 214, 180, 0.30); }
+.sort-guide-reset:hover { background: rgba(0, 214, 180, 0.12); color: var(--text-primary); }
+.sort-guide-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.sort-guide-close:hover { background: var(--bg-glass-hover); color: var(--text-primary); }
+
+@media (max-width: 520px) {
+  .sort-guide { flex-wrap: wrap; }
+  .sort-guide-actions { width: 100%; justify-content: flex-end; }
+}
+.card-drag-ghost {
+  opacity: 0.45;
+  background: var(--bg-glass-hover);
+  border-style: dashed;
+  border-color: var(--accent-teal);
+  cursor: grabbing;
+}
+.card-drag-chosen {
+  cursor: grabbing;
+}
+.card-drag-active {
+  box-shadow: 0 0 0 2px var(--accent-teal), var(--shadow-glow-teal);
+  transform: scale(1.01);
+}
+.app-container[data-card-order-key] .card,
+.app-container[data-card-order-key] .advanced-panel {
+  cursor: grab;
+}
+.app-container[data-card-order-key] .card:active,
+.app-container[data-card-order-key] .advanced-panel:active {
+  cursor: grabbing;
+}
+
+/* Profile cards (device + library) — share the drag visuals so the
+   two grids look the same. */
+.profile-drag-ghost {
+  opacity: 0.45;
+  background: var(--bg-glass-hover);
+  border-style: dashed;
+  border-color: var(--accent-teal);
+  cursor: grabbing;
+}
+.profile-drag-chosen { cursor: grabbing; }
+.profile-drag-active {
+  box-shadow: 0 0 0 2px var(--accent-teal), var(--shadow-glow-teal);
+  transform: scale(1.01);
+}
+#profiles-grid .profile-card,
+#profile-library-grid .local-profile-card {
+  cursor: grab;
+}
+#profiles-grid .profile-card:active,
+#profile-library-grid .local-profile-card:active {
+  cursor: grabbing;
+}
+#profiles-grid .profile-card .profile-drag-handle,
+#profile-library-grid .local-profile-card .profile-drag-handle {
+  cursor: grab;
+  color: var(--text-muted);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+#profiles-grid .profile-card .profile-drag-handle:hover,
+#profile-library-grid .local-profile-card .profile-drag-handle:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+
+/* Mood color slots — small but discoverable. */
+.mood-drag-ghost {
+  opacity: 0.4;
+  background: var(--bg-glass-hover);
+  border-style: dashed;
+  border-color: var(--accent-teal);
+}
+.mood-drag-chosen { cursor: grabbing; }
+.mood-drag-active {
+  box-shadow: 0 0 0 2px var(--accent-teal);
+  transform: scale(1.01);
+}
+.mood-color-slot { cursor: grab; }
+.mood-color-slot:active { cursor: grabbing; }
+.mood-color-slot .mood-drag-handle {
+  cursor: grab;
+  color: var(--text-muted);
+}
+.mood-color-slot .mood-drag-handle:hover {
+  color: var(--text-primary);
+}
+
+.backend-section-heading { font-size: 0.85em; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted, #888); margin: 1.25em 0 0.5em; }
