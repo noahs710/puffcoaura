@@ -7703,6 +7703,15 @@ body.is-customizing .status-item:active {
 @media (max-width: 520px) {
   .settings-panel {
     width: 100vw;
+    /* On mobile, boost the panel opacity so content is readable
+       over any background. The solid base prevents the translucent
+       card from looking washed out. */
+    background: rgba(20, 23, 28, 0.96);
+    backdrop-filter: blur(28px) saturate(1.8);
+    -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  }
+  .settings-body {
+    -webkit-overflow-scrolling: touch;
   }
   .settings-nav {
     gap: 0;
@@ -7713,6 +7722,10 @@ body.is-customizing .status-item:active {
   }
   .settings-radio-group {
     gap: 6px;
+  }
+  /* Increase backdrop opacity on mobile for better contrast */
+  .settings-backdrop.settings-backdrop-visible {
+    background: rgba(0, 0, 0, 0.72);
   }
 }
 
