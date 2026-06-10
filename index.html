@@ -12,7 +12,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Puffco Controller</title>
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="style.css?v=11" />
+  <link rel="stylesheet" href="style.css?v=12" />
   <style>
     @media (min-width: 701px) { .app-menu { display: none !important; } }
     /* Round 2: hold the card surface-in animation until the
@@ -225,6 +225,7 @@
           <button class="settings-nav-btn active" data-settings-section="connection" role="tab" aria-selected="true" aria-controls="settings-section-connection">Connection</button>
           <button class="settings-nav-btn" data-settings-section="display" role="tab" aria-selected="false" aria-controls="settings-section-display">Display</button>
           <button class="settings-nav-btn" data-settings-section="behavior" role="tab" aria-selected="false" aria-controls="settings-section-behavior">Behavior</button>
+          <button class="settings-nav-btn" data-settings-section="dab" role="tab" aria-selected="false" aria-controls="settings-section-dab">Dab</button>
           <button class="settings-nav-btn" data-settings-section="data" role="tab" aria-selected="false" aria-controls="settings-section-data">Data</button>
           <button class="settings-nav-btn" data-settings-section="about" role="tab" aria-selected="false" aria-controls="settings-section-about">About</button>
         </div>
@@ -385,6 +386,15 @@
             </label>
             <p class="settings-hint">Shows the Advanced diagnostics panel, Lorax explorer, and debug console.</p>
           </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-customize-mode"
+                     onchange="app.setCustomizeMode(this.checked)" />
+              <span>Customize layout</span>
+            </label>
+            <p class="settings-hint">Show drag handles on every card and reorderable item. Turn off to hide handles and disable dragging.</p>
+          </div>
         </div>
 
         <!-- BEHAVIOR -->
@@ -433,6 +443,169 @@
                    placeholder="puffco" maxlength="24"
                    onchange="app.settings.set('voicePrefix', this.value)" />
             <p class="settings-hint">Only transcriptions containing this word will trigger commands. Leave blank to fire on any match.</p>
+          </div>
+        </div>
+
+        <!-- DAB SCORING -->
+        <div class="settings-section hidden" id="settings-section-dab" role="tabpanel">
+          <div class="settings-section-heading">Dab Scoring</div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-dab-enabled"
+                     onchange="app.settings.set('dabEnabled', this.checked)" />
+              <span>Enable dab scoring</span>
+            </label>
+            <p class="settings-hint">Score your dabs across flow, consistency, and control. Tap Start before drawing.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-difficulty">Difficulty</label>
+            <div class="settings-radio-group" id="settings-dab-difficulty" role="radiogroup" aria-label="Dab difficulty">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-dab-difficulty" value="casual"
+                       onchange="app.settings.set('dabDifficulty', 'casual')" />
+                <span>Casual</span>
+                <span class="settings-hint-inline">Target flow: 15</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-dab-difficulty" value="standard" checked
+                       onchange="app.settings.set('dabDifficulty', 'standard')" />
+                <span>Standard</span>
+                <span class="settings-hint-inline">Target flow: 30</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-dab-difficulty" value="beast"
+                       onchange="app.settings.set('dabDifficulty', 'beast')" />
+                <span>Beast</span>
+                <span class="settings-hint-inline">Target flow: 50</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-threshold">Detection threshold</label>
+            <input type="range" id="settings-dab-threshold" min="1" max="30" value="12"
+                   style="width:100%"
+                   oninput="document.getElementById('dab-threshold-val').textContent = this.value + '%'; app.settings.set('dabThreshold', Number(this.value))"
+                   onchange="app.settings.set('dabThreshold', Number(this.value))" />
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+              <span>1%</span><span id="dab-threshold-val">12%</span><span>30%</span>
+            </div>
+            <p class="settings-hint">Airflow must exceed this (and stay above it for ~3 seconds) to start a dab session. Default 12% filters out preheat pulses.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-dab-auto-arm"
+                     onchange="app.settings.set('dabAutoArm', this.checked)" />
+              <span>Auto-open on heat</span>
+            </label>
+            <p class="settings-hint">Open the scoring panel automatically when a heat cycle starts, with the preheat countdown. Scoring begins the instant preheat ends.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-dab-fast-sampler"
+                     onchange="app.settings.set('dabFastSampler', this.checked)" />
+              <span>High-rate sensor sampling</span>
+            </label>
+            <p class="settings-hint">During a live session, read the inhale sensor directly at high speed (browser Bluetooth only). Smoother chart, finer scoring detail.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-fast-ms">Session sample interval</label>
+            <input type="range" id="settings-dab-fast-ms" min="100" max="1000" step="50" value="150"
+                   style="width:100%"
+                   oninput="document.getElementById('dab-fast-ms-val').textContent = this.value + 'ms'"
+                   onchange="app.settings.set('dabFastSampleMs', Number(this.value))" />
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+              <span>100ms</span><span id="dab-fast-ms-val">150ms</span><span>1000ms</span>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-idle-bar-ms">Idle bar poll</label>
+            <input type="range" id="settings-dab-idle-bar-ms" min="50" max="400" step="25" value="100"
+                   style="width:100%"
+                   oninput="document.getElementById('dab-idle-bar-ms-val').textContent = this.value + 'ms'"
+                   onchange="app.settings.set('dabIdleBarSampleMs', Number(this.value))" />
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+              <span>50ms</span><span id="dab-idle-bar-ms-val">100ms</span><span>400ms</span>
+            </div>
+            <p class="settings-hint">How often the inhale bar reads the sensor between scoring sessions. Lower = snappier bar; the radio is the bottleneck, so 50–200ms is the sweet spot.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label">Draw calibration</label>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span id="settings-dab-draw-max" style="font-size:0.875rem;color:var(--text-secondary,#9ca3af);font-variant-numeric:tabular-nums;">90 raw = 100%</span>
+              <button class="btn btn-sm btn-secondary" onclick="app.resetDabDrawCalibration()">Re-learn</button>
+            </div>
+            <p class="settings-hint">The app learns your device's strongest pull and scales every percent to it — your hardest draw reads ~100%. Re-learn after changing chambers.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-drop-timeout">End-of-dab timeout</label>
+            <input type="range" id="settings-dab-drop-timeout" min="500" max="5000" step="100" value="1200"
+                   style="width:100%"
+                   oninput="document.getElementById('dab-drop-timeout-val').textContent = (this.value / 1000).toFixed(1) + 's'"
+                   onchange="app.settings.set('dabDropTimeoutMs', Number(this.value))" />
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+              <span>0.5s</span><span id="dab-drop-timeout-val">1.2s</span><span>5s</span>
+            </div>
+            <p class="settings-hint">How long airflow can sit below the threshold before the session ends. Raise this if pause-and-sip draws end your dab early.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-max-duration">Max session length</label>
+            <input type="range" id="settings-dab-max-duration" min="30" max="300" step="10" value="90"
+                   style="width:100%"
+                   oninput="document.getElementById('dab-max-duration-val').textContent = this.value + 's'"
+                   onchange="app.settings.set('dabMaxDurationS', Number(this.value))" />
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+              <span>30s</span><span id="dab-max-duration-val">90s</span><span>300s</span>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-ui-max">Airflow display ceiling</label>
+            <input type="range" id="settings-dab-ui-max" min="100" max="200" step="10" value="150"
+                   style="width:100%"
+                   oninput="document.getElementById('dab-ui-max-val').textContent = this.value + '%'"
+                   onchange="app.settings.set('dabUiAirflowMax', Number(this.value))" />
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+              <span>100%</span><span id="dab-ui-max-val">150%</span><span>200%</span>
+            </div>
+            <p class="settings-hint">Top of the chart and readouts. Hard pulls can overshoot 100% — raise this if your draws pin at the ceiling. Scoring is unaffected.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label">Preheat timer calibration</label>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span id="settings-dab-preheat-offset" style="font-size:0.875rem;color:var(--text-secondary,#9ca3af);font-variant-numeric:tabular-nums;">+0.0s learned</span>
+              <button class="btn btn-sm btn-secondary" onclick="app.resetDabPreheatCalibration()">Reset</button>
+            </div>
+            <p class="settings-hint">The app learns how far the firmware preheat timer runs short on your device and corrects the countdown. Reset to re-learn from scratch.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label">Score history</label>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div id="dab-score-history-summary" style="font-size:0.875rem;color:var(--text-secondary,#9ca3af);flex:1;">No dabs recorded yet.</div>
+              <button class="btn btn-sm btn-secondary" onclick="app.clearDabHistory()">Clear</button>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-cleaning-threshold">Cleaning reminder threshold</label>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <input type="number" id="settings-cleaning-threshold" min="0" max="500" step="5" value="0"
+                     style="width:96px;"
+                     onchange="app.settings.set('cleaningThreshold', Number(this.value))" />
+              <span style="font-size:0.8rem;color:var(--text-muted);">dabs per cycle (0 = off)</span>
+            </div>
+            <p class="settings-hint">After this many qualifying dabs, the status card shows "Cleaning" instead of the next count, reminding you to run a burn-off cycle. Only dabs longer than 5 seconds count, and cleaning cycles themselves never count.</p>
           </div>
         </div>
 
@@ -587,30 +760,15 @@
         <h2><span class="icon icon-link"></span> Connection</h2>
       </div>
       <div class="connect-section">
-        <div class="input-group bridge-field" data-advanced-only>
-          <label for="transport-mode">BLE Transport</label>
-          <select id="transport-mode" onchange="app.setTransportMode(this.value)">
-            <option value="browser_ble">Browser Bluetooth</option>
-            <option value="bridge">Local Windows Bridge</option>
-          </select>
-        </div>
-        <div class="input-group bridge-field" id="bridge-url-group" data-advanced-only>
-          <label for="bridge-url">Local Bridge</label>
-          <input type="text" id="bridge-url" placeholder="ws://127.0.0.1:8421/ws" />
-        </div>
-        <button class="btn btn-secondary" id="btn-bridge" onclick="app.connectBridge()" data-advanced-only>
-          Use Bridge
-        </button>
-      </div>
-      <div class="bridge-note" id="bridge-note" data-advanced-only>
-        Browser Bluetooth runs online from HTTPS, including GitHub Pages. Use the local bridge only as a fallback.
-      </div>
-      <div class="connect-section">
-        <div class="input-group" id="device-identity-group" data-advanced-only>
+        <!-- Device name / MAC / transport / bridge options all live in
+             Settings > Connection now. The inputs stay in the DOM
+             (hidden) because the connect pipeline reads them, but the
+             card itself is a single obvious action. -->
+        <div class="input-group hidden" id="device-identity-group" aria-hidden="true">
           <label for="device-name" id="device-identity-label">Device Name</label>
           <input type="text" id="device-name" placeholder="Peak" value="Peak" />
         </div>
-        <label class="checkbox-row optional-device-field" id="device-mac-row" data-advanced-only>
+        <label class="checkbox-row optional-device-field hidden" id="device-mac-row" aria-hidden="true">
           <input type="checkbox" id="use-mac-address" onchange="app.toggleMacAddressMode()" />
           <span>Use MAC address</span>
         </label>
@@ -623,6 +781,7 @@
         <button class="btn btn-danger hidden" id="btn-disconnect" onclick="app.disconnect()">
           Disconnect
         </button>
+        <p class="settings-hint" style="margin:6px 0 0 0;">Device name, transport, and bridge options are in Settings → Connection.</p>
       </div>
       <div class="scan-results" id="device-scan-results"></div>
     </section>
@@ -731,6 +890,7 @@
           </div>
           <div class="heat-controls">
             <button class="btn btn-heat" id="btn-heat" onclick="app.heat()">Start Heat</button>
+            <button class="btn btn-secondary" id="btn-clean" onclick="app.startCleaningMode()" title="Low-temp burn-off: 150°F for 20 seconds">Clean</button>
             <button class="btn btn-secondary hidden" id="btn-boost" onclick="app.boost()">Boost</button>
             <button class="btn btn-secondary hidden" id="btn-extend" disabled title="Extend is not exposed by this BLE bridge yet">Extend</button>
             <button class="btn btn-danger hidden" id="btn-stop" onclick="app.stop()">Stop</button>
@@ -813,6 +973,37 @@
           </div>
         </div>
         </div><!-- end .status-item[data-item-id="battery"] -->
+
+        <div class="status-item" data-item-id="usage" data-status-item data-status-label="Usage">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('usage')" aria-label="Toggle Usage" aria-pressed="true" data-toggle-btn="usage">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Usage</span>
+          </div>
+        <div class="usage-strip">
+          <div class="usage-card">
+            <div class="usage-label">Dabs / day</div>
+            <div class="usage-value" id="stat-dpd-hero">—</div>
+            <div class="usage-trend" id="stat-dpd-trend">—</div>
+          </div>
+          <div class="usage-card">
+            <div class="usage-label">Total dabs</div>
+            <div class="usage-value" id="stat-total-dabs-hero">—</div>
+            <div class="usage-trend">lifetime</div>
+          </div>
+          <div class="usage-card">
+            <div class="usage-label">Dabs left</div>
+            <div class="usage-value" id="stat-drem-hero">—</div>
+            <div class="usage-trend">estimated</div>
+          </div>
+          <div class="usage-card" id="cleaning-reminder-card" data-card-id="cleaning-reminder">
+            <div class="usage-label">Cleaning</div>
+            <div class="usage-value" id="stat-cleaning-counter">—</div>
+            <div class="usage-trend" id="stat-cleaning-trend">set in Settings</div>
+          </div>
+        </div>
+        </div><!-- end .status-item[data-item-id="usage"] -->
 
         <div class="status-item" data-item-id="diagnostics" data-status-item data-status-label="Diagnostics">
           <div class="status-item-header">
@@ -1428,6 +1619,123 @@
             <input type="text" id="dev-action-confirm" placeholder="Confirm text if required" aria-label="Lorax action confirmation text" />
             <button class="btn btn-sm btn-danger" onclick="app.devRunLoraxAction()">Run Action</button>
           </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Inhale sensor</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devDrawState()">Sensor State</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devDrawObserve(false)">Observe Paths</button>
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devDrawObserve(true)">Observe + Promote</button>
+              <button class="btn btn-sm btn-danger" onclick="app.devDrawClearPin()">Clear Pin</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Dab scoring harness</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devDabState()">Scorer State</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devDabGateTest()">Gate Self-Test</button>
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devDabSynthetic()">Synthetic Run (8s)</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devCalibrationState()">Calibration</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Raw path read</div>
+            <input type="text" id="dev-read-path" placeholder="/p/app/htr/inh" aria-label="Lorax path to read" />
+            <select id="dev-read-type" aria-label="Read value type">
+              <option value="float32">float32</option>
+              <option value="uint8">uint8</option>
+              <option value="uint16">uint16</option>
+              <option value="uint32">uint32</option>
+              <option value="text">text</option>
+            </select>
+            <button class="btn btn-sm btn-primary" onclick="app.devReadPath()">Read</button>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Device quick tests</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Battery Anim</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.showVersion()">Version Anim</button>
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.startCleaningMode()">Clean Cycle</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.downloadBrowserDebugLog()">Export Debug</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Profile backup / restore</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devProfileExport()">Export Profiles</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devProfileImport()">Import…</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.applyImportedProfiles()">Apply Staged</button>
+            </div>
+            <input class="hidden" id="dev-profile-import-file" type="file" accept="application/json,.json" />
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Vapor mass-edit</div>
+            <div class="dev-inline-fields">
+              <select id="dev-vapor-mode" aria-label="Vapor mode for all profiles">
+                <option value="standard">Smooth</option>
+                <option value="high">Bold</option>
+                <option value="max">Intense</option>
+                <option value="xl">Extreme</option>
+              </select>
+              <button class="btn btn-sm btn-primary" onclick="app.devVaporSetAll()">Apply to all</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Time / clock</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devTimeSync()">Sync to browser</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Dab score history</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devDabHistoryExport()">Export to JSON</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.clearDabHistory()">Clear history</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Brightness quick set</div>
+            <div class="dev-inline-fields">
+              <input type="number" id="dev-brightness-pct" min="1" max="100" value="80" aria-label="Brightness percent" />
+              <span class="stat-label">%</span>
+              <button class="btn btn-sm btn-primary" onclick="app.devBrightnessQuickSet()">Set</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Profile duplicate</div>
+            <div class="dev-inline-fields">
+              <input type="number" id="dev-profile-dup-from" min="0" max="3" value="0" aria-label="Source slot" />
+              <span class="stat-label">→</span>
+              <input type="number" id="dev-profile-dup-to" min="0" max="3" value="1" aria-label="Target slot" />
+              <button class="btn btn-sm btn-primary" onclick="app.devProfileDuplicate()">Copy</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Local storage</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devResetLocalSettings()">Wipe settings</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devSessionInfo()">Session info</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Lorax regex search</div>
+            <div class="dev-inline-fields">
+              <input type="text" id="dev-lorax-search" placeholder="/htr/(air|inh|flow)" aria-label="Lorax regex" />
+              <button class="btn btn-sm btn-primary" onclick="app.devLoraxSearch()">Search</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">System / snapshot</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devSystemCheck()">System check</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devFullSnapshot()">Full snapshot</button>
+            </div>
+          </div>
         </div>
         <pre class="dev-output" id="dev-command-output">Developer command output will appear here.</pre>
       </section>
@@ -1692,9 +2000,211 @@
     </div>
   </div>
 
-  <script src="ble-client.js?v=14"></script>
-  <script src="Sortable.min.js?v=14"></script>
-  <script src="app.js?v=14"></script>
+  <!-- DAB SESSION PANEL -->
+  <div class="modal-backdrop" id="dab-panel">
+    <div class="modal profile-editor-sheet" style="max-width:560px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <span style="font-weight:700;font-size:1rem;">Dab Scoring</span>
+        <button class="icon-btn" onclick="app.closeDabPanel()" aria-label="Close dab panel">×</button>
+      </div>
+
+      <!-- Live session strip: device heat info shared by the preheat,
+           countdown, and active views. Hidden in idle/results/diagnostic. -->
+      <div id="dab-session-strip" class="hidden"
+           style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:14px;padding:10px 8px;background:var(--bg-input);border-radius:10px;text-align:center;">
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">State</div>
+          <div id="dab-session-state" style="font-size:0.85rem;font-weight:700;color:var(--text-primary);">—</div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">Temp</div>
+          <div style="font-size:0.85rem;font-weight:700;font-variant-numeric:tabular-nums;">
+            <span id="dab-session-temp" style="color:var(--accent,#c084fc);">—</span><span id="dab-session-target" style="color:var(--text-muted);font-weight:500;"></span>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">Timer</div>
+          <div id="dab-session-timer" style="font-size:0.85rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-primary);">—</div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">Draw</div>
+          <div id="dab-session-draw" style="font-size:0.85rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-primary);">—</div>
+        </div>
+      </div>
+
+      <!-- Idle: Start button -->
+      <div id="dab-idle-view" class="dab-view">
+        <p style="color:var(--text-secondary,#9ca3af);font-size:0.875rem;margin-bottom:16px;">
+          Take a dab — your airflow will be scored across flow, consistency, and control.
+          Target flow varies by difficulty.
+        </p>
+        <button class="btn btn-primary" style="width:100%;padding:14px;font-size:1.1rem;" onclick="app.startDab()">
+          Start Dab
+        </button>
+        <div style="margin-top:12px;text-align:center;font-size:0.75rem;color:var(--text-muted);">
+          Current: <span id="dab-idle-difficulty">Standard</span> · threshold <span id="dab-idle-threshold">12%</span>
+        </div>
+        <button id="btn-dab-diagnostic" class="btn btn-secondary dab-diagnostic-btn hidden"
+                style="width:100%;margin-top:14px;font-size:0.85rem;"
+                onclick="app.startDabDiagnostic()">
+          Run sensor diagnostic
+        </button>
+        <p class="dab-diagnostic-hint" style="margin-top:6px;text-align:center;font-size:0.7rem;color:var(--text-muted);">
+          30-second capture to inspect raw airflow, state transitions, and timing. Saves a JSON log.
+        </p>
+      </div>
+
+      <!-- Preheat: chamber is heating, M:SS countdown until drawable.
+           The first ~3s shows a brief "Get ready" intro with the
+           device's live airflow so the user can prepare their draw.
+           After that the panel flips to the timer + live draw
+           readout so they can see exactly when the chamber is hot
+           enough to start scoring. -->
+      <div id="dab-preheat-view" class="dab-view hidden" style="text-align:center;">
+        <div style="font-size:0.75rem;color:var(--text-muted);letter-spacing:0.04em;text-transform:uppercase;margin-bottom:6px;">
+          <span id="dab-preheat-state">Preheating</span>
+        </div>
+        <div id="dab-preheat-timer"
+             style="font-size:3.2rem;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;color:var(--accent,#c084fc);">
+          —
+        </div>
+        <p id="dab-preheat-subtitle"
+           style="color:var(--text-secondary);font-size:0.9rem;margin-top:10px;">
+          Scoring will start when the chamber is ready to draw.
+        </p>
+        <!-- Live airflow readout shared by the preheat intro ("Get
+             ready" + 3-2-1-style countdown) and the steady timer view.
+             The bar is filled by dabApplyFastReadingToUi every poll,
+             so the user sees the sensor respond to their draw while
+             the chamber is still warming. -->
+        <div id="dab-preheat-airflow" class="dab-preheat-airflow">
+          <div class="dab-preheat-airflow-label">Inhale live</div>
+          <div class="dab-preheat-airflow-row">
+            <div class="dab-preheat-airflow-bar">
+              <div class="dab-preheat-airflow-fill" id="dab-preheat-airflow-fill"></div>
+            </div>
+            <div class="dab-preheat-airflow-readout" id="dab-preheat-airflow-readout">0%</div>
+          </div>
+        </div>
+        <!-- The "Get ready" intro banner. Shown for the first 3s of
+             preheat (configurable) and then fades out as the steady
+             timer takes over. -->
+        <div id="dab-preheat-intro" class="dab-preheat-intro">
+          <div class="dab-preheat-intro-eyebrow">Get ready</div>
+          <div class="dab-preheat-intro-countdown" id="dab-preheat-intro-countdown">3</div>
+          <div class="dab-preheat-intro-text">Take a breath and line up. Scoring begins the moment the chamber is hot.</div>
+        </div>
+        <button class="btn btn-secondary" style="width:100%;margin-top:18px;" onclick="app.closeDabPanel()">
+          Cancel
+        </button>
+      </div>
+
+      <!-- Diagnostic: live capture of 100ms status snapshots -->
+      <div id="dab-diagnostic-view" class="dab-view hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <span style="font-size:0.8rem;color:var(--text-muted);">SENSOR DIAGNOSTIC</span>
+          <span id="dab-diag-meta"
+                style="font-size:0.75rem;color:var(--text-secondary);text-align:right;">
+            Waiting…
+          </span>
+        </div>
+        <canvas id="dab-diag-canvas" width="420" height="140"
+                style="width:100%;height:140px;background:var(--bg-input);border-radius:8px;display:block;margin-bottom:8px;">
+        </canvas>
+        <p style="font-size:0.7rem;color:var(--text-muted);margin:0 0 12px 0;">
+          Live airflow (% over time). Dashed line = threshold. Vertical lines = state transitions.
+        </p>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" style="flex:1;" onclick="app.closeDabPanel()">Close</button>
+          <button id="btn-dab-diag-save" class="btn btn-primary hidden" style="flex:1;"
+                  onclick="app.downloadDabDiagnosticLog()">
+            Save log
+          </button>
+        </div>
+      </div>
+
+      <!-- Active: Live chart -->
+      <div id="dab-active-view" class="dab-view hidden">
+        <div class="dab-live-head">
+          <span class="dab-live-label"><span class="dab-live-pulse" aria-hidden="true"></span>Live score</span>
+          <span id="dab-live-score">—</span>
+        </div>
+        <canvas id="dab-canvas" width="500" height="170" class="dab-live-canvas"></canvas>
+        <div class="dab-live-stats">
+          <div class="dab-live-stat">
+            <span class="dab-live-stat-label">Peak</span>
+            <span class="dab-live-stat-value" id="dab-peak-display">—</span>
+          </div>
+          <div class="dab-live-stat">
+            <span class="dab-live-stat-label">Time</span>
+            <span class="dab-live-stat-value" id="dab-time-display">0.0s</span>
+          </div>
+          <div class="dab-live-stat">
+            <span class="dab-live-stat-label">In zone</span>
+            <span class="dab-live-stat-value" id="dab-zone-display">—</span>
+          </div>
+        </div>
+        <button class="btn btn-secondary" style="width:100%;margin-top:14px;" onclick="app.stopDab()">End Dab</button>
+      </div>
+
+      <!-- Results -->
+      <div id="dab-results-view" class="dab-view hidden">
+        <div id="dab-results-empty" class="hidden"
+             style="text-align:center;margin:24px 8px;color:var(--text-secondary);">
+          <div style="font-size:1.1rem;font-weight:600;color:var(--text-primary);margin-bottom:6px;">
+            Not enough data
+          </div>
+          <p style="font-size:0.85rem;margin:0;">Need at least 1 second of drawing to score.</p>
+        </div>
+        <div id="dab-results-numbers">
+          <div style="text-align:center;margin-bottom:16px;">
+            <div style="font-size:4.2rem;font-weight:800;line-height:1.05;color:var(--accent,#c084fc);" id="dab-final-score">—</div>
+            <div style="font-size:0.85rem;color:var(--text-muted);margin-top:2px;">out of 10,000</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
+            <div class="dab-score-row">
+              <span class="dab-score-label">Total Flow</span>
+              <span class="dab-score-value" id="dab-score-flow">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Consistency</span>
+              <span class="dab-score-value" id="dab-score-consistency">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Target Control</span>
+              <span class="dab-score-value" id="dab-score-target">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Stability</span>
+              <span class="dab-score-value" id="dab-score-stability">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Finish Bonus</span>
+              <span class="dab-score-value" id="dab-score-finish">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Style</span>
+              <span class="dab-score-value" id="dab-score-style">—</span>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:16px;font-size:0.75rem;color:var(--text-muted);text-align:center;">
+            <div>Peak: <strong id="dab-result-peak" style="color:var(--text-primary);">—</strong></div>
+            <div>Duration: <strong id="dab-result-duration" style="color:var(--text-primary);">—</strong></div>
+            <div>Samples: <strong id="dab-result-samples" style="color:var(--text-primary);">—</strong></div>
+          </div>
+          <canvas id="dab-result-canvas" width="500" height="110" style="width:100%;height:110px;background:var(--bg-input);border-radius:12px;display:block;margin-bottom:16px;"></canvas>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" style="flex:1;" onclick="app.saveDabScore()">Save to History</button>
+          <button class="btn btn-primary" style="flex:1;" onclick="app.startDab()">Again</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="ble-client.js?v=15"></script>
+  <script src="Sortable.min.js?v=15"></script>
+  <script src="app.js?v=15"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(function(err) {

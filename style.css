@@ -1802,6 +1802,88 @@ select:-webkit-autofill {
   overflow-wrap: break-word;
 }
 
+.usage-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.usage-card {
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(255,255,255,0.085);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(145deg, rgba(0, 214, 180, 0.05), transparent 50%),
+    rgba(255,255,255,0.05);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.045);
+  position: relative;
+  overflow: hidden;
+}
+
+.usage-card::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(0, 214, 180, 0.18), transparent 50%);
+  opacity: 0;
+  transition: opacity 220ms ease;
+  pointer-events: none;
+}
+
+.usage-card:hover::after {
+  opacity: 1;
+}
+
+/* Cleaning-due state on the cleaning-reminder card: the threshold
+   has been hit and the user should run a burn-off cycle. The card
+   lights up with the accent gradient and the "Cleaning" text
+   switches to a bolder weight so the message reads at a glance. */
+.usage-card.cleaning-due {
+  border-color: rgba(0, 214, 180, 0.5);
+  background:
+    linear-gradient(135deg, rgba(0, 214, 180, 0.18), transparent 60%),
+    rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 0 1px rgba(0, 214, 180, 0.18), 0 8px 24px rgba(0, 214, 180, 0.08);
+  animation: cleaningDuePulse 2.4s ease-in-out infinite;
+}
+.usage-card.cleaning-due::after { opacity: 1; }
+.usage-card.cleaning-due .usage-value { color: var(--accent, #00d6b4); }
+.usage-card.cleaning-due .usage-trend { color: var(--accent, #00d6b4); }
+
+@keyframes cleaningDuePulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(0, 214, 180, 0.18), 0 8px 24px rgba(0, 214, 180, 0.08); }
+  50%      { box-shadow: 0 0 0 1px rgba(0, 214, 180, 0.32), 0 8px 28px rgba(0, 214, 180, 0.18); }
+}
+
+.usage-label {
+  display: block;
+  color: rgba(255,255,255,0.5);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.usage-value {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-primary);
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-trend {
+  display: block;
+  margin-top: 4px;
+  color: rgba(255,255,255,0.42);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+}
+
 .device-visual {
   position: relative;
   min-height: 270px;
@@ -2320,6 +2402,7 @@ body.heat-active .peak-light {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
+  align-items: stretch;
 }
 
 .profiles-empty { color: var(--muted, #888); font-size: 0.9em; padding: 1em; text-align: center; grid-column: 1 / -1; }
@@ -2351,6 +2434,7 @@ body.heat-active .peak-light {
   backdrop-filter: blur(28px) saturate(1.8);
   -webkit-backdrop-filter: blur(28px) saturate(1.8);
   box-shadow: var(--shadow-card);
+  min-height: 156px;
 }
 
 .local-profile-card {
@@ -6669,6 +6753,31 @@ html {
    surfaces (cards + items within cards) only while this mode is on.
    ========================================================================= */
 
+/* Calm-state guard.
+   The default (non-customizing) state must look calm: no grab cursor
+   on cards, no visible drag handles, no leftover DOM signaling
+   "you can rearrange this". Several other selectors elsewhere in the
+   stylesheet set `cursor: grab` on `.card` / `.advanced-panel` and
+   `.reorder-handle` so the customize affordance lights up when
+   `<body class="is-customizing">` is present. Those rules still
+   match in the calm state — they just shouldn't win. This block
+   uses `!important` to hard-disable the affordance outside the
+   mode, even if a stale handle is left in the DOM by a bug.
+   Real drag affordances that are NOT scoped to `.is-customizing`
+   (slider thumbs, profile-drag-handle on profile cards, mood color
+   slot handles) are explicitly excluded so the rule below only
+   neutralizes the customize-mode artifacts. The `[data-card-item-list]
+   > *` selector is intentionally NOT included here — that would
+   clobber the pointer cursor on voice-command chips and similar
+   button-children that happen to live in a reorderable list. */
+body:not(.is-customizing) .app-container .card,
+body:not(.is-customizing) .app-container .advanced-panel {
+  cursor: auto !important;
+}
+body:not(.is-customizing) .reorder-handle {
+  display: none !important;
+}
+
 .is-customizing {
   --reorder-accent: var(--accent-teal);
   --reorder-handle-bg: rgba(255, 255, 255, 0.06);
@@ -7139,6 +7248,11 @@ body.is-customizing .sort-guide { display: none; }
   line-height: 1.45;
   margin-top: 5px;
 }
+.settings-hint-inline {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
 .settings-input {
   width: 100%;
   background: var(--bg-input);
@@ -7606,4 +7720,645 @@ body.is-customizing .status-item:active {
   .settings-nav-btn.active { border-bottom-color: Highlight; }
   .settings-radio-label:has(input:checked) { border-color: Highlight; }
   .settings-close-btn { border: 2px solid CanvasText; }
+}
+
+
+/* Dab Scoring */
+.dab-score-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+.dab-score-label {
+  color: var(--text-secondary);
+}
+.dab-score-value {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+#dab-panel {
+  /* No more modal — the dab panel is a floating right-side card so the
+     user can keep the status / profile cards visible while scoring a
+     dab. Tapping outside the panel closes it (handled in JS) so the
+     rest of the page stays interactive. Width is intentionally wider
+     (480–560 px) and the corner radius is small (10 px) so the panel
+     fills the available side area without the "bubble" look. */
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  width: min(560px, calc(100vw - 32px));
+  z-index: 200;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+  pointer-events: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0;
+  animation: none;
+  opacity: 1;
+}
+
+#dab-panel.visible {
+  pointer-events: auto;
+}
+
+#dab-panel .modal.profile-editor-sheet {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  margin: 0;
+  overflow-y: auto;
+  background:
+    linear-gradient(160deg, rgba(0, 214, 180, 0.07), transparent 60%),
+    rgba(20, 22, 32, 0.74);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: translateX(0);
+  animation: dabPanelSlideIn 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+#dab-panel:not(.visible) .modal.profile-editor-sheet {
+  animation: dabPanelSlideOut 220ms cubic-bezier(0.55, 0, 0.6, 0.2) both;
+}
+
+@keyframes dabPanelSlideIn {
+  from { transform: translateX(40px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes dabPanelSlideOut {
+  from { transform: translateX(0);    opacity: 1; }
+  to   { transform: translateX(40px); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #dab-panel .modal.profile-editor-sheet { animation: none; }
+}
+
+@media (max-width: 720px) {
+  #dab-panel {
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    width: auto;
+  }
+}
+
+/* Dab preheat view — chamber-warming countdown that mirrors the
+   status card's M:SS timer. Centred, accent-coloured, and
+   intentionally quiet so the user knows the panel is waiting rather
+   than broken. */
+#dab-preheat-view {
+  padding: 8px 0 4px 0;
+}
+
+#dab-preheat-view #dab-preheat-timer {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* The data-source attribute is set by JS so future debug tooling can
+   tell the user "this came from the profile duration, not firmware"
+   if the timer looks off. Keeps the visible UI calm. */
+#dab-preheat-timer[data-source="profile_duration"] {
+  opacity: 0.7;
+}
+
+/* Preheat "Get ready" intro: shown for the first ~3s of preheat so
+   the user has time to inhale and line up their draw before scoring
+   starts. Fades out as the steady timer takes over. */
+.dab-preheat-intro {
+  margin: 14px 0 8px 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 214, 180, 0.22);
+  background:
+    linear-gradient(135deg, rgba(0, 214, 180, 0.08), transparent 60%),
+    rgba(255, 255, 255, 0.04);
+  text-align: center;
+  transition: opacity 320ms cubic-bezier(0.22, 1, 0.36, 1),
+              transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dab-preheat-intro.dab-preheat-intro-hidden {
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  max-height: 0;
+  margin: 0;
+  padding: 0 16px;
+  overflow: hidden;
+  border-color: transparent;
+}
+.dab-preheat-intro-eyebrow {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent, #00d6b4);
+}
+.dab-preheat-intro-countdown {
+  font-size: 2.6rem;
+  font-weight: 800;
+  line-height: 1.05;
+  margin: 4px 0 6px 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #f5f5f7);
+}
+.dab-preheat-intro-text {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #9ca3af);
+  line-height: 1.4;
+}
+
+/* Live airflow row under the timer: a thin glass bar + numeric
+   readout that updates from the same poll as the inhale panel so
+   the user can see their draw strength while the chamber is still
+   warming. Visible during preheat (steady timer) and active
+   session, hidden when the intro is showing on top. */
+.dab-preheat-airflow {
+  margin: 16px 0 4px 0;
+  transition: opacity 240ms ease;
+}
+.dab-preheat-airflow-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted, rgba(255,255,255,0.5));
+  margin-bottom: 6px;
+}
+.dab-preheat-airflow-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dab-preheat-airflow-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.dab-preheat-airflow-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, rgba(0, 214, 180, 0.6), rgba(0, 214, 180, 1));
+  box-shadow: 0 0 12px rgba(0, 214, 180, 0.4);
+  border-radius: inherit;
+  transition: width 120ms ease;
+}
+.dab-preheat-airflow-readout {
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #f5f5f7);
+  min-width: 48px;
+  text-align: right;
+}
+
+/* ---- Dab scoring polish: view transitions + smoothness ----
+   Every dab view shares an entry animation that runs whenever the
+   view flips from display:none to visible (the .hidden toggle), so
+   moving between idle -> preheat -> active -> results feels like one
+   continuous flow instead of hard cuts. All motion is wrapped in
+   prefers-reduced-motion so accessibility settings are respected. */
+@media (prefers-reduced-motion: no-preference) {
+  #dab-panel .dab-view {
+    animation: dabViewIn 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Session strip slides down from the header as it appears. */
+  #dab-session-strip {
+    animation: dabStripIn 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Preheat timer breathes gently while the chamber warms. */
+  #dab-preheat-timer {
+    animation: dabBreathe 2.4s ease-in-out infinite;
+  }
+
+  /* Final score pops in with a spring; the score rows cascade in
+     beneath it with a small stagger. */
+  #dab-final-score {
+    animation: dabScorePop 620ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  #dab-results-numbers .dab-score-row {
+    animation: dabRowIn 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  #dab-results-numbers .dab-score-row:nth-child(1) { animation-delay: 80ms; }
+  #dab-results-numbers .dab-score-row:nth-child(2) { animation-delay: 140ms; }
+  #dab-results-numbers .dab-score-row:nth-child(3) { animation-delay: 200ms; }
+  #dab-results-numbers .dab-score-row:nth-child(4) { animation-delay: 260ms; }
+  #dab-results-numbers .dab-score-row:nth-child(5) { animation-delay: 320ms; }
+  #dab-results-numbers .dab-score-row:nth-child(6) { animation-delay: 380ms; }
+}
+
+@keyframes dabViewIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes dabStripIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes dabBreathe {
+  0%, 100% { text-shadow: 0 0 0 rgba(192, 132, 252, 0); }
+  50%      { text-shadow: 0 0 22px rgba(192, 132, 252, 0.45); }
+}
+@keyframes dabScorePop {
+  from { opacity: 0; transform: scale(0.55); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes dabRowIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Session strip: smooth color/glow shift on the Draw cell while the
+   sensor is above the scoring threshold (class set from JS). */
+#dab-session-draw {
+  transition: color 240ms ease, text-shadow 240ms ease;
+}
+#dab-session-strip.drawing #dab-session-draw {
+  color: var(--accent, #c084fc);
+  text-shadow: 0 0 12px rgba(192, 132, 252, 0.55);
+}
+#dab-session-state,
+#dab-session-temp,
+#dab-session-timer {
+  transition: color 240ms ease, opacity 240ms ease;
+}
+
+/* Live score glow is handled by the gradient-text rule further down
+   (drop-shadow filter — text-shadow would draw a smeared box behind
+   the transparent gradient fill). */
+
+/* Score rows lift slightly on hover so the results card feels alive. */
+.dab-score-row {
+  transition: background 200ms ease, transform 200ms ease;
+}
+.dab-score-row:hover {
+  transform: translateX(2px);
+}
+
+/* Soft inner depth on the chart canvases. */
+#dab-canvas,
+#dab-result-canvas {
+  box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.25);
+}
+
+/* ---- Live scoring card: larger, cleaner, more modern ---- */
+.dab-live-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.dab-live-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Recording-style pulse dot next to the LIVE label. */
+.dab-live-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #c084fc);
+  box-shadow: 0 0 8px rgba(192, 132, 252, 0.8);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dab-live-pulse {
+    animation: dabLivePulse 1.6s ease-in-out infinite;
+  }
+}
+@keyframes dabLivePulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.75); }
+}
+
+/* Big gradient live score. */
+#dab-live-score {
+  font-size: 2.4rem;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(135deg, #e9d5ff 0%, #c084fc 55%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  filter: drop-shadow(0 0 10px rgba(192, 132, 252, 0.35));
+}
+
+.dab-live-canvas {
+  width: 100%;
+  height: 170px;
+  display: block;
+  background: var(--bg-input);
+  border-radius: 14px;
+  border: 1px solid rgba(192, 132, 252, 0.12);
+  margin-bottom: 10px;
+}
+
+/* Stat cells under the live chart — same visual language as the
+   session strip so the whole card reads as one unit. */
+.dab-live-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.dab-live-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 6px;
+  background: var(--bg-input);
+  border-radius: 10px;
+  transition: background 200ms ease, transform 200ms ease;
+}
+.dab-live-stat:hover {
+  transform: translateY(-1px);
+}
+
+.dab-live-stat-label {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.dab-live-stat-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  transition: color 240ms ease;
+}
+
+/* Bigger, more readable result rows. */
+.dab-score-row {
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  border-radius: 8px;
+}
+
+/* ---- Layout density (Settings > Display) ----
+   The density setting used to only change the grid gap, which was
+   invisible on most screens. It now drives card padding, section
+   spacing, control height, and a slight type scale so each step is
+   an obvious, whole-layout change. */
+body.density-compact {
+  --card-padding: 10px;
+  --control-pad-y: 5px;
+}
+body.density-compact .card,
+body.density-compact .settings-section,
+body.density-compact .heat-live-panel {
+  padding: 10px 12px;
+}
+body.density-compact .card h2 {
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+}
+body.density-compact .btn {
+  padding-top: 5px;
+  padding-bottom: 5px;
+  font-size: 0.85rem;
+}
+body.density-compact .settings-field {
+  margin-bottom: 10px;
+}
+
+body.density-spacious {
+  --card-padding: 26px;
+  --control-pad-y: 12px;
+}
+body.density-spacious .card,
+body.density-spacious .settings-section,
+body.density-spacious .heat-live-panel {
+  padding: 26px 28px;
+}
+body.density-spacious .card h2 {
+  font-size: 1.15rem;
+  margin-bottom: 16px;
+}
+body.density-spacious .btn {
+  padding-top: 12px;
+  padding-bottom: 12px;
+  font-size: 1rem;
+}
+body.density-spacious .settings-field {
+  margin-bottom: 24px;
+}
+
+/* ---- Customize mode: mac-home-screen editing ----
+   Whole cards and items are drag surfaces. Interactive children go
+   inert (taps reorder, they don't activate), everything wiggles
+   gently, and drag states get a glassmorphic treatment. */
+body.is-customizing .app-container [data-card-id] {
+  cursor: grab;
+}
+body.is-customizing .app-container [data-card-id]:active {
+  cursor: grabbing;
+}
+/* Make controls inert while editing (the reorder handle and the
+   customize bar stay live). */
+body.is-customizing .app-container [data-card-id] :is(button, input, select, textarea, a):not(.reorder-handle) {
+  pointer-events: none;
+}
+body.is-customizing [data-card-item-list] > [data-item-id] {
+  cursor: grab;
+}
+
+/* Gentle iOS-style wiggle, staggered so cards don't move in unison.
+   Paused mid-drag and removed entirely under reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  body.is-customizing:not(.sortable-active) .app-container [data-card-id] {
+    animation: customizeWiggle 1.4s ease-in-out infinite;
+    transform-origin: 50% 50%;
+  }
+  body.is-customizing:not(.sortable-active) .app-container [data-card-id]:nth-child(2n) {
+    animation-delay: -0.35s;
+  }
+  body.is-customizing:not(.sortable-active) .app-container [data-card-id]:nth-child(3n) {
+    animation-delay: -0.7s;
+  }
+  body.is-customizing:not(.sortable-active) [data-card-item-list] > [data-item-id] {
+    animation: customizeWiggleSmall 1.2s ease-in-out infinite;
+  }
+  body.is-customizing:not(.sortable-active) [data-card-item-list] > [data-item-id]:nth-child(2n) {
+    animation-delay: -0.3s;
+  }
+}
+@keyframes customizeWiggle {
+  0%, 100% { transform: rotate(-0.28deg); }
+  50%      { transform: rotate(0.28deg); }
+}
+@keyframes customizeWiggleSmall {
+  0%, 100% { transform: rotate(-0.5deg); }
+  50%      { transform: rotate(0.5deg); }
+}
+
+/* Glassmorphic drag states — cards. The ghost is the drop slot, the
+   active element floats above everything with depth and blur. */
+.card-drag-ghost {
+  opacity: 0.45;
+  border-radius: 14px;
+  outline: 2px dashed rgba(192, 132, 252, 0.55);
+  outline-offset: -2px;
+  background: rgba(192, 132, 252, 0.06) !important;
+}
+.card-drag-active,
+.sortable-drag {
+  opacity: 0.97 !important;
+  transform: scale(1.025);
+  border-radius: 14px;
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(192, 132, 252, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+}
+.card-drag-chosen,
+.sortable-chosen {
+  z-index: 30;
+}
+.sortable-ghost {
+  opacity: 0.4;
+  border-radius: 10px;
+  outline: 2px dashed rgba(192, 132, 252, 0.5);
+  outline-offset: -2px;
+  background: rgba(192, 132, 252, 0.06) !important;
+}
+
+/* ---- Lorax folder tree ---- */
+.lorax-tree-folder {
+  margin: 0;
+}
+.lorax-tree-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  transition: background 160ms ease, color 160ms ease;
+}
+.lorax-tree-summary::-webkit-details-marker { display: none; }
+.lorax-tree-summary:hover {
+  background: rgba(192, 132, 252, 0.08);
+  color: var(--text-primary);
+}
+.lorax-tree-caret {
+  flex: 0 0 auto;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.lorax-tree-folder[open] > .lorax-tree-summary .lorax-tree-caret {
+  transform: rotate(90deg);
+}
+.lorax-tree-foldericon {
+  flex: 0 0 auto;
+  color: var(--accent, #c084fc);
+  opacity: 0.8;
+}
+.lorax-tree-foldername {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.lorax-tree-count {
+  margin-left: auto;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.lorax-tree-children {
+  margin-left: 9px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(192, 132, 252, 0.16);
+}
+.lorax-path-item.lorax-tree-leaf {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 7px;
+}
+.lorax-path-item.lorax-tree-leaf .path-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sensor diagnostic view — live chart of airflow samples with state
+   transition lines. Same accent colour as the rest of the dab panel
+   so the user can read it as one consistent UI. */
+#dab-diagnostic-view {
+  padding: 4px 0;
+}
+
+#dab-diag-canvas {
+  background: var(--bg-input);
+}
+
+#dab-diag-meta {
+  font-variant-numeric: tabular-nums;
+}
+
+.btn-dab-diag-save,
+.dab-diagnostic-btn {
+  /* Diagnostic button — secondary action, visually lighter than
+     "Start Dab" so the user doesn't accidentally start a 30-second
+     capture mid-session. */
+  font-size: 0.85rem;
+}
+
+.dab-diagnostic-hint {
+  line-height: 1.3;
+}
+
+/* Friendly empty-state when the scorer had fewer than 5 samples
+   (less than ~1 second of drawing). Hides the fake score numbers. */
+#dab-results-empty {
+  background: var(--bg-card, rgba(255, 255, 255, 0.04));
+  border-radius: 8px;
+  padding: 18px 14px;
 }

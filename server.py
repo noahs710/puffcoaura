@@ -172,9 +172,24 @@ OFFICIAL_ATTRIBUTE_SPECS = {
     "bleFault.creditCount": ("/p/app/bt/ufcc", "uint32"),
 }
 
+# Draw-strength path resolution.
+#
+# The Puffco exposes a handful of heater / airflow paths but only
+# `/p/app/htr/inh` is the *canonical* dynamic-inhale signal — it tracks
+# real draws during HEAT_CYCLE_ACTIVE. `/p/app/htr/draw` (a different
+# register on the same subsystem) is a config / status word that does
+# NOT change during an inhale, so it pins a constant 0.34 / 0.42-ish
+# value into the UI and the scorer — exactly the "static 34% / 42%"
+# symptom users were seeing.
+#
+# Put `/p/app/htr/inh` first so the bridge transport (server.py) agrees
+# with the browser-BLE transport (ble-client.js), which has always
+# treated `inh` as the primary source. The other paths are kept as
+# fallbacks for hardware variants that don't expose `inh`, with the
+# heater-power proxy (`/p/htr/pwr`) as a last resort.
 DRAW_STRENGTH_CANDIDATES = (
-    ("/p/app/htr/draw", "float32", "direct"),
     ("/p/app/htr/inh", "float32", "direct"),
+    ("/p/app/htr/draw", "float32", "direct"),
     ("/p/app/htr/air", "float32", "direct"),
     ("/p/htr/air", "float32", "direct"),
     ("/p/htr/flow", "float32", "direct"),

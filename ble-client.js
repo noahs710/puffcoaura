@@ -66,10 +66,37 @@ class PuffcoBrowserBleClient {
 
   formatDrawStrengthValue(numeric, mode) {
     if (mode === 'heater_power_proxy') {
+      // Heater power really is 0-100; keep the hard cap here.
       const percent = Math.max(0, Math.min(100, Math.round(numeric)));
       return { percent, active: percent >= 8 };
     }
-    const percent = Math.max(0, Math.min(100, Math.round(numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric)));
+    // Direct inhale sensors can legitimately exceed 1.0 / 100% on a
+    // hard pull. Allow up to DRAW_STRENGTH_MAX_PERCENT so the UI can
+    // show how far past "max" the draw actually went instead of
+    // pinning everything at 100.
+    const max = PuffcoBrowserBleClient.DRAW_STRENGTH_MAX_PERCENT;
+    let percent = Math.max(0, Math.min(max, Math.round(numeric >= 0 && numeric <= 1.5 ? numeric * 100 : numeric)));
+    // Stuck-value filter: a few documented firmware config registers
+    // return a constant value (Peak: 0.34, Proxy: 0.42, etc.). If a
+    // direct reading matches one of those, suppress the read so the
+    // UI doesn't mislead the user with a "I'm inhaling at 34 %" gauge
+    // while the sensor is actually quiet. The dynamic inhale path
+    // (/p/app/htr/inh) is exempt here: a brief 0.34 reading on a
+    // soft inhale is legitimate, and the 2-sample static-register
+    // window in _looksLikeStaticRegister already demotes it if it
+    // pins there forever. This filter only catches direct-fallback
+    // paths that haven't been blacklisted yet but are still returning
+    // a known-bad constant — without needing a full probe round.
+    if (mode === 'direct') {
+      const stuck = PuffcoBrowserBleClient.DRAW_STRENGTH_STUCK_VALUES;
+      const tol = PuffcoBrowserBleClient.DRAW_STRENGTH_STUCK_TOLERANCE;
+      for (let i = 0; i < stuck.length; i += 1) {
+        if (Math.abs(numeric - stuck[i]) < tol) {
+          percent = 0;
+          break;
+        }
+      }
+    }
     return { percent, active: percent >= 6 };
   }
 
@@ -203,12 +230,38 @@ class PuffcoBrowserBleClient {
 
   // Dynamic inhale is the canonical draw-strength signal. Other readable paths
   // are left as firmware fallbacks, but /p/app/htr/inh is always tried first.
+  //
+  // /p/app/htr/draw is intentionally NOT in this list. On every Puffco
+  // firmware the user community has reversed so far, that path is a static
+  // config / status register that pins to a constant (typically ~0.34 or
+  // ~0.42), not an inhale sensor. If we walked into it as a fallback, it
+  // would read as "34% / 42%" forever, get promoted as the active source,
+  // and trip the dab-scoring debounce with a static 34% reading — exactly
+  // the "static 34% / 42% and dab panel opens on its own" symptom. We keep
+  // the path on a separate static-register list so the loop can still
+  // report it for diagnostic purposes without ever returning it.
   static DRAW_STRENGTH_DIRECT_CANDIDATES = [
     { path: PuffcoBrowserBleClient.DYNAMIC_INHALE_PATH },
-    { path: '/p/app/htr/draw' },
     { path: '/p/app/htr/air' },
     { path: '/p/htr/air' },
     { path: '/p/htr/flow' },
+    { path: '/p/app/htr/inh/str' },
+    { path: '/p/app/htr/inh/pct' },
+    { path: '/p/app/inh' },
+    { path: '/p/htr/inh' },
+    { path: '/p/htr/inh/pct' },
+    { path: '/p/app/htr/flow/str' },
+    { path: '/p/app/air' },
+    { path: '/p/air/flow' },
+    { path: '/p/air/str' },
+    { path: '/u/app/ui/inh' },
+  ];
+
+  // Known-bad paths that exist on the device but are NOT inhale sensors.
+  // They are kept here for diagnostics (and for the "force re-detect"
+  // tool to report) but never returned as a draw-strength reading.
+  static DRAW_STRENGTH_STATIC_REGISTERS = [
+    { path: '/p/app/htr/draw', reason: 'static config / status register, returns a constant (~0.34 / 0.42)' },
   ];
 
   // Heater power is an indirect proxy for draw strength. It only registers a
@@ -218,6 +271,64 @@ class PuffcoBrowserBleClient {
 
   static DRAW_STRENGTH_STORAGE_KEY = 'puffco_draw_strength_source';
   static DRAW_STRENGTH_NONZERO_THRESHOLD = 0.01;
+
+  // UI ceiling for direct inhale readings. Hard pulls overshoot the
+  // sensor's nominal 0-1 range, so percent values are allowed up to
+  // this cap instead of clamping at 100.
+  static DRAW_STRENGTH_MAX_PERCENT = 150;
+
+  // How many consecutive identical non-zero samples a path has to produce
+  // before we treat it as a static register and stop returning it. A real
+  // sensor always shows at least a little noise; a config register returns
+  // the exact same float forever. Lowered from 4 → 2 so the "stuck at
+  // 34 %" symptom on the first inhale is gone within two 1 Hz snapshots
+  // (≈2 s) instead of four.
+  static DRAW_STRENGTH_STATIC_REGISTER_WINDOW = 2;
+
+  // Hard-coded "stuck" values that the firmware returns from a few
+  // documented config / status registers (notably /p/app/htr/draw,
+  // which pins to ~0.34 on the Peak and ~0.42 on the Proxy). If a
+  // direct inhale reading matches one of these, the bar shows 0 % —
+  // the user doesn't see a misleading "I'm inhaling at 34 %" gauge
+  // while the sensor is actually quiet. The dynamic inhale path
+  // (/p/app/htr/inh) is exempt; only direct fallbacks get filtered.
+  static DRAW_STRENGTH_STUCK_VALUES = [0.34, 0.42];
+  static DRAW_STRENGTH_STUCK_TOLERANCE = 0.005;
+
+  // A few recent samples per path, used to detect "this path never moves"
+  // situations without needing a full probe round. Reset on reconnect.
+  _drawStrengthSamples = new Map();
+
+  _recordDrawStrengthSample(path, numeric) {
+    if (numeric == null || !Number.isFinite(numeric)) return;
+    const window = PuffcoBrowserBleClient.DRAW_STRENGTH_STATIC_REGISTER_WINDOW;
+    const bucket = this._drawStrengthSamples.get(path) || [];
+    bucket.push(numeric);
+    if (bucket.length > window) bucket.shift();
+    this._drawStrengthSamples.set(path, bucket);
+  }
+
+  // Returns true when the last N samples for `path` are all the same
+  // non-zero value — i.e. this looks like a static config register,
+  // not a real sensor. Used by readDrawStrength to demote bad paths.
+  _looksLikeStaticRegister(path) {
+    const bucket = this._drawStrengthSamples.get(path);
+    if (!bucket || bucket.length < PuffcoBrowserBleClient.DRAW_STRENGTH_STATIC_REGISTER_WINDOW) return false;
+    const first = bucket[0];
+    if (Math.abs(first) < PuffcoBrowserBleClient.DRAW_STRENGTH_NONZERO_THRESHOLD) return false;
+    return bucket.every((value) => Math.abs(value - first) < 1e-6);
+  }
+
+  clearDrawStrengthPin() {
+    this.saveDrawStrengthSource(null);
+    this._drawStrengthSamples.clear();
+  }
+
+  async redetectDrawStrength({ stateName = null, samples = 4, interval = 0.6 } = {}) {
+    this._drawStrengthSamples.clear();
+    this.clearDrawStrengthPin();
+    return this.observeDrawStrengthPaths({ samples, interval });
+  }
 
   static MOOD_PRESETS = {
     no_animation: { name: 'Static color', desc: 'Split your Peak into different color regions', tag: 'pikaled2-no-animation-mood-light', minColors: 1, maxColors: 6, defaults: ['#ff0000'], anim: 1 },
@@ -391,6 +502,9 @@ class PuffcoBrowserBleClient {
     this.versionChar = null;
     this.lastProfiles = null;
     this.commandQueue = Promise.resolve();
+    // Fresh session = forget the previous firmware's static-register history.
+    // A new device may expose a different baseline (or none at all).
+    this._drawStrengthSamples.clear();
   }
 
   scanDevices() {
@@ -612,11 +726,12 @@ class PuffcoBrowserBleClient {
     if (value == null) return null;
     const bytes = Array.from(value);
     if (!bytes.length) return null;
+    const pct = (byte) => Math.round((Math.max(0, Math.min(255, Number(byte) || 0)) / 255) * 100);
     if (bytes.length >= 4) {
       const names = ['base', 'front', 'glass', 'logo'];
-      return bytes.slice(0, 4).map((byte, index) => `${names[index]} ${byte}/255`).join(', ');
+      return bytes.slice(0, 4).map((byte, index) => `${names[index]} ${pct(byte)}%`).join(', ');
     }
-    return `${bytes[0]}/255`;
+    return `${pct(bytes[0])}%`;
   }
 
   chamberLabel(value) {
@@ -925,6 +1040,9 @@ class PuffcoBrowserBleClient {
     const savedIsDirect = Boolean(saved?.path && savedMode !== 'heater_power_proxy');
     const directReadings = [];
     let savedDirectReading = null;
+    const staticRegisterPaths = new Set(
+      PuffcoBrowserBleClient.DRAW_STRENGTH_STATIC_REGISTERS.map((entry) => entry.path)
+    );
 
     // 0) Dynamic inhale is the canonical signal. If the firmware exposes it,
     //    report it even at zero so the UI shows the real trigger amount.
@@ -933,28 +1051,49 @@ class PuffcoBrowserBleClient {
       'dynamic_inhale',
     );
     if (dynamicReading) {
-      this.promoteDrawStrengthSource(dynamicReading, 'read_dynamic_inhale');
-      return dynamicReading;
+      this._recordDrawStrengthSample(dynamicReading.source, dynamicReading.value);
+      if (!this._looksLikeStaticRegister(dynamicReading.source)) {
+        this.promoteDrawStrengthSource(dynamicReading, 'read_dynamic_inhale');
+        return dynamicReading;
+      }
     }
 
     // 1) Honor a pinned direct fallback when it is active, but still let the
-    //    candidate walk below self-heal stale pins that sit at zero forever.
+    //    candidate walk below self-heal stale pins that sit at zero forever
+    //    or that look like a static config register (the classic "34% / 42%
+    //    forever" bug). If the saved pin path is on the static-register
+    //    exclusion list, drop it on the floor without reading.
     if (savedIsDirect) {
-      savedDirectReading = await this.readDrawStrengthPath(saved.path, savedMode);
-      if (savedDirectReading) {
-        directReadings.push(savedDirectReading);
-        if (savedDirectReading.active) return savedDirectReading;
+      if (staticRegisterPaths.has(saved.path)) {
+        this.saveDrawStrengthSource(null);
+      } else {
+        savedDirectReading = await this.readDrawStrengthPath(saved.path, savedMode);
+        if (savedDirectReading) {
+          this._recordDrawStrengthSample(savedDirectReading.source, savedDirectReading.value);
+          if (this._looksLikeStaticRegister(savedDirectReading.source)) {
+            this.saveDrawStrengthSource(null);
+          } else {
+            directReadings.push(savedDirectReading);
+            if (savedDirectReading.active) return savedDirectReading;
+          }
+        }
       }
     }
 
     // 2) Try every remaining direct inhale / airflow fallback in every state. Do not stop
     //    at the first finite zero, because some firmware exposes placeholder
-    //    paths that read cleanly but never fire.
+    //    paths that read cleanly but never fire. Skip both the dynamic
+    //    inhale (already tried above) and any path on the static-register
+    //    exclusion list (those will never be a real sensor).
     for (const candidate of PuffcoBrowserBleClient.DRAW_STRENGTH_DIRECT_CANDIDATES) {
       if (candidate.path === PuffcoBrowserBleClient.DYNAMIC_INHALE_PATH) continue;
+      if (staticRegisterPaths.has(candidate.path)) continue;
       if (savedIsDirect && candidate.path === saved.path) continue;
       const reading = await this.readDrawStrengthPath(candidate.path, this.drawStrengthModeForPath(candidate.path));
-      if (reading) directReadings.push(reading);
+      if (!reading) continue;
+      this._recordDrawStrengthSample(reading.source, reading.value);
+      if (this._looksLikeStaticRegister(reading.source)) continue;
+      directReadings.push(reading);
     }
 
     const activeDirect = directReadings.find((reading) => reading.active);
@@ -978,7 +1117,10 @@ class PuffcoBrowserBleClient {
         ? saved.path
         : PuffcoBrowserBleClient.DRAW_STRENGTH_PROXY_PATH;
       const proxyReading = await this.readDrawStrengthPath(proxyPath, 'heater_power_proxy');
-      if (proxyReading) return proxyReading;
+      if (proxyReading) {
+        this._recordDrawStrengthSample(proxyReading.source, proxyReading.value);
+        return proxyReading;
+      }
     }
     return { value: null, percent: 0, active: false, source: null, mode: 'not_found' };
   }
@@ -1458,7 +1600,17 @@ class PuffcoBrowserBleClient {
   }
 
   async setBrightness(params) {
-    const values = [params.base, params.mid, params.glass, params.logo].map((value) => Math.max(1, Math.min(255, Number(value) || 1)));
+    // The sliders operate on a 1-100 % scale so the UI can show
+    // "80%" without a hardware lookup table, but the device's
+    // /u/app/ui/lbrt register is a 0-255 byte per LED. Map percent
+    // to byte here so "100 %" in the UI is actually 255 on the
+    // device; otherwise the chamber reads back as 100/255 (≈39 %)
+    // and the user sees "100 %" on the slider but a dim ring.
+    const toByte = (value) => {
+      const pct = Math.max(1, Math.min(100, Number(value) || 1));
+      return Math.max(1, Math.min(255, Math.round((pct * 255) / 100)));
+    };
+    const values = [params.base, params.mid, params.glass, params.logo].map(toByte);
     await this.writeShort('/u/app/ui/lbrt', 0, 0, Uint8Array.from(values));
     return { type: 'ok', message: 'LED brightness updated', data: await this.snapshot(false) };
   }

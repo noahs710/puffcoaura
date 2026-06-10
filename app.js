@@ -78,6 +78,1680 @@ const app = (() => {
   let voiceAnalyser = null;
   let voiceMeterFrame = null;
   let voiceBluetoothPending = false;
+
+  // ============================================================
+  // Dab Scoring
+  // ============================================================
+  //
+  // The scorer is gated on the device state. The original implementation
+  // kicked into the countdown as soon as the airflow sensor crossed the
+  // threshold, but the device sends airflow readings during preheat and
+  // even when the user is not drawing, so a single 6% noise sample was
+  // enough to trigger a fake "dab" that was really a heater pulse.
+  //
+  // The scorer now arms on the device's own state machine: when a heat
+  // cycle starts it auto-shows the preheat view (one consistent M:SS
+  // countdown, matching the status card), and scoring starts the
+  // instant the chamber finishes preheating and enters HEAT_CYCLE_ACTIVE
+  // -- no 3-2-1, the session begins right as the preheat ends. Using the
+  // PREHEAT -> ACTIVE transition as the trigger is what kills the old
+  // preheat-noise false positives: a noisy reading during PREHEAT can no
+  // longer start a dab because PREHEAT is not the drawing state.
+  //
+  // The N-consecutive-above-threshold debounce is kept only as a
+  // fallback for the case where scoring is enabled mid-cycle while the
+  // device is already ACTIVE (so no transition edge is observed).
+
+  // Difficulty target flows (sum of airflow samples needed for max flow score)
+  const DAB_TARGET_FLOW = { casual: 15, standard: 30, beast: 50 };
+  const DAB_IDEAL_MIN = 0.45;   // ideal airflow range lower bound (normalized 0-1)
+  const DAB_IDEAL_MAX = 0.75;   // ideal airflow range upper bound (normalized 0-1)
+  // (drop timeout is user-tunable now — see dabDropTimeoutMs below)
+  const DAB_MAX_VARIANCE = 0.25;    // std dev that gives consistency score of 0
+  // Number of consecutive above-threshold 1Hz samples required to leave
+  // the 'idle' / 'preheating' gate and start the 3-2-1 countdown. The
+  // original single-sample gate produced false positives on preheat
+  // pulses and on single-tick airflow noise. Three samples is ~3 seconds
+  // of sustained draw, which matches the user's actual inhale.
+  const DAB_DEBOUNCE_SAMPLES = 3;
+  // Minimum samples before calcDabFullScore returns a real score. A
+  // session with fewer than this gets zeros + an insufficient flag so
+  // the UI can show "Need at least 1 second of drawing to score" instead
+  // of a misleading number.
+  const DAB_MIN_SAMPLES_FOR_SCORE = 5;
+  // ---- Adaptive draw calibration ----
+  // Different chambers/hardware top out at very different raw sensor
+  // values — some users max out near 60 raw, which made it "impossible
+  // to pass 60%" no matter how hard they pulled. The app now LEARNS
+  // the device's true maximum: any raw reading above the current
+  // learned max raises it instantly (mid-draw), and the value persists
+  // across sessions with a gentle decay so a one-off glitch can't pin
+  // it forever. Every percent the UI shows is normalized to this max,
+  // so the user's hardest pull reads ~100%.
+  const DAB_DRAW_MAX_KEY = 'puffco:dab_draw_max_v1';
+  // Two-tap calibration: keep BOTH an "all-time max" (which grows
+  // immediately when a new record is set) AND a "rolling recent peak"
+  // window (the max of the last 5 sessions). The reported learned
+  // max is the larger of the two, so the user gets fast response on
+  // a new hard pull but the bar still calibrates to reality over
+  // the next few sessions instead of pinning to a single lucky hit.
+  // The previous single-bucket scheme would pin at 90 (the default)
+  // forever even when the user's hardest pull was 45 — the
+  // normalized value then maxed out at 50% and stayed there.
+  const DAB_PEAK_HISTORY_KEY = 'puffco:dab_peak_history_v1';
+  const DAB_PEAK_WINDOW = 5;
+  let dabLearnedMaxPct = (() => {
+    try {
+      const v = Number(localStorage.getItem(DAB_DRAW_MAX_KEY));
+      return Number.isFinite(v) && v >= 20 && v <= 150 ? v : 60;
+    } catch { return 60; }
+  })();
+
+  function readPeakHistory() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(DAB_PEAK_HISTORY_KEY) || '[]');
+      if (!Array.isArray(raw)) return [];
+      return raw.filter((n) => Number.isFinite(Number(n)) && n > 0).map(Number).slice(0, DAB_PEAK_WINDOW);
+    } catch { return []; }
+  }
+  function writePeakHistory(history) {
+    try { localStorage.setItem(DAB_PEAK_HISTORY_KEY, JSON.stringify(history.slice(0, DAB_PEAK_WINDOW))); }
+    catch { /* ignore */ }
+  }
+  function recordSessionPeak(peak) {
+    if (!Number.isFinite(peak) || peak <= 0) return;
+    const next = [peak, ...readPeakHistory()].slice(0, DAB_PEAK_WINDOW);
+    writePeakHistory(next);
+  }
+  function rollingRecentPeak() {
+    const hist = readPeakHistory();
+    if (!hist.length) return null;
+    return Math.max(...hist);
+  }
+
+  function dabPersistLearnedMax() {
+    try { localStorage.setItem(DAB_DRAW_MAX_KEY, String(Math.round(dabLearnedMaxPct * 10) / 10)); }
+    catch { /* ignore */ }
+  }
+
+  // Raw sensor percent -> normalized percent where 100 = the hardest
+  // pull this device has ever produced. Grows the learned max live so
+  // the very sample that sets a new record still reads ~100.
+  // When the persisted learned max still equals the original default
+  // (60) the user hasn't built a real calibration yet, so the very
+  // first non-trivial reading (>=20 %) snaps the max to that sample.
+  // That fixes the "I pull hard and the bar stops at 50 %" symptom on
+  // the first dab after install / reset, without throwing away a
+  // calibrated value once one exists.
+  function dabNormalizePercent(rawSensorPct) {
+    const raw = Number(rawSensorPct) || 0;
+    const isUncalibrated = dabLearnedMaxPct === 60; // default — no real data yet
+    if (isUncalibrated && raw >= 20) {
+      // Snap to the first real reading: a one-shot calibration that
+      // gives the right answer on the very first pull, no waiting for
+      // the decay loop to catch up.
+      dabLearnedMaxPct = Math.min(150, raw);
+      dabPersistLearnedMax();
+    } else if (raw > dabLearnedMaxPct) {
+      dabLearnedMaxPct = Math.min(150, raw);
+      dabPersistLearnedMax();
+    }
+    return Math.max(0, Math.min(150, (raw / dabLearnedMaxPct) * 100));
+  }
+
+  // After each session, refresh the rolling window and shrink the
+  // learned max if the rolling max is well below it. The previous
+  // implementation decayed 4 % per session with a 75 % threshold, but
+  // users with a real max of 45 raw would see only 50 % on the
+  // bar for many sessions before the decay caught up. The new rule
+  // snaps the learned max to the rolling max within 1-2 sessions
+  // when there's a clear gap, so a fresh chamber or new device gets
+  // calibrated on the next pull instead of the next pull after that.
+  function dabDecayLearnedMax(sessionPeakRaw) {
+    if (!Number.isFinite(sessionPeakRaw) || sessionPeakRaw <= 0) return;
+    recordSessionPeak(sessionPeakRaw);
+    const recent = rollingRecentPeak();
+    if (recent == null) return;
+    // If the recent sessions are clearly below the current learned
+    // max, snap to the recent max (clamped so a single tiny reading
+    // never drops us below 30 raw — that's the hardware floor).
+    if (recent < dabLearnedMaxPct * 0.85) {
+      dabLearnedMaxPct = Math.max(30, recent);
+      dabPersistLearnedMax();
+    }
+  }
+  // ---- User-tunable dab settings (Settings > Dab) ----
+  // Each has a shipped default; applyDabTuning() folds in the user's
+  // saved overrides at boot and whenever a setting changes.
+  // UI ceiling for raw airflow (charts + readouts).
+  let DAB_UI_AIRFLOW_MAX = 150;
+  // Fast sampling interval while a session is live (browser BLE only).
+  let DAB_FAST_SAMPLE_MS = 150;
+  // Idle (no scoring session) bar poll — also reads the pinned
+  // /p/app/htr/inh characteristic but at a slower rate so the bar
+  // feels alive between dabs without burning the radio. 100ms
+  // matches the 1Hz snapshot's human-eye latency (~150ms reaction
+  // threshold) so an inhale registers before the user notices the
+  // delay, and is cheap enough on the radio to leave running.
+  let DAB_IDLE_BAR_SAMPLE_MS = 100;
+  // Whether the fast sampler runs at all.
+  let dabFastSamplerEnabled = true;
+  // How long airflow must stay below threshold before the dab ends.
+  let dabDropTimeoutMs = 1200;
+  // Hard cap on session length.
+  let dabMaxDurationMs = 90000;
+  // Auto-open the preheat view when a heat cycle starts.
+  let dabAutoArm = true;
+
+  function applyDabTuning(all) {
+    const num = (v, d, lo, hi) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+    };
+    DAB_UI_AIRFLOW_MAX = num(all.dabUiAirflowMax, 150, 100, 200);
+    DAB_FAST_SAMPLE_MS = num(all.dabFastSampleMs, 150, 100, 1000);
+    // Idle-bar poll: settings range 50–400ms so power users can tighten
+    // it further (lower bound keeps the radio at <=20Hz which is safe
+    // for browser BLE notify budgets).
+    DAB_IDLE_BAR_SAMPLE_MS = num(all.dabIdleBarSampleMs, 100, 50, 400);
+    dabFastSamplerEnabled = all.dabFastSampler !== false;
+    dabDropTimeoutMs = num(all.dabDropTimeoutMs, 1200, 500, 5000);
+    dabMaxDurationMs = num(all.dabMaxDurationS, 90, 30, 300) * 1000;
+    dabAutoArm = all.dabAutoArm !== false;
+  }
+  // Length of the in-app "Run sensor diagnostic" capture window.
+  const DAB_DIAGNOSTIC_DURATION_MS = 30000;
+  // Sensor poll interval used by the diagnostic — every 100ms is much
+  // finer than the regular 1Hz status poll, which is the whole point of
+  // running the diagnostic.
+  const DAB_DIAGNOSTIC_POLL_MS = 100;
+
+  const DAB_HISTORY_KEY = 'puffco:dab_history_v1';
+
+  function getDabHistory() {
+    try { return JSON.parse(localStorage.getItem(DAB_HISTORY_KEY) || '[]'); } catch { return []; }
+  }
+  function saveDabHistory(history) {
+    try { localStorage.setItem(DAB_HISTORY_KEY, JSON.stringify(history)); } catch { /* ignore */ }
+  }
+
+  // dabState: 'idle' | 'preheating' | 'active' | 'results' | 'diagnostic'
+  let dabState = 'idle';
+  let dabEnabled = false;
+  let dabDifficulty = 'standard';
+  let dabThreshold = 12;         // airflow percent — was 6, raised to keep noise out
+  let dabSamples = [];           // [{ts, airflow}] normalized 0-1
+  let dabDroppedBelowAt = null;  // timestamp when airflow last dropped below threshold
+  let dabCanvasCtx = null;
+  let dabAnimationFrame = null;
+  let dabStartTime = null;
+  // Number of consecutive above-threshold samples seen while waiting in
+  // 'idle' or 'preheating'. Reset to 0 the moment a sample falls below
+  // the threshold. Compared against DAB_DEBOUNCE_SAMPLES.
+  let dabDebounceCount = 0;
+  // The most recent state the device reported to the dab gate. Used to
+  // detect PREHEAT -> ACTIVE transitions and to keep the preheat
+  // countdown ticking even when the airflow stays at zero.
+  let dabLastStateKey = '';
+  // Diagnostic-run state (populated only while the diagnostic view is
+  // active; cleared when the user closes the panel).
+  let dabDiag = null;
+
+  // Track the strongest raw sensor reading of the current session so
+  // endDabSession can drift the learned max back down when the user's
+  // hardware stops reaching it (see dabDecayLearnedMax).
+  let dabSessionPeakRaw = 0;
+
+  function dabCalibrate(percent) {
+    // `percent` is already normalized (100 = device max), so scoring
+    // airflow is simply normalized/100, capped at 1.0. Overshoot above
+    // the learned max still shows in the charts via the raw field.
+    return Math.min(1, percent / 100);
+  }
+
+  // True only when the device is in the part of the heat cycle the
+  // user can actually draw from. PREHEAT, FADE, and IDLE all fail this
+  // gate even if the airflow sensor reports a noisy reading.
+  function dabIsDrawingState(data) {
+    if (!isHeatActive(data)) return false;
+    return normalizeStateKey(data?.state) === 'HEAT_CYCLE_ACTIVE';
+  }
+
+  function dabOnStatus(data) {
+    if (!dabEnabled || !connected) return;
+    const rawSensor = Number(data.draw_strength_percent || 0);
+    if (dabState === 'active' && rawSensor > dabSessionPeakRaw) dabSessionPeakRaw = rawSensor;
+    const percent = dabNormalizePercent(rawSensor);
+    const now = Date.now();
+    const stateKey = normalizeStateKey(data?.state);
+    const prevStateKey = dabLastStateKey;
+    const stateChanged = stateKey !== prevStateKey;
+    dabLastStateKey = stateKey;
+    // True on exactly the poll where the chamber finishes preheating and
+    // becomes drawable (any non-active state -> HEAT_CYCLE_ACTIVE). This
+    // is the "preheat just ended" edge the scorer arms on, so scoring
+    // starts the instant the device is ready to draw rather than waiting
+    // for several sustained airflow samples.
+    const preheatJustEnded = stateKey === 'HEAT_CYCLE_ACTIVE' && prevStateKey !== 'HEAT_CYCLE_ACTIVE';
+
+    // The diagnostic view is the only thing that runs while the user
+    // explicitly asked the panel to capture data. Don't compete with it
+    // for the airflow readings.
+    if (dabState === 'diagnostic') return;
+
+    // Keep the live session strip (state / temp / timer / draw) in sync
+    // on every poll. It self-hides outside preheat/countdown/active.
+    dabRenderSessionStrip(data);
+
+    // Keep the preheat countdown ticking in the UI even when the user
+    // isn't inhaling (sensor is at 0). Also detect the transition that
+    // arms the scoring gate.
+    if (dabState === 'preheating') {
+      dabRenderPreheatView(data);
+      if (stateKey === 'HEAT_CYCLE_ACTIVE') {
+        // Preheat ended — scoring starts immediately, no 3-2-1. Feed
+        // the observed transition into the preheat-timer calibration
+        // first so the next cycle's countdown is more accurate.
+        dabCalibratePreheatOffset();
+        dabDebounceCount = 0;
+        startDabSession();
+        return;
+      }
+      if (stateKey === 'IDLE' || stateKey === 'MASTER_OFF' || stateKey === 'TEMP_SELECT') {
+        // User backed out of the heat cycle (or the device did). Treat
+        // the preheat as cancelled — no score, just kick back to idle.
+        dabCancelPreheating();
+        return;
+      }
+      return;
+    }
+
+    if (dabState === 'idle') {
+      // Auto-arm the preheat view the moment the device begins a heat
+      // cycle, even if the user never tapped "Start Dab". This gives one
+      // consistent M:SS countdown and guarantees the scorer is primed to
+      // fire the instant the chamber becomes drawable. Respect the
+      // "auto-open on heat" setting — when off, only arm if the panel
+      // is already open.
+      if (dabState === 'idle' && stateKey === 'HEAT_CYCLE_PREHEAT') {
+        const panelOpen = document.getElementById('dab-panel')?.classList.contains('visible');
+        if (dabAutoArm || panelOpen) {
+          dabShowPreheatView(data);
+        }
+        return;
+      }
+      // Preheat just ended -> the chamber is ready to draw, so start
+      // scoring immediately (no countdown) instead of waiting for the
+      // airflow debounce. This is the "scoring starts right as preheat
+      // ends" behavior. The state transition itself is the trigger,
+      // which also sidesteps the preheat-noise false positives the
+      // debounce guarded against (a noisy reading during PREHEAT can no
+      // longer start a dab because PREHEAT never satisfies this edge).
+      if (dabState === 'idle' && preheatJustEnded) {
+        dabCalibratePreheatOffset();
+        dabDebounceCount = 0;
+        showDabPanel();
+        startDabSession();
+        return;
+      }
+      // Hard gate: never start scoring while the device is preheating,
+      // fading, or just sitting at idle. A 12% reading on a chamber
+      // that hasn't finished ramping up is noise. Reached when scoring
+      // was enabled mid-cycle and no preheat->active edge was observed,
+      // in which case we fall back to the sustained-draw debounce below.
+      if (!dabIsDrawingState(data)) {
+        dabDebounceCount = 0;
+        return;
+      }
+      if (percent >= dabThreshold) {
+        dabDebounceCount++;
+        if (dabDebounceCount >= DAB_DEBOUNCE_SAMPLES && dabState === 'idle') {
+          showDabPanel();
+          startDabSession();
+        }
+      } else {
+        dabDebounceCount = 0;
+      }
+      return;
+    }
+
+    if (dabState === 'active') {
+      // Even inside an active session, double-check the device is still
+      // in HEAT_CYCLE_ACTIVE. If something flipped it back to PREHEAT
+      // mid-dab (rare but observed when a profile finishes early), keep
+      // sampling — the existing airflow-based end detection is
+      // sufficient to terminate the session.
+      dabRecordActiveSample(percent, now);
+    }
+    // No-op for 'results' — the panel is in its final state until the
+    // user either dismisses it or taps "Again".
+  }
+
+  // Record one airflow sample into the live session and run the
+  // end-of-dab detection. Shared by the 1Hz status poll and the 250ms
+  // fast sampler so both feeds obey identical rules. Samples carry the
+  // calibrated 0-1 airflow (scoring) AND the raw percent (UI).
+  function dabRecordActiveSample(percent, now = Date.now()) {
+    if (dabState !== 'active') return;
+    const af = dabCalibrate(percent);
+    dabSamples.push({ ts: now, airflow: af, raw: percent });
+
+    // Check for dab end: airflow below threshold for too long
+    if (percent < dabThreshold) {
+      if (!dabDroppedBelowAt) dabDroppedBelowAt = now;
+      if (now - dabDroppedBelowAt > dabDropTimeoutMs) {
+        endDabSession();
+        return;
+      }
+    } else {
+      dabDroppedBelowAt = null;
+    }
+
+    // Force-end if running longer than the configured cap
+    if (now - dabStartTime > dabMaxDurationMs) {
+      endDabSession();
+    }
+  }
+
+  // ---- Fast sampler ----
+  // While a session is live on browser BLE, read just the pinned
+  // draw-strength characteristic every DAB_FAST_SAMPLE_MS. A single
+  // characteristic read is cheap compared to the full status snapshot,
+  // so the chart, live score, and session strip update at ~4Hz instead
+  // of riding the 1Hz poll. Falls back silently to 1Hz sampling on the
+  // bridge transport or when no source is pinned yet.
+  let dabFastTimer = null;
+  let dabFastInFlight = false;
+
+  function dabStartFastSampler() {
+    if (dabFastTimer) return;
+    if (!dabFastSamplerEnabled) return;
+    dabFastTimer = setInterval(async () => {
+      // Runs during BOTH preheat and the live session. During preheat
+      // it watches the state register directly, so the scoring session
+      // starts within one fast tick (~150ms) of the chamber becoming
+      // drawable instead of waiting for the next 1Hz status poll.
+      if (dabState !== 'active' && dabState !== 'preheating') {
+        dabStopFastSampler();
+        return;
+      }
+      if (dabFastInFlight) return;
+      if (transportMode !== 'browser_ble') return;
+      let client = null;
+      try { client = getBrowserBle(); } catch { return; }
+      if (!client?.connected) return;
+      dabFastInFlight = true;
+      try {
+        if (dabState === 'preheating') {
+          // 8 === HEAT_CYCLE_ACTIVE in the firmware state machine.
+          const stateId = await client.readUint8('/p/app/stat/id');
+          if (Number(stateId) === 8 && dabState === 'preheating') {
+            dabCalibratePreheatOffset();
+            dabDebounceCount = 0;
+            startDabSession();
+            return;
+          }
+        } else {
+          const src = client.drawStrengthSource;
+          if (!src?.path) return;
+          const reading = await client.readDrawStrengthPath(src.path, src.mode);
+          if (reading && dabState === 'active') {
+            if (reading.percent > dabSessionPeakRaw) dabSessionPeakRaw = reading.percent;
+            const norm = dabNormalizePercent(reading.percent);
+            dabRecordActiveSample(norm);
+            dabApplyFastReadingToUi(norm);
+          }
+        }
+      } catch { /* next tick retries */ }
+      finally { dabFastInFlight = false; }
+    }, DAB_FAST_SAMPLE_MS);
+  }
+
+  function dabStopFastSampler() {
+    if (dabFastTimer) {
+      clearInterval(dabFastTimer);
+      dabFastTimer = null;
+    }
+    dabFastInFlight = false;
+  }
+
+  // ---- Idle bar poll ----
+  // The 1Hz status snapshot is the only feed the inhale panel got
+  // before a scoring session started, so the bar could lag a full
+  // second behind the user's actual inhale. The idle poll reads the
+  // pinned /p/app/htr/inh characteristic at ~10Hz and feeds it to
+  // the bar / readout so the bar feels live between sessions too.
+  // Stops automatically when the user is disconnected, when there's
+  // no source pinned yet (the bar falls back to the 1Hz snapshot
+  // until the redetect resolver picks one), and when a fast sampler
+  // is already running (the two would just collide on the radio).
+  let dabIdleBarTimer = null;
+  let dabIdleBarInFlight = false;
+  function dabStartIdleBarPoll() {
+    if (dabIdleBarTimer) return;
+    if (transportMode !== 'browser_ble') return;
+    let client = null;
+    try { client = getBrowserBle(); } catch { return; }
+    if (!client?.connected) return;
+    dabIdleBarTimer = setInterval(async () => {
+      if (dabIdleBarInFlight) return;
+      if (!drawBarState.connected) { dabStopIdleBarPoll(); return; }
+      // Don't fight the scoring-session sampler for the radio.
+      if (dabFastTimer) return;
+      let c = null;
+      try { c = getBrowserBle(); } catch { return; }
+      if (!c?.connected) { dabStopIdleBarPoll(); return; }
+      const src = c.drawStrengthSource;
+      if (!src?.path) return; // wait for the resolver to pick a path
+      dabIdleBarInFlight = true;
+      try {
+        const reading = await c.readDrawStrengthPath(src.path, src.mode);
+        if (reading && Number.isFinite(reading.percent)) {
+          const norm = dabNormalizePercent(reading.percent);
+          dabApplyFastReadingToUi(norm);
+        }
+      } catch { /* next tick retries */ }
+      finally { dabIdleBarInFlight = false; }
+    }, DAB_IDLE_BAR_SAMPLE_MS);
+  }
+  function dabStopIdleBarPoll() {
+    if (dabIdleBarTimer) {
+      clearInterval(dabIdleBarTimer);
+      dabIdleBarTimer = null;
+    }
+    dabIdleBarInFlight = false;
+  }
+
+  // Push a fast sample into the visible readouts between status polls:
+  // the inhale panel bar/number, the session strip Draw cell, and
+  // (during preheat + active) the preheat view's live airflow bar so
+  // the user can see their draw strength while the chamber is still
+  // warming. The full updateDrawStrengthUI pass still runs on each
+  // 1Hz snapshot.
+  function dabApplyFastReadingToUi(percent) {
+    const p = Math.max(0, Math.min(DAB_UI_AIRFLOW_MAX, Math.round(Number(percent) || 0)));
+    drawBarState.target = Math.min(100, p);
+    if (drawBarState.connected) startDrawBarLoop();
+    const readout = document.getElementById('draw-strength-readout');
+    if (readout && drawBarState.lastReadoutPct !== p) {
+      readout.textContent = `${p}%`;
+      drawBarState.lastReadoutPct = p;
+    }
+    const strip = document.getElementById('dab-session-strip');
+    const drawEl = document.getElementById('dab-session-draw');
+    if (strip && drawEl && !strip.classList.contains('hidden')) {
+      drawEl.textContent = `${p}%`;
+      strip.classList.toggle('drawing', p >= dabThreshold);
+    }
+    // Preheat / active airflow row — only write when the preheat
+    // view is actually visible so we don't churn the DOM on the
+    // 10Hz idle poll while the user is in another tab.
+    const preheatPanel = document.getElementById('dab-preheat-view');
+    if (preheatPanel && !preheatPanel.classList.contains('hidden')) {
+      const fill = document.getElementById('dab-preheat-airflow-fill');
+      const out = document.getElementById('dab-preheat-airflow-readout');
+      if (fill) fill.style.width = `${Math.min(100, p)}%`;
+      if (out) out.textContent = `${p}%`;
+    }
+  }
+
+  function startDabSession() {
+    if (dabState === 'active') return; // never restart a live session
+    dabState = 'active';
+    dabSamples = [];
+    dabSessionPeakRaw = 0;
+    dabDroppedBelowAt = null;
+    dabDebounceCount = 0;
+    dabStartTime = Date.now();
+    cancelPreheatIntro();
+    dabShowView('dab-active-view');
+    dabRenderSessionStrip(deviceState);
+    document.getElementById('dab-live-score').textContent = '—';
+    document.getElementById('dab-peak-display').textContent = '—';
+    document.getElementById('dab-time-display').textContent = '0.0s';
+    document.getElementById('dab-zone-display').textContent = '—';
+
+    const canvas = document.getElementById('dab-canvas');
+    dabCanvasCtx = canvas.getContext('2d');
+    dabStartFastSampler();
+    drawDabLiveFrame();
+  }
+
+  function drawDabLiveFrame() {
+    if (dabState !== 'active') return;
+    const ctx = dabCanvasCtx;
+    const canvas = ctx.canvas;
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    // The chart's vertical scale is raw percent 0..DAB_UI_AIRFLOW_MAX
+    // so hard pulls above 100% stay visible instead of flat-lining at
+    // the top. Helper maps a sample to that scale (older samples
+    // without .raw reconstruct it from the calibrated airflow).
+    const rawOf = (s) => (Number.isFinite(s.raw) ? s.raw : s.airflow * 100);
+    const yOf = (s) => H * (1 - Math.min(1, rawOf(s) / DAB_UI_AIRFLOW_MAX));
+
+    // Ideal zone band, converted from scoring units (0-1 of device
+    // max) to the normalized percent scale.
+    const zoneTopRaw = DAB_IDEAL_MAX * 100;
+    const zoneBotRaw = DAB_IDEAL_MIN * 100;
+    const yMin = H * (1 - zoneTopRaw / DAB_UI_AIRFLOW_MAX);
+    const yMax = H * (1 - zoneBotRaw / DAB_UI_AIRFLOW_MAX);
+    ctx.fillStyle = 'rgba(192, 132, 252, 0.08)';
+    ctx.fillRect(0, yMin, W, yMax - yMin);
+    // 100% reference line so overshoot reads clearly.
+    const y100 = H * (1 - 100 / DAB_UI_AIRFLOW_MAX);
+    ctx.strokeStyle = 'rgba(233, 213, 255, 0.18)';
+    ctx.setLineDash([4, 5]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, y100);
+    ctx.lineTo(W, y100);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw samples as a line
+    if (dabSamples.length < 2) {
+      dabAnimationFrame = requestAnimationFrame(drawDabLiveFrame);
+      return;
+    }
+
+    // Rolling window: show the last ~15 seconds of samples (the fast
+    // sampler produces ~4 per second).
+    const recent = dabSamples.slice(-Math.ceil(15000 / DAB_FAST_SAMPLE_MS));
+    const minTs = recent[0].ts;
+    const maxTs = Date.now();
+    const span = Math.max(1, maxTs - minTs || 1);
+    const pts = recent.map((s) => ({
+      x: W * ((s.ts - minTs) / span),
+      y: yOf(s),
+    }));
+
+    // Smoothed path through quadratic midpoints so the line reads as
+    // one continuous draw instead of 1Hz segments.
+    const traceLine = () => {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length - 1; i += 1) {
+        const xc = (pts[i].x + pts[i + 1].x) / 2;
+        const yc = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, xc, yc);
+      }
+      ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+    };
+
+    // Soft gradient fill under the curve.
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgba(192, 132, 252, 0.30)');
+    grad.addColorStop(1, 'rgba(192, 132, 252, 0.02)');
+    ctx.beginPath();
+    traceLine();
+    ctx.lineTo(pts[pts.length - 1].x, H);
+    ctx.lineTo(pts[0].x, H);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Glowing accent stroke on top.
+    ctx.beginPath();
+    traceLine();
+    ctx.strokeStyle = '#c084fc';
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(192, 132, 252, 0.55)';
+    ctx.shadowBlur = 8;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Live dot on the newest sample.
+    const tip = pts[pts.length - 1];
+    ctx.beginPath();
+    ctx.arc(tip.x, tip.y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#e9d5ff';
+    ctx.shadowColor = 'rgba(192, 132, 252, 0.9)';
+    ctx.shadowBlur = 10;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Current values. Peak is shown in RAW sensor percent so it
+    // matches the inhale panel and can exceed 100% on a hard pull.
+    const peakRaw = Math.max(...dabSamples.map(rawOf));
+    const duration = ((Date.now() - dabStartTime) / 1000).toFixed(1);
+    const inZone = dabSamples.filter(s => s.airflow >= DAB_IDEAL_MIN && s.airflow <= DAB_IDEAL_MAX).length;
+    const zonePct = Math.round((inZone / dabSamples.length) * 100);
+    const liveScore = calcDabScore(dabSamples);
+
+    document.getElementById('dab-live-score').textContent = liveScore.toFixed(0);
+    document.getElementById('dab-peak-display').textContent = Math.round(peakRaw) + '%';
+    document.getElementById('dab-time-display').textContent = duration + 's';
+    document.getElementById('dab-zone-display').textContent = zonePct + '%';
+
+    dabAnimationFrame = requestAnimationFrame(drawDabLiveFrame);
+  }
+
+  function endDabSession() {
+    dabState = 'results';
+    dabStopFastSampler();
+    dabDecayLearnedMax(dabSessionPeakRaw);
+    if (dabAnimationFrame) cancelAnimationFrame(dabAnimationFrame);
+    dabDebounceCount = 0;
+    dabRenderSessionStrip(deviceState);
+
+    const result = calcDabFullScore(dabSamples);
+    showDabResults(result);
+
+    // Don't save obviously-bogus sessions: fewer than 5 samples (less
+    // than ~1 second of drawing) means the user closed the panel or the
+    // device dropped out before the score meant anything. The
+    // 'insufficient' marker also tells the results view to show the
+    // friendly empty state.
+    if (result.samples >= DAB_MIN_SAMPLES_FOR_SCORE) {
+      const history = getDabHistory();
+      history.unshift({ ...result, ts: Date.now() });
+      if (history.length > 100) history.length = 100;
+      saveDabHistory(history);
+      // Bump the cleaning-reminder counter when this dab is long
+      // enough to count (>5s). Cleaning cycles never reach this
+      // branch, so they're correctly excluded.
+      bumpCleaningCounter();
+    }
+    updateDabHistorySummary();
+    updateCleaningReminder();
+  }
+
+  function calcDabScore(samples) {
+    if (!samples || samples.length < DAB_MIN_SAMPLES_FOR_SCORE) return 0;
+    return calcDabScoreInternal(samples);
+  }
+
+  function calcDabFullScore(samples) {
+    if (!samples || samples.length < DAB_MIN_SAMPLES_FOR_SCORE) {
+      return {
+        total: 0, flow: 0, consistency: 0, target: 0, stability: 0,
+        finish: 0, style: 0, peak: 0, duration: 0, samples: samples?.length || 0,
+        insufficient: true,
+      };
+    }
+    const r = calcDabFullScoreInternal(samples);
+    r.insufficient = false;
+    return r;
+  }
+
+  // Split out the original scoring math so calcDabScore and
+  // calcDabFullScore can share it. The pre-guard is enforced in the
+  // public wrappers above.
+  function calcDabScoreInternal(samples) {
+    const target = DAB_TARGET_FLOW[dabDifficulty] || 30;
+    const totalFlow = samples.reduce((sum, s, i) => {
+      const dt = i > 0 ? (s.ts - samples[i-1].ts) / 1000 : 0.016;
+      return sum + s.airflow * dt;
+    }, 0);
+    const mean = samples.reduce((s, x) => s + x.airflow, 0) / samples.length;
+    const variance = samples.reduce((s, x) => s + Math.pow(x.airflow - mean, 2), 0) / samples.length;
+    const stdDev = Math.sqrt(variance);
+    const consistency = Math.max(0, 1 - stdDev / DAB_MAX_VARIANCE);
+    const inZone = samples.filter(s => s.airflow >= DAB_IDEAL_MIN && s.airflow <= DAB_IDEAL_MAX).length;
+    const targetZone = inZone / samples.length;
+    const duration = ((samples[samples.length-1].ts - samples[0].ts) / 1000) || 1;
+    const targetDuration = { casual: 15, standard: 30, beast: 45 }[dabDifficulty] || 30;
+    const finishBonus = Math.min(1, duration / targetDuration);
+    const jumps = samples.slice(1).reduce((sum, s, i) => sum + Math.abs(s.airflow - samples[i].airflow), 0);
+    const stability = Math.max(0, 1 - jumps / (samples.length * 0.5));
+    const rawScore = (
+      (Math.min(totalFlow / target, 1) * 0.25) +
+      (consistency * 0.30) +
+      (targetZone * 0.20) +
+      (stability * 0.10) +
+      (finishBonus * 0.10)
+    ) * 10000;
+    return Math.max(0, Math.min(10000, rawScore));
+  }
+
+  function calcDabFullScoreInternal(samples) {
+    const target = DAB_TARGET_FLOW[dabDifficulty] || 30;
+    const totalFlow = samples.reduce((sum, s, i) => {
+      const dt = i > 0 ? (s.ts - samples[i-1].ts) / 1000 : 0.016;
+      return sum + s.airflow * dt;
+    }, 0);
+    const mean = samples.reduce((s, x) => s + x.airflow, 0) / samples.length;
+    const variance = samples.reduce((s, x) => s + Math.pow(x.airflow - mean, 2), 0) / samples.length;
+    const stdDev = Math.sqrt(variance);
+    const consistency = Math.max(0, 1 - stdDev / DAB_MAX_VARIANCE);
+    const inZone = samples.filter(s => s.airflow >= DAB_IDEAL_MIN && s.airflow <= DAB_IDEAL_MAX).length;
+    const targetZone = inZone / samples.length;
+    const duration = ((samples[samples.length-1].ts - samples[0].ts) / 1000) || 1;
+    const targetDuration = { casual: 15, standard: 30, beast: 45 }[dabDifficulty] || 30;
+    const finishBonus = Math.min(1, duration / targetDuration);
+    const jumps = samples.slice(1).reduce((sum, s, i) => sum + Math.abs(s.airflow - samples[i].airflow), 0);
+    const stability = Math.max(0, 1 - jumps / (samples.length * 0.5));
+
+    // Style: check ramp-up / plateau / cooldown shape
+    const n = samples.length;
+    const earlyThird = samples.slice(0, Math.max(1, Math.floor(n / 3)));
+    const lateThird = samples.slice(Math.floor(2 * n / 3));
+    const earlyMean = earlyThird.reduce((s, x) => s + x.airflow, 0) / earlyThird.length;
+    const lateMean = lateThird.reduce((s, x) => s + x.airflow, 0) / lateThird.length;
+    const rampUp = earlyMean < mean + 0.05 ? 1 : 0;
+    const rampDown = lateMean < mean + 0.05 ? 1 : 0;
+    const style = ((rampUp + rampDown) / 2) * consistency;
+
+    const rawTotal = (
+      (Math.min(totalFlow / target, 1) * 0.25) +
+      (consistency * 0.30) +
+      (targetZone * 0.20) +
+      (stability * 0.10) +
+      (finishBonus * 0.10) +
+      (style * 0.05)
+    ) * 10000;
+
+    return {
+      total: Math.max(0, Math.min(10000, rawTotal)),
+      flow: Math.min(totalFlow / target, 1) * 2500,
+      consistency: consistency * 3000,
+      target: targetZone * 2000,
+      stability: stability * 1000,
+      finish: finishBonus * 1000,
+      style: style * 500,
+      // Peak in RAW sensor percent (can exceed 100 on a hard pull) so
+      // results match the live chart and the inhale panel.
+      peak: Math.max(...samples.map((s) => (Number.isFinite(s.raw) ? s.raw : s.airflow * 100))),
+      duration: parseFloat(duration.toFixed(1)),
+      samples: samples.length,
+    };
+  }
+
+  // Eased count-up for the big result numbers. Falls back to an
+  // instant write when the user prefers reduced motion.
+  function dabAnimateCountUp(el, target, durationMs = 900) {
+    if (!el) return;
+    const final = Math.round(Number(target) || 0);
+    const reduced = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced || final <= 0) {
+      el.textContent = final;
+      return;
+    }
+    const start = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      el.textContent = Math.round(final * eased);
+      if (t < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  function showDabResults(r) {
+    document.getElementById('dab-active-view').classList.add('hidden');
+    document.getElementById('dab-results-view').classList.remove('hidden');
+    const emptyEl = document.getElementById('dab-results-empty');
+    const numbersEl = document.getElementById('dab-results-numbers');
+    const insufficient = r.insufficient === true || r.samples < DAB_MIN_SAMPLES_FOR_SCORE;
+
+    if (insufficient) {
+      if (emptyEl) {
+        emptyEl.classList.remove('hidden');
+        emptyEl.textContent = 'Need at least 1 second of drawing to score.';
+      }
+      if (numbersEl) numbersEl.classList.add('hidden');
+      document.getElementById('dab-final-score').textContent = '—';
+      document.getElementById('dab-score-flow').textContent = '—';
+      document.getElementById('dab-score-consistency').textContent = '—';
+      document.getElementById('dab-score-target').textContent = '—';
+      document.getElementById('dab-score-stability').textContent = '—';
+      document.getElementById('dab-score-finish').textContent = '—';
+      document.getElementById('dab-score-style').textContent = '—';
+      document.getElementById('dab-result-peak').textContent = '—';
+      document.getElementById('dab-result-duration').textContent = '—';
+      document.getElementById('dab-result-samples').textContent = r.samples || 0;
+      // Empty result chart — no useful curve to draw
+      const canvas = document.getElementById('dab-result-canvas');
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      return;
+    }
+
+    if (emptyEl) emptyEl.classList.add('hidden');
+    if (numbersEl) numbersEl.classList.remove('hidden');
+    // The headline total counts up in sync with its pop-in animation;
+    // the component scores cascade in via the staggered row entrance
+    // (see dabRowIn in style.css) with shorter count-ups of their own.
+    dabAnimateCountUp(document.getElementById('dab-final-score'), r.total, 900);
+    dabAnimateCountUp(document.getElementById('dab-score-flow'), r.flow, 600);
+    dabAnimateCountUp(document.getElementById('dab-score-consistency'), r.consistency, 600);
+    dabAnimateCountUp(document.getElementById('dab-score-target'), r.target, 600);
+    dabAnimateCountUp(document.getElementById('dab-score-stability'), r.stability, 600);
+    dabAnimateCountUp(document.getElementById('dab-score-finish'), r.finish, 600);
+    dabAnimateCountUp(document.getElementById('dab-score-style'), r.style, 600);
+    document.getElementById('dab-result-peak').textContent = Math.round(r.peak) + '%';
+    document.getElementById('dab-result-duration').textContent = r.duration + 's';
+    document.getElementById('dab-result-samples').textContent = r.samples;
+
+    // Draw result chart — same raw-percent scale, smoothed curve, and
+    // gradient fill as the live chart so the recap reads identically.
+    const canvas = document.getElementById('dab-result-canvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const rawOf = (s) => (Number.isFinite(s.raw) ? s.raw : s.airflow * 100);
+    const yMin = H * (1 - (DAB_IDEAL_MAX * 100) / DAB_UI_AIRFLOW_MAX);
+    const yMax = H * (1 - (DAB_IDEAL_MIN * 100) / DAB_UI_AIRFLOW_MAX);
+    ctx.fillStyle = 'rgba(192, 132, 252, 0.08)';
+    ctx.fillRect(0, yMin, W, yMax - yMin);
+    if (dabSamples.length > 1) {
+      const minTs = dabSamples[0].ts;
+      const maxTs = dabSamples[dabSamples.length - 1].ts;
+      const range = Math.max(1, maxTs - minTs);
+      const pts = dabSamples.map((s) => ({
+        x: W * ((s.ts - minTs) / range),
+        y: H * (1 - Math.min(1, rawOf(s) / DAB_UI_AIRFLOW_MAX)),
+      }));
+      const traceLine = () => {
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length - 1; i += 1) {
+          const xc = (pts[i].x + pts[i + 1].x) / 2;
+          const yc = (pts[i].y + pts[i + 1].y) / 2;
+          ctx.quadraticCurveTo(pts[i].x, pts[i].y, xc, yc);
+        }
+        ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+      };
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, 'rgba(192, 132, 252, 0.26)');
+      grad.addColorStop(1, 'rgba(192, 132, 252, 0.02)');
+      ctx.beginPath();
+      traceLine();
+      ctx.lineTo(pts[pts.length - 1].x, H);
+      ctx.lineTo(pts[0].x, H);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.beginPath();
+      traceLine();
+      ctx.strokeStyle = '#c084fc';
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+  }
+
+  // Show exactly one of the dab panel's view sub-panels, hide the rest.
+  // Centralized so the new preheat and diagnostic views don't have to
+  // memorize every other view id.
+  const DAB_VIEW_IDS = [
+    'dab-idle-view',
+    'dab-preheat-view',
+    'dab-diagnostic-view',
+    'dab-active-view',
+    'dab-results-view',
+  ];
+  function dabShowView(activeId) {
+    for (const id of DAB_VIEW_IDS) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      if (id === activeId) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    }
+  }
+
+  // Show the "Get ready" intro overlay for `seconds` with a 3-2-1
+  // countdown, then fade it out. The fast-sampler-driven live
+  // airflow bar keeps ticking underneath the intro the whole time,
+  // so the user can see their draw respond to their inhale.
+  let dabPreheatIntroTimer = null;
+  function showPreheatIntro(seconds = 3) {
+    const intro = document.getElementById('dab-preheat-intro');
+    const num = document.getElementById('dab-preheat-intro-countdown');
+    if (!intro || !num) return;
+    intro.classList.remove('dab-preheat-intro-hidden');
+    if (dabPreheatIntroTimer) { clearInterval(dabPreheatIntroTimer); dabPreheatIntroTimer = null; }
+    let n = Math.max(0, Math.ceil(seconds));
+    num.textContent = String(n);
+    dabPreheatIntroTimer = setInterval(() => {
+      n -= 1;
+      if (n > 0) {
+        num.textContent = String(n);
+        // Re-render the steady timer (subtitle) as we tick so the
+        // "scoring will start" line is already showing by the time
+        // the intro fades.
+        dabRenderPreheatView(deviceState);
+      } else {
+        clearInterval(dabPreheatIntroTimer);
+        dabPreheatIntroTimer = null;
+        intro.classList.add('dab-preheat-intro-hidden');
+        // One more render after the fade to flip the subtitle back on.
+        dabRenderPreheatView(deviceState);
+      }
+    }, 1000);
+  }
+  function cancelPreheatIntro() {
+    if (dabPreheatIntroTimer) {
+      clearInterval(dabPreheatIntroTimer);
+      dabPreheatIntroTimer = null;
+    }
+    const intro = document.getElementById('dab-preheat-intro');
+    if (intro) intro.classList.add('dab-preheat-intro-hidden');
+  }
+
+  // The firmware's preheat elapsed/total pair consistently runs a few
+  // seconds short of the real PREHEAT -> ACTIVE transition (~2-3.5s on
+  // the hardware tested), so a raw countdown hits 0:00 while the
+  // chamber is still ramping. Learn the per-device offset: anchor the
+  // first firmware sample of each preheat, compare its predicted end
+  // with the observed transition, and keep an EMA persisted across
+  // sessions. The offset is added to the displayed countdown only
+  // while the device is actually in HEAT_CYCLE_PREHEAT.
+  const DAB_PREHEAT_OFFSET_KEY = 'puffco:dab_preheat_offset_v1';
+  const DAB_PREHEAT_OFFSET_MIN = -5;
+  const DAB_PREHEAT_OFFSET_MAX = 15;
+  let dabPreheatOffset = (() => {
+    try {
+      const v = Number(localStorage.getItem(DAB_PREHEAT_OFFSET_KEY));
+      return Number.isFinite(v)
+        ? Math.max(DAB_PREHEAT_OFFSET_MIN, Math.min(DAB_PREHEAT_OFFSET_MAX, v))
+        : 0;
+    } catch { return 0; }
+  })();
+  // First firmware-backed sample of the current preheat: { raw, at }.
+  // Cleared on the PREHEAT -> ACTIVE edge (after calibration), on
+  // cancel, and on panel close.
+  let dabPreheatTrack = null;
+
+  // Called on the observed PREHEAT -> ACTIVE transition. Compares how
+  // long the preheat actually took from the anchored sample against
+  // what the firmware timer predicted, and folds the error into the
+  // learned offset (50/50 EMA so one weird cycle can't wreck it).
+  function dabCalibratePreheatOffset() {
+    const track = dabPreheatTrack;
+    dabPreheatTrack = null;
+    if (!track || !Number.isFinite(track.raw)) return;
+    const actual = (Date.now() - track.at) / 1000;
+    const error = actual - track.raw;
+    // Ignore nonsense (user cancelled + restarted, clock jumps, etc.)
+    if (!Number.isFinite(error) || error < -10 || error > 20) return;
+    dabPreheatOffset = Math.max(
+      DAB_PREHEAT_OFFSET_MIN,
+      Math.min(DAB_PREHEAT_OFFSET_MAX, dabPreheatOffset * 0.5 + error * 0.5),
+    );
+    try {
+      localStorage.setItem(DAB_PREHEAT_OFFSET_KEY, String(Math.round(dabPreheatOffset * 100) / 100));
+    } catch { /* ignore */ }
+  }
+
+  // Render the M:SS countdown the same way the status card's "Timer"
+  // row does. Falls back to the firmware elapsed/total pair when the
+  // helper doesn't have a high-confidence remaining value, so the user
+  // sees a number even on the very first poll after entering preheat.
+  // During preheat, firmware-backed values get the learned offset
+  // added, and once the firmware timer pins at zero the countdown
+  // keeps ticking from the anchored prediction instead of freezing at
+  // 0:00 for the last few seconds.
+  function dabComputePreheatRemaining(data) {
+    const report = getHeatReport(data);
+    const preheating = normalizeStateKey(data?.state) === 'HEAT_CYCLE_PREHEAT';
+    let raw = null;
+    let source = 'none';
+    const dynamic = getDynamicRemainingSeconds(report);
+    if (dynamic != null) {
+      raw = dynamic;
+      source = 'firmware';
+    } else {
+      const elapsed = Number(report?.firmware_elapsed_s);
+      const total = Number(report?.firmware_total_s);
+      if (Number.isFinite(elapsed) && Number.isFinite(total) && total > 0) {
+        raw = Math.max(0, total - elapsed);
+        source = 'firmware_total_minus_elapsed';
+      } else {
+        // Worst case: just show the profile duration so the panel
+        // doesn't read "0:00" while we wait for the first firmware
+        // sample.
+        const selectedProfile = getSelectedProfile(data);
+        const profileTime = Number(selectedProfile?.time_s);
+        if (Number.isFinite(profileTime) && profileTime > 0) {
+          raw = profileTime;
+          source = 'profile_duration';
+        }
+      }
+    }
+    if (raw == null) return { seconds: null, source };
+    if (!preheating || !source.startsWith('firmware')) {
+      return { seconds: raw, source };
+    }
+    // Anchor the calibration on the first firmware-backed sample of
+    // this preheat.
+    if (!dabPreheatTrack) dabPreheatTrack = { raw, at: Date.now() };
+    if (raw <= 0.5) {
+      // Firmware timer pinned at zero but the chamber isn't ready yet:
+      // tick down the remainder of the anchored prediction.
+      const predicted = (dabPreheatTrack.at + (dabPreheatTrack.raw + dabPreheatOffset) * 1000 - Date.now()) / 1000;
+      return { seconds: Math.max(0, predicted), source: `${source}+learned_offset` };
+    }
+    return { seconds: Math.max(0, raw + dabPreheatOffset), source: `${source}+learned_offset` };
+  }
+
+  // Live session strip shared by the preheat, countdown, and active
+  // views: device state, current -> target temp, heat-cycle remaining
+  // timer, and the live draw %. Hidden in idle/results/diagnostic so
+  // those views keep their existing layout.
+  const DAB_SESSION_STRIP_STATES = ['preheating', 'active'];
+  function dabRenderSessionStrip(data) {
+    const strip = document.getElementById('dab-session-strip');
+    if (!strip) return;
+    const show = DAB_SESSION_STRIP_STATES.includes(dabState) && Boolean(data?.connected);
+    strip.classList.toggle('hidden', !show);
+    if (!show) return;
+    const stateEl = document.getElementById('dab-session-state');
+    const tempEl = document.getElementById('dab-session-temp');
+    const targetEl = document.getElementById('dab-session-target');
+    const timerEl = document.getElementById('dab-session-timer');
+    const drawEl = document.getElementById('dab-session-draw');
+    if (stateEl) stateEl.textContent = formatDeviceState(data?.state) || '—';
+    if (tempEl) {
+      const temp = Number(data?.current_temperature_f);
+      tempEl.textContent = Number.isFinite(temp) ? `${Math.round(temp)}°` : '—';
+    }
+    if (targetEl) {
+      const target = Number(data?.target_temperature_f);
+      targetEl.textContent = Number.isFinite(target) && target > 0 ? `→${Math.round(target)}°` : '';
+    }
+    if (timerEl) {
+      // Same remaining-seconds resolution the preheat view and the
+      // status card use, so all three timers always agree.
+      const { seconds } = dabComputePreheatRemaining(data);
+      timerEl.textContent = seconds == null ? '—' : formatSecondsClock(seconds);
+    }
+    if (drawEl) {
+      const percent = Math.max(0, Math.min(DAB_UI_AIRFLOW_MAX, Math.round(dabNormalizePercent(Number(data?.draw_strength_percent) || 0))));
+      drawEl.textContent = `${percent}%`;
+      // Glow the Draw cell while the sensor is above the scoring
+      // threshold (smooth color transition lives in style.css).
+      strip.classList.toggle('drawing', percent >= dabThreshold);
+    }
+  }
+
+  function dabRenderPreheatView(data) {
+    const timerEl = document.getElementById('dab-preheat-timer');
+    const stateEl = document.getElementById('dab-preheat-state');
+    const subEl = document.getElementById('dab-preheat-subtitle');
+    if (stateEl) stateEl.textContent = formatDeviceState(data?.state) || 'Preheating';
+    const { seconds, source } = dabComputePreheatRemaining(data);
+    if (timerEl) {
+      if (seconds == null) {
+        timerEl.textContent = '—';
+        timerEl.setAttribute('data-source', source);
+      } else {
+        timerEl.textContent = formatSecondsClock(seconds);
+        timerEl.setAttribute('data-source', source);
+      }
+    }
+    // While the "Get ready" intro is up, hide the steady-state
+    // subtitle so the two don't compete. After the intro fades, the
+    // subtitle comes back to clarify that scoring is about to start.
+    const introEl = document.getElementById('dab-preheat-intro');
+    const introHidden = introEl?.classList.contains('dab-preheat-intro-hidden');
+    if (subEl) {
+      subEl.textContent = introHidden
+        ? 'Scoring will start when the chamber is ready to draw.'
+        : '';
+      subEl.style.visibility = introHidden ? 'visible' : 'hidden';
+    }
+  }
+
+  // Pop the panel into the preheat view. Called from startDab() when
+  // the device is already mid-preheat, or from dabOnStatus() when the
+  // device transitions to preheat while the panel is open. The
+  // "Get ready" intro is shown for the first ~3 seconds so the user
+  // can prepare their inhale and see their draw strength before
+  // scoring locks in.
+  function dabShowPreheatView(data) {
+    dabState = 'preheating';
+    dabDebounceCount = 0;
+    showDabPanel();
+    dabShowView('dab-preheat-view');
+    dabRenderPreheatView(data || deviceState);
+    dabRenderSessionStrip(data || deviceState);
+    // Kick the "Get ready" intro: visible now, then a 3-2-1 number,
+    // then fade. 3s is enough to draw breath + position the device
+    // without making the steady timer feel late. Respects prefers-
+    // reduced-motion (the CSS transition collapses to instant).
+    showPreheatIntro(3);
+    // Watch the state register at fast-sample rate so scoring starts
+    // the moment the chamber is ready — no 1Hz poll lag.
+    dabStartFastSampler();
+  }
+
+  // User hit "Cancel" on the preheat view, or the device dropped out
+  // of the heat cycle before scoring could start. Treat it as
+  // discarded — no history entry, no score.
+  function dabCancelPreheating() {
+    dabState = 'idle';
+    dabDebounceCount = 0;
+    dabSamples = [];
+    dabPreheatTrack = null;
+    dabStopFastSampler();
+    cancelPreheatIntro();
+    dabShowView('dab-idle-view');
+    dabRenderSessionStrip(deviceState);
+  }
+
+  function showDabPanel() {
+    const panel = document.getElementById('dab-panel');
+    if (!panel) return;
+    panel.classList.add('visible');
+    // One-time outside-click handler: dismisses the panel when the
+    // user taps anywhere outside the inner card. Bound on show, torn
+    // down on close so a stale handler can't fire after the panel
+    // is gone.
+    if (!panel._outsideHandler) {
+      panel._outsideHandler = (event) => {
+        if (!panel.classList.contains('visible')) return;
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        if (panel.contains(target)) return;
+        // Don't dismiss if the click opened us — e.g. a button that
+        // also calls startDab() shouldn't immediately close on itself.
+        if (target.closest('[data-dab-open-trigger]')) return;
+        closeDabPanel();
+      };
+      document.addEventListener('mousedown', panel._outsideHandler);
+      document.addEventListener('touchstart', panel._outsideHandler, { passive: true });
+    }
+  }
+
+  function closeDabPanel() {
+    if (dabAnimationFrame) cancelAnimationFrame(dabAnimationFrame);
+    dabStopFastSampler();
+    dabStopDiagnostic();
+    cancelPreheatIntro();
+    dabState = 'idle';
+    dabSamples = [];
+    dabDebounceCount = 0;
+    dabLastStateKey = '';
+    dabPreheatTrack = null;
+    dabRenderSessionStrip(deviceState);
+    const panel = document.getElementById('dab-panel');
+    if (panel) {
+      panel.classList.remove('visible');
+      if (panel._outsideHandler) {
+        document.removeEventListener('mousedown', panel._outsideHandler);
+        document.removeEventListener('touchstart', panel._outsideHandler);
+        panel._outsideHandler = null;
+      }
+    }
+  }
+
+  function startDab() {
+    const all = getAllSettings();
+    dabEnabled = Boolean(all.dabEnabled);
+    if (!dabEnabled) {
+      toast('Enable dab scoring in Settings > Dab first', 'warning');
+      return;
+    }
+    if (!connected) {
+      toast('Connect to a device to use dab scoring', 'warning');
+      return;
+    }
+    dabDifficulty = all.dabDifficulty || 'standard';
+    dabThreshold = Number(all.dabThreshold || 12);
+    dabSamples = [];
+    dabDebounceCount = 0;
+    showDabPanel();
+    // Re-render the IDLE labels with the current settings.
+    document.getElementById('dab-idle-difficulty').textContent =
+      { casual: 'Casual', standard: 'Standard', beast: 'Beast' }[dabDifficulty] || 'Standard';
+    document.getElementById('dab-idle-threshold').textContent = dabThreshold + '%';
+    // Show / hide the diagnostic button based on connection.
+    const diagBtn = document.getElementById('btn-dab-diagnostic');
+    if (diagBtn) {
+      const canRun = dabEnabled && connected;
+      diagBtn.classList.toggle('hidden', !canRun);
+    }
+
+    // Route straight to the preheat view if the device is already
+    // heating. The 3-2-1 countdown is for users who tap "Start Dab"
+    // when the device is idle, then the heat cycle starts and we have
+    // no idea when the chamber will be ready.
+    const ds = deviceState;
+    if (ds && isHeatActive(ds) && normalizeStateKey(ds.state) === 'HEAT_CYCLE_PREHEAT') {
+      dabShowPreheatView(ds);
+      return;
+    }
+    if (ds && isHeatActive(ds) && normalizeStateKey(ds.state) === 'HEAT_CYCLE_ACTIVE') {
+      // Device is already in the drawing state — skip the preheat view.
+      // The sustained-draw debounce in dabOnStatus starts the session
+      // as soon as a real draw is detected.
+      dabState = 'idle';
+      dabDebounceCount = 0;
+      dabShowView('dab-idle-view');
+      return;
+    }
+    dabState = 'idle';
+    dabShowView('dab-idle-view');
+  }
+
+  function stopDab() {
+    if (dabState === 'active') endDabSession();
+  }
+
+  function saveDabScore() {
+    toast('Score saved to history', 'success');
+  }
+
+  function updateDabHistorySummary() {
+    const history = getDabHistory();
+    const el = document.getElementById('dab-score-history-summary');
+    if (!el) return;
+    if (history.length === 0) {
+      el.textContent = 'No dabs recorded yet.';
+    } else {
+      // Filter out any insufficient entries a previous version of the
+      // scorer may have written — the new gate only saves real ones.
+      const realScores = history.filter(h => h && h.insufficient !== true && (h.samples || 0) >= DAB_MIN_SAMPLES_FOR_SCORE);
+      if (realScores.length === 0) {
+        el.textContent = 'No dabs recorded yet.';
+      } else {
+        const best = Math.max(...realScores.map(h => h.total));
+        el.textContent = `${realScores.length} dab${realScores.length === 1 ? '' : 's'} recorded · best: ${Math.round(best)}`;
+      }
+    }
+  }
+
+  // Cleaning reminder counter — the status card mirrors a
+  // "current / threshold" pair that the user sets in Settings. A dab
+  // only counts when its scored duration is > 5 s (below that, the
+  // user didn't really take a real draw — it was a click-and-bail or
+  // a preheat-only session). Cleaning cycles never increment the
+  // counter (they don't go through the scoring pipeline at all).
+  // The counter lives in its own localStorage key rather than in the
+  // score history, so wiping the score history doesn't reset the
+  // cleaning progress (and vice versa). The user can also reset it
+  // manually from the settings page or the status card.
+  const CLEANING_COUNTER_KEY = 'puffco:dab_cleaning_counter_v1';
+  const CLEANING_COUNTER_RESET_KEY = 'puffco:dab_cleaning_counter_reset_v1';
+  const CLEANING_DAB_MIN_SECONDS = 5;
+
+  function getCleaningCounter() {
+    try {
+      const v = Number(localStorage.getItem(CLEANING_COUNTER_KEY));
+      return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+    } catch { return 0; }
+  }
+  function setCleaningCounter(n) {
+    try { localStorage.setItem(CLEANING_COUNTER_KEY, String(Math.max(0, Math.floor(n)))); }
+    catch { /* ignore */ }
+  }
+  function getCleaningCounterReset() {
+    try {
+      const v = Number(localStorage.getItem(CLEANING_COUNTER_RESET_KEY));
+      return Number.isFinite(v) ? v : 0;
+    } catch { return 0; }
+  }
+  function setCleaningCounterReset(ts) {
+    try { localStorage.setItem(CLEANING_COUNTER_RESET_KEY, String(ts)); }
+    catch { /* ignore */ }
+  }
+
+  // Called by endDabSession after a successful score save. We rebuild
+  // the counter from the persisted score history so the count is
+  // always in sync with what's actually on disk — no risk of two
+  // writers (e.g. import + manual save) drifting the counter. A user
+  // wiping the score history also wipes the cleaning counter, which
+  // is the right semantic: "I just cleaned everything" = start fresh.
+  function rebuildCleaningCounterFromHistory() {
+    const threshold = Number(getAllSettings().cleaningThreshold) || 0;
+    if (threshold <= 0) {
+      setCleaningCounter(0);
+      return;
+    }
+    const history = getDabHistory();
+    // Recompute the time of the most recent reset = the most recent
+    // user-initiated reset, or the timestamp of the most recent
+    // cleaning cycle. The cleaning cycle resets the counter to 0 by
+    // definition, so all dabs scored before the LAST cleaning-cycle
+    // reset don't count.
+    const lastReset = getCleaningCounterReset();
+    const qualifying = history.filter((h) => {
+      if (!h || h.insufficient === true) return false;
+      if ((h.samples || 0) < DAB_MIN_SAMPLES_FOR_SCORE) return false;
+      if (Number(h.duration || 0) < CLEANING_DAB_MIN_SECONDS) return false;
+      if (lastReset && Number(h.ts || 0) <= lastReset) return false;
+      return true;
+    });
+    setCleaningCounter(qualifying.length);
+  }
+
+  function bumpCleaningCounter() {
+    const threshold = Number(getAllSettings().cleaningThreshold) || 0;
+    if (threshold <= 0) return; // reminder disabled
+    const cur = getCleaningCounter();
+    if (cur >= threshold) return; // already at cap; show "Cleaning"
+    setCleaningCounter(cur + 1);
+  }
+
+  function resetCleaningCounter() {
+    setCleaningCounter(0);
+    setCleaningCounterReset(Date.now());
+  }
+
+  function updateCleaningReminder() {
+    const counterEl = document.getElementById('stat-cleaning-counter');
+    const trendEl = document.getElementById('stat-cleaning-trend');
+    const cardEl = document.getElementById('cleaning-reminder-card');
+    if (!counterEl || !trendEl) return;
+    const threshold = Number(getAllSettings().cleaningThreshold) || 0;
+    if (threshold <= 0) {
+      counterEl.textContent = '—';
+      trendEl.textContent = 'set in Settings';
+      cardEl?.classList.remove('cleaning-due');
+      return;
+    }
+    const count = getCleaningCounter();
+    if (count >= threshold) {
+      // Cleaning is due: emphasize the card and prompt the user.
+      counterEl.textContent = 'Cleaning';
+      trendEl.textContent = `run a burn-off (${threshold} dabs reached)`;
+      cardEl?.classList.add('cleaning-due');
+    } else {
+      const remaining = threshold - count;
+      counterEl.textContent = `${count}/${threshold}`;
+      trendEl.textContent = `${remaining} more dab${remaining === 1 ? '' : 's'} to cleaning`;
+      cardEl?.classList.remove('cleaning-due');
+    }
+  }
+
+  // Reset the cleaning counter to zero and stamp the reset time so
+  // the next dab starts a fresh cycle. Wired into startCleaningMode.
+  function markCleaningCycleCompleted() {
+    resetCleaningCounter();
+    updateCleaningReminder();
+  }
+
+  // ============================================================
+  // Sensor diagnostic (Run sensor diagnostic)
+  // ============================================================
+  //
+  // Captures 30 seconds of 100ms-cadence status samples so the user
+  // (and a developer) can see exactly what the BLE layer reports
+  // while the device is doing its thing. The whole point is to take
+  // the "I think the threshold is wrong" guesswork out of the loop:
+  // the chart shows the raw airflow, the table shows the state, and
+  // the JSON dump has every value to grep later.
+  function dabStartDiagnostic() {
+    if (dabState === 'diagnostic') return;
+    dabStopDiagnostic();
+    if (!dabEnabled) {
+      toast('Enable dab scoring first', 'warning');
+      return;
+    }
+    if (!connected) {
+      toast('Connect to a device first', 'warning');
+      return;
+    }
+    const startedAt = Date.now();
+    dabDiag = {
+      startedAt,
+      samples: [],
+      stateTransitions: [],
+      lastState: normalizeStateKey(deviceState?.state),
+      pollTimer: null,
+      ended: false,
+      synthetic: false,
+    };
+    dabState = 'diagnostic';
+    showDabPanel();
+    dabShowView('dab-diagnostic-view');
+    dabRenderDiagnosticMeta();
+    const drawBtn = document.getElementById('btn-dab-diag-save');
+    if (drawBtn) drawBtn.classList.add('hidden');
+    dabDiag.pollTimer = setInterval(() => {
+      // Stop the diagnostic at the configured wall-clock cutoff.
+      if (!dabDiag) return;
+      if (Date.now() - dabDiag.startedAt >= DAB_DIAGNOSTIC_DURATION_MS) {
+        dabFinishDiagnostic();
+        return;
+      }
+      dabCaptureDiagSample();
+    }, DAB_DIAGNOSTIC_POLL_MS);
+    // First sample taken right away so the chart isn't empty for 100ms.
+    dabCaptureDiagSample();
+    // Render an empty chart shell so the canvas is visible immediately.
+    dabDrawDiagChart();
+  }
+
+  // Pulls a sample out of the most recent device snapshot. When the
+  // device isn't reachable we still record a "no-data" row so the
+  // chart shows the gap rather than freezing.
+  function dabCaptureDiagSample() {
+    if (!dabDiag) return;
+    const data = deviceState || {};
+    const stateKey = normalizeStateKey(data.state);
+    if (stateKey !== dabDiag.lastState) {
+      dabDiag.stateTransitions.push({
+        ts: Date.now(),
+        from: dabDiag.lastState || null,
+        to: stateKey,
+      });
+      dabDiag.lastState = stateKey;
+    }
+    dabDiag.samples.push({
+      ts: Date.now(),
+      state: data.state ?? null,
+      state_elapsed_time_s: Number(data.state_elapsed_time_s) || 0,
+      state_total_time_s: Number(data.state_total_time_s) || 0,
+      draw_strength_percent: Number(data.draw_strength_percent) || 0,
+      draw_strength_source: data.draw_strength_source ?? null,
+      draw_strength_mode: data.draw_strength_mode ?? null,
+      draw_strength_value: Number(data.draw_strength_value) || 0,
+      current_temperature_f: Number(data.current_temperature_f) || 0,
+      target_temperature_f: Number(data.target_temperature_f) || 0,
+      heat: data.heat ?? null,
+      connected: data.connected === true,
+      t_offset_ms: Date.now() - dabDiag.startedAt,
+    });
+    dabRenderDiagnosticMeta();
+    dabDrawDiagChart();
+  }
+
+  // Compute summary stats for the captured airflow signal. Kept on the
+  // dab object so the JSON download can include it without re-walking
+  // the samples twice.
+  function dabSummarizeSamples(samples) {
+    if (!samples || !samples.length) {
+      return { count: 0, min: 0, max: 0, mean: 0, p50: 0, p95: 0, above_threshold: 0 };
+    }
+    const values = samples.map(s => s.draw_strength_percent).filter(v => Number.isFinite(v));
+    values.sort((a, b) => a - b);
+    const pick = (p) => values.length ? values[Math.min(values.length - 1, Math.floor(values.length * p))] : 0;
+    const min = values[0] || 0;
+    const max = values[values.length - 1] || 0;
+    const sum = values.reduce((a, b) => a + b, 0);
+    const mean = values.length ? sum / values.length : 0;
+    const p50 = pick(0.5);
+    const p95 = pick(0.95);
+    const above = values.filter(v => v >= dabThreshold).length;
+    return {
+      count: values.length,
+      min: Math.round(min * 10) / 10,
+      max: Math.round(max * 10) / 10,
+      mean: Math.round(mean * 10) / 10,
+      p50: Math.round(p50 * 10) / 10,
+      p95: Math.round(p95 * 10) / 10,
+      above_threshold: above,
+      threshold_percent: dabThreshold,
+    };
+  }
+
+  function dabRenderDiagnosticMeta() {
+    const el = document.getElementById('dab-diag-meta');
+    if (!el || !dabDiag) return;
+    const elapsed = Math.min(DAB_DIAGNOSTIC_DURATION_MS, Date.now() - dabDiag.startedAt);
+    const remaining = Math.max(0, DAB_DIAGNOSTIC_DURATION_MS - elapsed);
+    const last = dabDiag.samples[dabDiag.samples.length - 1];
+    const stateText = last ? formatDeviceState(last.state) : (dabDiag.synthetic ? 'Simulated' : 'Waiting…');
+    const percent = last ? Math.round(Number(last.draw_strength_percent) || 0) + '%' : '—';
+    const tempF = last && Number.isFinite(last.current_temperature_f) && last.current_temperature_f > 0
+      ? Math.round(last.current_temperature_f) + '°F' : '—';
+    el.textContent =
+      `${stateText} · ${percent} · ${tempF} · ${dabDiag.samples.length} samples · ` +
+      `t-${formatSecondsClock(remaining / 1000)} left`;
+  }
+
+  function dabDrawDiagChart() {
+    const canvas = document.getElementById('dab-diag-canvas');
+    if (!canvas || !dabDiag) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    // Y-axis grid lines at 25 / 50 / 75 / 100 %
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
+    for (const p of [0.25, 0.5, 0.75]) {
+      const y = H * (1 - p);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+    // Threshold reference line
+    const yTh = H * (1 - Math.min(1, dabThreshold / 100));
+    ctx.strokeStyle = 'rgba(192, 132, 252, 0.5)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, yTh);
+    ctx.lineTo(W, yTh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Sample line
+    const samples = dabDiag.samples;
+    if (samples.length < 2) return;
+    const minTs = samples[0].ts;
+    const maxTs = samples[samples.length - 1].ts;
+    const range = Math.max(1, maxTs - minTs);
+    ctx.beginPath();
+    ctx.strokeStyle = '#c084fc';
+    ctx.lineWidth = 2;
+    let first = true;
+    for (const s of samples) {
+      const x = W * ((s.ts - minTs) / range);
+      const y = H * (1 - Math.min(1, s.draw_strength_percent / 100));
+      if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
+    }
+    ctx.stroke();
+    // Vertical lines for state transitions
+    for (const tr of dabDiag.stateTransitions) {
+      const x = W * ((tr.ts - minTs) / range);
+      ctx.strokeStyle = 'rgba(255, 196, 0, 0.7)';
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+  }
+
+  function dabFinishDiagnostic() {
+    if (!dabDiag || dabDiag.ended) return;
+    dabDiag.ended = true;
+    if (dabDiag.pollTimer) {
+      clearInterval(dabDiag.pollTimer);
+      dabDiag.pollTimer = null;
+    }
+    // Final chart pass to ensure the last few points are drawn.
+    dabDrawDiagChart();
+    dabRenderDiagnosticMeta();
+    const saveBtn = document.getElementById('btn-dab-diag-save');
+    if (saveBtn) saveBtn.classList.remove('hidden');
+  }
+
+  function dabStopDiagnostic() {
+    if (!dabDiag) return;
+    if (dabDiag.pollTimer) clearInterval(dabDiag.pollTimer);
+    dabDiag = null;
+  }
+
+  // Public-facing: build the JSON payload and trigger the download.
+  function dabDownloadDiagnosticLog() {
+    if (!dabDiag || !dabDiag.samples.length) {
+      toast('Run the diagnostic first', 'warning');
+      return;
+    }
+    const summary = dabSummarizeSamples(dabDiag.samples);
+    const transitions = dabDiag.stateTransitions.map(t => ({
+      ...t,
+      t_offset_ms: t.ts - dabDiag.startedAt,
+    }));
+    const payload = {
+      generated_at: new Date().toISOString(),
+      transport: transportMode,
+      threshold_percent: dabThreshold,
+      duration_ms: DAB_DIAGNOSTIC_DURATION_MS,
+      synthetic: !!dabDiag.synthetic,
+      summary: {
+        airflow: summary,
+        state_transitions: transitions,
+        transition_count: transitions.length,
+      },
+      samples: dabDiag.samples,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `puffco-dab-diag-${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const dabSession = {
+    setEnabled(v) { dabEnabled = v; },
+    setDifficulty(v) { dabDifficulty = v; },
+    setThreshold(v) { dabThreshold = v; },
+  };
+
+  // Settings > Dab action: forget the learned preheat-timer offset so
+  // calibration starts fresh on the next heat cycle.
+  function resetDabPreheatCalibration() {
+    dabPreheatOffset = 0;
+    dabPreheatTrack = null;
+    try { localStorage.removeItem(DAB_PREHEAT_OFFSET_KEY); } catch { /* ignore */ }
+    renderSettingsPanel();
+    toast('Preheat timer calibration reset', 'success');
+  }
+
+  // Settings > Dab action: forget the learned device max draw so the
+  // adaptive calibration re-learns from the next few pulls.
+  function resetDabDrawCalibration() {
+    dabLearnedMaxPct = 60;
+    dabSessionPeakRaw = 0;
+    try { localStorage.removeItem(DAB_DRAW_MAX_KEY); } catch { /* ignore */ }
+    try { localStorage.removeItem(DAB_PEAK_HISTORY_KEY); } catch { /* ignore */ }
+    renderSettingsPanel();
+    toast('Draw calibration reset — pull hard once to re-learn', 'success');
+  }
+
+  // Settings > Dab action: wipe the saved score history.
+  function clearDabHistory() {
+    requireConfirm('Clear all dab score history?', () => {
+      saveDabHistory([]);
+      // Wipe the cleaning counter too — there's nothing left to
+      // count from. Keep the reset stamp so an "old" dab imported
+      // later won't be miscounted.
+      setCleaningCounter(0);
+      setCleaningCounterReset(Date.now());
+      updateDabHistorySummary();
+      updateCleaningReminder();
+      toast('Dab score history cleared', 'success');
+    });
+  }
+
+  // ============================================================
+  // Constants
+  // ============================================================
   const browserDebugEvents = [];
   const BROWSER_DEBUG_LIMIT = 300;
   const PROFILE_ORDER_KEY = 'puffco_profile_order';
@@ -1065,6 +2739,8 @@ const app = (() => {
     deviceState = data;
     lastDeviceSnapshot = data;
     connected = data.connected === true;
+    // Dab scoring: feed normalized status into dab detector
+    if (dabEnabled && connected) dabOnStatus(data);
     if (connected) rememberLastConnected(data);
     if (data.current_profile != null && Number(data.current_profile) === Number(optimisticProfileIndex)) {
       optimisticProfileIndex = null;
@@ -1571,6 +3247,7 @@ const app = (() => {
         'stat-battery-source', 'stat-charge-eta', 'stat-lantern-time', 'stat-low-battery', 'stat-max-battery',
         'stat-firmware', 'stat-bootloader', 'stat-serial', 'stat-name',
         'stat-dpd', 'stat-drem', 'stat-total-dabs',
+        'stat-dpd-hero', 'stat-drem-hero', 'stat-total-dabs-hero', 'stat-dpd-trend',
         'stat-battery-voltage', 'stat-battery-current', 'stat-battery-temperature', 'stat-battery-capacity',
         'stat-heater-power', 'stat-heater-resistance', 'stat-heater-voltage',
         'stat-charge-source', 'stat-charge-rate', 'stat-charge-elapsed',
@@ -1628,6 +3305,35 @@ const app = (() => {
     setText('stat-dpd', labels.dabs_per_day ?? formatDabsPerDay(data.dabs_per_day));
     setText('stat-drem', labels.dabs_left ?? formatMetric(data.dabs_left, 0));
     setText('stat-total-dabs', labels.total_dabs ?? formatMetric(data.total_dabs, 0));
+    // Hero usage strip — same fields surfaced in the status card so
+    // the user doesn't have to open the backend mirror to see how
+    // their week is going.
+    setText('stat-dpd-hero', formatDabsPerDay(data.dabs_per_day));
+    setText('stat-drem-hero', formatMetric(data.dabs_left, 0));
+    setText('stat-total-dabs-hero', formatMetric(data.total_dabs, 0));
+    // Cleaning reminder is local-state, not a device field. Render
+    // it on every snapshot so the counter stays in sync with whatever
+    // just happened on the device (cleaning cycle, dab save, etc.).
+    updateCleaningReminder();
+    {
+      const trendEl = document.getElementById('stat-dpd-trend');
+      if (trendEl) {
+        const dpd = Number(data.dabs_per_day);
+        const days = Number(data.days_owned);
+        if (Number.isFinite(dpd) && Number.isFinite(days) && days > 0 && data.total_dabs != null) {
+          const expected = Number(data.total_dabs) / days;
+          if (Number.isFinite(expected) && expected > 0) {
+            const ratio = dpd / expected;
+            const pct = Math.round((ratio - 1) * 100);
+            trendEl.textContent = pct === 0 ? 'on pace' : `${pct > 0 ? '+' : ''}${pct}% vs avg`;
+          } else {
+            trendEl.textContent = '—';
+          }
+        } else {
+          trendEl.textContent = '—';
+        }
+      }
+    }
     setText('stat-name', data.name ?? '—');
     // Hardware diagnostics — every value below is sourced from an
     // OFFICIAL_ATTRIBUTE_SPECS Lorax path. When the path didn't read,
@@ -1788,11 +3494,17 @@ const app = (() => {
   // The peak-marker is a separate element (.draw-strength-peak) and
   // uses an independent CSS variable (--draw-peak) so the two don't
   // fight for the same transform.
-  const DRAW_BAR_RISE_PER_FRAME = 0.32;   // toward target when current < target
-  const DRAW_BAR_FALL_PER_FRAME = 0.045;  // toward target when current > target
-  const DRAW_PEAK_RISE_PER_FRAME = 0.55;  // peak catches up fast to a new high
-  const DRAW_PEAK_HOLD_MS = 800;          // how long the peak stays put before falling
-  const DRAW_PEAK_FALL_PER_FRAME = 0.04;  // peak decays over ~1s once the hold expires
+  // Rise: snap to target (0.85 = essentially instant — the lag now
+  // lives in the BLE poll, not in the bar's easing). Slow rise was
+  // the #1 reason the inhale bar "felt" unresponsive even with the
+  // 1Hz snapshot firing on time.
+  const DRAW_BAR_RISE_PER_FRAME = 0.85;
+  // Fall: still gentle so a soft inhale doesn't pin the bar high
+  // after the user lets go. ~150ms to fall halfway.
+  const DRAW_BAR_FALL_PER_FRAME = 0.10;
+  const DRAW_PEAK_RISE_PER_FRAME = 0.85;  // peak catches up to a new high
+  const DRAW_PEAK_HOLD_MS = 700;          // how long the peak stays put before falling
+  const DRAW_PEAK_FALL_PER_FRAME = 0.06;  // peak decays over ~1s once the hold expires
   const drawBarState = {
     current: 0,
     target: 0,
@@ -1857,18 +3569,10 @@ const app = (() => {
 
     panel.style.setProperty('--draw-strength', drawBarState.current.toFixed(2));
     panel.style.setProperty('--draw-peak', drawBarState.peak.toFixed(2));
-    // Keep the big numeric readout in lockstep with the smoothed
-    // --draw-strength so the visible number matches the bar (not the
-    // raw target). Skipped while disconnected so the em dash sticks.
-    if (drawBarState.connected) {
-      const intPct = Math.round(drawBarState.current);
-      if (intPct !== drawBarState.lastReadoutPct) {
-        drawBarState.lastReadoutPct = intPct;
-        const readout = document.getElementById('draw-strength-readout');
-        if (readout) readout.textContent = `${intPct}%`;
-      }
-      panel.setAttribute('aria-valuenow', String(intPct));
-    }
+    // The numeric readout is NOT written here. The bar easing is a
+    // purely visual treatment; the readout mirrors the raw sensor
+    // sample so the number always matches what the dab scorer is
+    // consuming (see updateDrawStrengthUI).
     // Active CSS class is sticky once lit so a single 0 reading
     // between two real samples doesn't visually flicker off.
     panel.classList.toggle('bar-active', drawBarState.current >= 8);
@@ -1906,8 +3610,13 @@ const app = (() => {
     const source = document.getElementById('draw-strength-source');
     const clearBtn = document.getElementById('btn-draw-clear-source');
     if (!panel || !label || !source) return;
-    const percent = data?.connected ? Math.max(0, Math.min(100, Math.round(Number(data.draw_strength_percent) || 0))) : 0;
-    const active = Boolean(data?.draw_strength_active || percent >= 8);
+    // Readouts are normalized to the device's learned max draw (100 =
+    // your hardest pull) and allow up to DAB_UI_AIRFLOW_MAX overshoot;
+    // the bar itself stays visually capped at 100.
+    const percent = data?.connected
+      ? Math.max(0, Math.min(DAB_UI_AIRFLOW_MAX, Math.round(dabNormalizePercent(Number(data.draw_strength_percent) || 0))))
+      : 0;
+    const active = Boolean(data?.draw_strength_active || percent >= 5);
     const dynamicInhale = data?.draw_strength_mode === 'dynamic_inhale' || data?.draw_strength_source === '/p/app/htr/inh';
     const wasActive = panel.classList.contains('active');
 
@@ -1915,16 +3624,22 @@ const app = (() => {
     // --draw-strength CSS variable, so we don't set it here directly.
     if (data?.connected) {
       drawBarState.connected = true;
-      drawBarState.target = percent;
+      drawBarState.target = Math.min(100, percent);
       // First data point of a session: snap the bar to the value so
       // the user doesn't wait for it to ramp from 0.
       if (!wasActive && active && drawBarState.current === 0) {
-        drawBarState.current = percent;
+        drawBarState.current = Math.min(100, percent);
       }
       startDrawBarLoop();
+      // Also kick the 10Hz idle bar poll so the bar keeps moving
+      // between 1Hz snapshots. The poll self-terminates if the bar
+      // is no longer connected or a scoring-session sampler takes
+      // over the radio.
+      if (data?.draw_strength_source) dabStartIdleBarPoll();
     } else {
       drawBarState.connected = false;
       drawBarState.target = 0;
+      dabStopIdleBarPoll();
       // Let the bar naturally decay to 0 in the loop rather than
       // snapping. The loop keeps running until the panel disappears.
       startDrawBarLoop();
@@ -1946,24 +3661,24 @@ const app = (() => {
           ? (percent >= 95 ? `${percent}% MAX ${dynamicInhale ? 'inhale' : 'draw'}` : `${percent}% ${dynamicInhale ? 'inhale' : 'draw'}`)
           : 'Idle')
       : 'Disconnected';
-    // Big numeric readout + screen-reader status. The readout is the
-    // smoothed (visual) value and is driven by the rAF tick; here we
-    // only handle the edge cases the tick can't see on its own
-    // (disconnected -> em dash, idle -> 0%) and the verb portion of
-    // aria-valuetext.
+    // Big numeric readout + screen-reader status. The readout mirrors
+    // the RAW sensor sample — the exact draw_strength_percent value
+    // the dab scorer consumes on the same poll — so the dynamic
+    // inhale UI and dab scoring always report the same number for the
+    // same draw. The bar's eased animation (--draw-strength) stays a
+    // purely visual treatment and no longer drives the readout.
     const readout = document.getElementById('draw-strength-readout');
     if (readout) {
       if (!data?.connected) {
         readout.textContent = '—';
         drawBarState.lastReadoutPct = null;
-      } else if (!active) {
-        if (drawBarState.lastReadoutPct !== 0) {
-          readout.textContent = '0%';
-          drawBarState.lastReadoutPct = 0;
-        }
+      } else if (drawBarState.lastReadoutPct !== percent) {
+        readout.textContent = `${percent}%`;
+        drawBarState.lastReadoutPct = percent;
       }
-      // While active the rAF tick owns the readout so it tracks the
-      // smoothed bar value frame-by-frame; nothing to write here.
+    }
+    if (data?.connected) {
+      panel.setAttribute('aria-valuenow', String(percent));
     }
     if (data?.connected) {
       const verb = dynamicInhale ? 'inhale' : 'draw';
@@ -2358,11 +4073,56 @@ const app = (() => {
   // Wire Sortable on the device-profiles grid. Idempotent: subsequent
   // renders reuse the existing instance, but only the new children
   // are draggable thanks to Sortable's event delegation.
+  // ---- Unified Sortable factory ----
+  // Every drag surface in the app routes through this one factory so
+  // the physics, classes, and touch behavior are identical everywhere.
+  // This replaced a mix of five hand-tuned Sortable configs and two
+  // native HTML5 drag implementations (which shared a broken
+  // getDragAfterElement helper that only matched .lorax-tab elements
+  // and only measured horizontally — the source of most of the
+  // "drag and drop is buggy" reports: status items always dropped to
+  // the end, vertical lists used horizontal hit-testing, and each
+  // surface animated differently).
+  function createUnifiedSortable(el, overrides = {}) {
+    if (!el || typeof Sortable === 'undefined') return null;
+    const defaults = {
+      animation: 200,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      dragClass: 'sortable-drag',
+      forceFallback: true,       // identical behavior across browsers
+      fallbackOnBody: true,      // ghost never clipped by overflow
+      fallbackTolerance: 5,
+      swapThreshold: 0.6,        // less twitchy slot swapping
+      delay: 120,
+      delayOnTouchOnly: true,    // immediate on mouse, long-press on touch
+      touchStartThreshold: 5,
+      scroll: true,
+      scrollSensitivity: 60,
+      scrollSpeed: 12,
+      bubbleScroll: true,
+    };
+    const opts = { ...defaults, ...overrides };
+    // Always tag the body during a drag so global CSS (wiggle pause,
+    // cursor) reacts, while still honoring caller hooks.
+    const userStart = opts.onStart;
+    const userEnd = opts.onEnd;
+    opts.onStart = (evt) => {
+      document.body.classList.add('sortable-active');
+      if (typeof userStart === 'function') userStart(evt);
+    };
+    opts.onEnd = (evt) => {
+      document.body.classList.remove('sortable-active');
+      if (typeof userEnd === 'function') userEnd(evt);
+    };
+    return Sortable.create(el, opts);
+  }
+
   function wireProfilesSortable(grid) {
     if (!grid || typeof Sortable === 'undefined') return;
     if (grid.__sortableProfileInstance) return;
-    const instance = Sortable.create(grid, {
-      animation: 180,
+    const instance = createUnifiedSortable(grid, {
       draggable: '.profile-card',
       handle: '.profile-drag-handle, .profile-card',
       filter: 'button, input, .profile-actions',
@@ -2422,20 +4182,27 @@ const app = (() => {
   }
 
   function profilePayloadForDevice(profile, index) {
+    const vaporId = normalizeVaporPreset(profile);
+    const vaporDi = vaporDynamicInhaleFor(vaporId);
     const payload = {
       index,
       name: profile.name || `Profile ${index}`,
       temp_f: Number(profile.temp_f),
       time_s: Number(profile.time_s),
-      vapor: normalizeVaporPreset(profile),
+      vapor: vaporId,
     };
     const mood = normalizeProfileMood(profile);
     if (mood) {
+      // Vapor is the source of truth for dynamic inhale intensity,
+      // matching saveProfile / copyLocalProfileToDevice: Bold /
+      // Intense / Extreme force dynamic_inhale on with the matching
+      // di_frac; Smooth preserves the mood editor's own flag.
       payload.mood_light = {
         preset: mood.sourcePreset || mood.preset,
         colors: mood.colors,
         tempo_frac: mood.tempoFrac ?? mood.tempo_frac ?? 0.5,
-        dynamic_inhale: mood.dynamicInhale ?? mood.dynamic_inhale ?? false,
+        dynamic_inhale: vaporDi.dynamic_inhale || (mood.dynamicInhale ?? mood.dynamic_inhale ?? false),
+        di_frac: vaporDi.di_frac,
       };
     }
     return payload;
@@ -2444,9 +4211,16 @@ const app = (() => {
   function commitDeviceProfileOrder(orderedProfiles, movedIndex) {
     const currentProfile = Number(deviceState?.current_profile);
     const selectedIndex = orderedProfiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === currentProfile);
+    // Resolve each profile's vapor preset BEFORE remapping its slot
+    // index. Raw device snapshot profiles carry no `vapor` field — the
+    // user's Bold/Intense choice lives in the localStorage overrides,
+    // keyed by the profile's ORIGINAL slot. The old code normalized the
+    // raw profile (always 'standard'), then persisted that for every
+    // slot — i.e. one drag-and-drop reset every profile to Smooth.
+    // profileWithVapor() reads the override at the original index, so
+    // the vapor choice now travels with its profile to the new slot.
     const nextProfiles = orderedProfiles.map((profile, slotIndex) => ({
-      ...profile,
-      vapor: normalizeVaporPreset(profile),
+      ...profileWithVapor(profile),
       index: slotIndex,
       active: slotIndex === selectedIndex,
     }));
@@ -2458,7 +4232,9 @@ const app = (() => {
     updateProfilesUI(deviceState.profiles, selectedIndex >= 0 ? selectedIndex : deviceState.current_profile);
     writeProfileVaporOverridesForProfiles(nextProfiles);
     const payload = {
-      profiles: orderedProfiles.map((profile, slotIndex) => profilePayloadForDevice(profile, slotIndex)),
+      // Build the device payload from the vapor-resolved profiles so
+      // the bridge writes the correct dynamic-inhale settings too.
+      profiles: nextProfiles.map((profile, slotIndex) => profilePayloadForDevice(profile, slotIndex)),
       select_index: selectedIndex >= 0 ? selectedIndex : null,
     };
     if (send('reorder_profiles', payload)) {
@@ -2744,8 +4520,41 @@ const app = (() => {
     } catch (_) { /* ignore quota / private mode */ }
   }
 
+  // ---- Vapor override device key (root cause of "everything says
+  // Smooth") ----
+  // Overrides used to be keyed by `serial || name || 'default-device'`
+  // read live off the CURRENT snapshot. Fast status polls don't include
+  // the serial, so the key oscillated between the serial (full
+  // snapshot) and the device name (fast snapshot) — whichever bucket
+  // didn't have your Bold/Intense entry rendered as Smooth. The key is
+  // now STICKY: the first serial seen for the session is cached (and
+  // persisted), and lookups fall back across every legacy bucket the
+  // override may have been written under.
+  const PROFILE_VAPOR_LAST_SERIAL_KEY = 'puffco_last_device_serial_v1';
+  let cachedVaporDeviceSerial = (() => {
+    try { return localStorage.getItem(PROFILE_VAPOR_LAST_SERIAL_KEY) || null; }
+    catch { return null; }
+  })();
+
   function profileVaporDeviceKey() {
-    return String(deviceState?.serial || deviceState?.name || 'default-device');
+    const liveSerial = deviceState?.serial ? String(deviceState.serial) : null;
+    if (liveSerial && liveSerial !== cachedVaporDeviceSerial) {
+      cachedVaporDeviceSerial = liveSerial;
+      try { localStorage.setItem(PROFILE_VAPOR_LAST_SERIAL_KEY, liveSerial); } catch { /* ignore */ }
+    }
+    return String(liveSerial || cachedVaporDeviceSerial || deviceState?.name || 'default-device');
+  }
+
+  // Every storage bucket this device's overrides may historically live
+  // under, most-authoritative first.
+  function profileVaporKeyCandidates() {
+    const keys = [];
+    const push = (k) => { if (k && !keys.includes(String(k))) keys.push(String(k)); };
+    push(deviceState?.serial);
+    push(cachedVaporDeviceSerial);
+    push(deviceState?.name);
+    push('default-device');
+    return keys;
   }
 
   function readProfileVaporOverrides() {
@@ -2753,6 +4562,21 @@ const app = (() => {
     return payload && typeof payload === 'object' && payload.devices && typeof payload.devices === 'object'
       ? payload
       : { version: 1, devices: {} };
+  }
+
+  // Merged per-slot override map for the current device: legacy buckets
+  // first, the sticky-key bucket last so it wins per-slot conflicts.
+  function readMergedVaporOverridesForDevice() {
+    const payload = readProfileVaporOverrides();
+    const candidates = profileVaporKeyCandidates();
+    const merged = {};
+    for (let i = candidates.length - 1; i >= 0; i -= 1) {
+      const bucket = payload.devices?.[candidates[i]];
+      if (bucket && typeof bucket === 'object') Object.assign(merged, bucket);
+    }
+    const primary = payload.devices?.[profileVaporDeviceKey()];
+    if (primary && typeof primary === 'object') Object.assign(merged, primary);
+    return merged;
   }
 
   function writeProfileVaporOverride(index, vapor) {
@@ -2774,13 +4598,47 @@ const app = (() => {
     });
   }
 
+  // Resolve the vapor preset for a profile, layering in the per-slot
+  // localStorage override. Override priority is critical here:
+  //
+  //   * The server (and `readProfiles` in the BLE client) decode the
+  //     vapor from the device's mood-light payload — the di_frac +
+  //     dynamicInhale pair. The decoding is best-effort: when the
+  //     device's payload is in a state the bridge can't translate
+  //     (e.g. dynamicInhale is False but the user previously set Bold,
+  //     or the di_frac is missing), the server returns
+  //     profile.vapor = "standard" for every slot. Without an
+  //     override, every profile in the UI reads Smooth.
+  //
+  //   * The localStorage override is the USER'S choice, written the
+  //     moment the user picks Bold / Intense / Extreme in the profile
+  //     editor. The server's "standard" is the device's *current*
+  //     decoding of the mood-light payload, which can lag or be wrong.
+  //
+  //   The old logic used `??` to fall through the profile fields to
+  //   the override, but `??` only falls through on null/undefined —
+  //   "standard" from the server is a real value and shadowed the
+  //   override completely. So every profile read as Smooth regardless
+  //   of the user's saved preference.
+  //
+  //   The fix: when the override for this slot is set AND differs
+  //   from the server's "standard" fallback, the override wins. If
+  //   the override matches "standard" or is unset, fall through to
+  //   the server's value (so a profile the user has never touched
+  //   still displays the device's actual current setting).
   function profileWithVapor(profile, fallbackIndex = null) {
     if (!profile || typeof profile !== 'object') return profile;
     const index = Number(profile.index ?? fallbackIndex);
-    const payload = readProfileVaporOverrides();
-    const device = payload.devices?.[profileVaporDeviceKey()] || {};
+    const device = readMergedVaporOverridesForDevice();
     const override = Number.isFinite(index) ? device[String(index)] : null;
-    return { ...profile, vapor: normalizeVaporPreset(profile.vapor ?? profile.vapor_preset ?? profile.xl_vapor ?? override) };
+    const serverVapor = profile.vapor ?? profile.vapor_preset ?? profile.xl_vapor ?? null;
+    // Override wins when the user has explicitly set a non-default
+    // value. Default override values are skipped so the server's
+    // current reading can still flow through.
+    const effective = (override && override !== 'standard')
+      ? override
+      : (serverVapor ?? override ?? 'standard');
+    return { ...profile, vapor: normalizeVaporPreset(effective) };
   }
 
   function validateProfile(profile) {
@@ -3851,7 +5709,7 @@ const app = (() => {
     const boostTemp = document.getElementById('modal-boost-temp');
     const boostTime = document.getElementById('modal-boost-time');
     const savedStamp = document.getElementById('modal-saved-stamp');
-    if (chamber) chamber.textContent = chamberLabel(deviceState?.chamber) || '—';
+    if (chamber) chamber.textContent = formatChamber(deviceState?.chamber) || '—';
     if (boostTemp) {
       const deltaF = Number(deviceState?.boost_temperature_delta_f);
       if (Number.isFinite(deltaF) && deltaF !== 0) boostTemp.textContent = `+${Math.round(deltaF)} °F`;
@@ -4453,11 +6311,22 @@ const app = (() => {
       current_profile: Number(index),
       active_profile_name: profile?.name || `Profile ${index}`,
       active_profile_temp_f: Number.isFinite(Number(profile?.temp_f)) ? Number(profile.temp_f) : deviceState.active_profile_temp_f,
-      profiles: deviceState.profiles.map((item, fallbackIndex) => ({
-        ...item,
-        vapor: Number(item.index ?? fallbackIndex) === Number(index) ? normalizeVaporPreset(profile) : normalizeVaporPreset(item),
-        active: Number(item.index ?? fallbackIndex) === Number(index),
-      })),
+      // IMPORTANT: do NOT stamp `vapor: 'standard'` onto the inactive
+      // profiles here. The raw device snapshot never carries a `vapor`
+      // field, so normalizeVaporPreset(item) would resolve to 'standard'
+      // and SHADOW the per-slot override that lives in localStorage.
+      // profileWithVapor() (called by updateProfilesUI) only falls
+      // through to the override when profile.vapor is undefined; once
+      // we write 'standard' into deviceState, every other profile
+      // renders as Smooth until the next raw snapshot arrives. The
+      // active profile DOES get a resolved vapor because the user just
+      // picked it — findProfile() already returns a profileWithVapor
+      // result, so its .vapor is the override-aware value.
+      profiles: deviceState.profiles.map((item, fallbackIndex) => {
+        const isActive = Number(item.index ?? fallbackIndex) === Number(index);
+        if (!isActive) return { ...item }; // leave .vapor undefined
+        return { ...item, vapor: profile?.vapor, active: true };
+      }),
     };
     lastDeviceSnapshot = deviceState;
     updateProfilesUI(deviceState.profiles, index);
@@ -4491,6 +6360,79 @@ const app = (() => {
     updateProfilesUI(deviceState.profiles, deviceState.current_profile);
     updateHeroTelemetry(deviceState);
     updateTelemetryFields(deviceState);
+  }
+
+  // ---- Cleaning mode ----
+  // Low-temperature burn-off: starts a heat cycle, immediately pulls
+  // the heater target down to 150°F, and keeps re-asserting it (the
+  // firmware ramps tcmd back toward the profile temperature on its
+  // own) until the 20-second window elapses, then stops the cycle.
+  // Tapping the button again cancels early.
+  const CLEANING_TEMP_F = 150;
+  const CLEANING_SECONDS = 20;
+  let cleaningTimer = null;
+  let cleaningUntil = 0;
+
+  function startCleaningMode() {
+    if (cleaningTimer) {
+      stopCleaningMode('Cleaning cancelled');
+      return;
+    }
+    if (!connected) {
+      toast('Connect to a device to run cleaning mode', 'warning');
+      return;
+    }
+    if (isHeatActive(deviceState)) {
+      toast('Stop the current heat cycle before cleaning', 'warning');
+      return;
+    }
+    const tempC = Math.round(((CLEANING_TEMP_F - 32) / 1.8) * 100) / 100;
+    if (!send('heat')) {
+      toast('Could not start cleaning cycle', 'error');
+      return;
+    }
+    // The user just kicked off a real burn-off. Reset the cleaning
+    // counter so the next cycle of dabs starts at zero. Cleaning
+    // cycles themselves never count, so this is the only way the
+    // counter can decrement.
+    markCleaningCycleCompleted();
+    cleaningUntil = Date.now() + (CLEANING_SECONDS * 1000);
+    const assertTarget = () => {
+      send('lorax_write', { path: '/p/app/htr/tcmd', value: tempC, type: 'float32' });
+    };
+    // First assert shortly after the heat command lands, then keep the
+    // target pinned low for the rest of the window.
+    setTimeout(() => { if (cleaningTimer) assertTarget(); }, 800);
+    cleaningTimer = setInterval(() => {
+      if (Date.now() >= cleaningUntil) {
+        stopCleaningMode('Cleaning cycle finished');
+        return;
+      }
+      assertTarget();
+      updateCleaningButton();
+    }, 2500);
+    updateCleaningButton();
+    toast(`Cleaning mode: ${CLEANING_TEMP_F}°F for ${CLEANING_SECONDS}s`, 'info');
+  }
+
+  function stopCleaningMode(message = null) {
+    if (cleaningTimer) {
+      clearInterval(cleaningTimer);
+      cleaningTimer = null;
+    }
+    send('stop');
+    updateCleaningButton();
+    if (message) toast(message, 'success');
+  }
+
+  function updateCleaningButton() {
+    const btn = document.getElementById('btn-clean');
+    if (!btn) return;
+    const active = Boolean(cleaningTimer);
+    btn.classList.toggle('cleaning-active', active);
+    btn.textContent = active
+      ? `Cleaning ${Math.max(0, Math.ceil((cleaningUntil - Date.now()) / 1000))}s`
+      : 'Clean';
   }
 
   function heat() {
@@ -5132,7 +7074,8 @@ const app = (() => {
         .map(([key, raw]) => {
           const parsed = Number(raw);
           if (!Number.isFinite(parsed)) return null;
-          return `${humanizeEnum(key)} ${Math.round(parsed)}/255`;
+          const pct = Math.round((Math.max(0, Math.min(255, parsed)) / 255) * 100);
+          return `${humanizeEnum(key)} ${pct}%`;
         })
         .filter(Boolean);
       return parts.join(', ') || null;
@@ -5140,7 +7083,7 @@ const app = (() => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return humanizeEnum(value);
     const clamped = Math.max(0, Math.min(255, parsed));
-    return `${Math.round(parsed)}/255 (${Math.round((clamped / 255) * 100)}%)`;
+    return `${Math.round((clamped / 255) * 100)}%`;
   }
 
   function formatBoostSetting(data, readable) {
@@ -5691,6 +7634,57 @@ const app = (() => {
 
   const pendingLoraxTestResponses = [];
 
+  // Force a fresh draw-strength path probe on the next snapshot.
+  //
+  // Why this exists: a stale `puffco_draw_strength_source` localStorage
+  // pin (e.g. /p/app/htr/draw on older firmware, which is actually a
+  // static config register that pins at 34% / 42%) used to keep the UI
+  // reporting a constant value forever AND trip the dab-scoring debounce
+  // with a fake "active" reading. Calling this clears the pin, kicks
+  // the static-register detection window, and returns the ranked
+  // observe result so the caller can show it to the user.
+  async function redetectDrawStrengthSource() {
+    const client = getBrowserBle();
+    if (!client) {
+      toast('Browser Bluetooth client is not ready', 'error');
+      return null;
+    }
+    if (typeof client.redetectDrawStrength !== 'function') {
+      toast('This build does not support draw-strength re-detect; reload the page', 'error');
+      return null;
+    }
+    const result = await client.redetectDrawStrength();
+    const ranked = result?.data?.ranked || [];
+    const winner = ranked[0];
+    const winnerLine = winner
+      ? `Winner: ${winner.path} (score ${winner.score}, spread ${winner.spread}, ${winner.nonzero_hits}/${winner.samples} non-zero)`
+      : 'No path responded';
+    toast(`Re-detected draw-strength paths. ${winnerLine}`, winner ? 'success' : 'info');
+    appendLog(`draw-strength re-detect: ${winnerLine}; ${ranked.length} path(s) probed`, 'info');
+    // Force a fresh snapshot so the UI immediately reflects the new
+    // resolved source / cleared pin.
+    try { await getBrowserBle().handleCommand('status'); } catch (_) {}
+    return result;
+  }
+
+  // Drop the saved draw-strength pin without re-probing. Use this when
+  // the user wants the next snapshot to re-resolve from scratch (the
+  // readDrawStrength walk will then pick the live path).
+  function clearDrawStrengthPin() {
+    const client = getBrowserBle();
+    if (!client) {
+      toast('Browser Bluetooth client is not ready', 'error');
+      return;
+    }
+    if (typeof client.clearDrawStrengthPin !== 'function') {
+      toast('This build does not support clearing the draw-strength pin', 'error');
+      return;
+    }
+    client.clearDrawStrengthPin();
+    toast('Cleared inhale-sensor pin. Next snapshot will re-detect.', 'info');
+    appendLog('draw-strength pin cleared by user', 'info');
+  }
+
   function testDynamicInhalePath() {
     runLoraxPathTests(DYNAMIC_INHALE_TEST_PATHS, 'dynamic inhale / airflow paths');
   }
@@ -5787,6 +7781,20 @@ const app = (() => {
     return escAttr(str);
   }
 
+  // ---- Lorax folder tree ----
+  // The explorer renders the path catalog as a real folder hierarchy
+  // (like a file browser) instead of a flat fetch-results list. Native
+  // <details> elements give expand/collapse for free; open state is
+  // remembered across filter re-renders, and an active search expands
+  // everything so matches are visible.
+  const loraxTreeOpen = new Set();
+
+  function loraxTreeCount(node) {
+    let total = node.entries.length;
+    node.children.forEach((child) => { total += loraxTreeCount(child); });
+    return total;
+  }
+
   function renderLoraxPathList(paths) {
     const list = document.getElementById('lorax-path-list');
     if (!list) return;
@@ -5797,25 +7805,76 @@ const app = (() => {
       return;
     }
 
-    paths.forEach(p => {
-      const activeClass = selectedPathEntry && selectedPathEntry.path === p.path ? ' active' : '';
-      const div = document.createElement('div');
-      div.className = `lorax-path-item${activeClass}`;
-      div.onclick = () => selectLoraxPath(p.path);
+    // Build the tree: every intermediate segment is a folder, the
+    // final segment is a leaf carrying the registry entry.
+    const root = { children: new Map(), entries: [] };
+    for (const p of paths) {
+      const segs = String(p.path || '').split('/').filter(Boolean);
+      let node = root;
+      for (let i = 0; i < segs.length - 1; i += 1) {
+        const seg = segs[i];
+        if (!node.children.has(seg)) node.children.set(seg, { children: new Map(), entries: [] });
+        node = node.children.get(seg);
+      }
+      node.entries.push(p);
+    }
 
+    const searching = Boolean(document.getElementById('lorax-search')?.value.trim());
+
+    const buildLeaf = (p) => {
+      const div = document.createElement('div');
+      div.className = `lorax-path-item lorax-tree-leaf${selectedPathEntry && selectedPathEntry.path === p.path ? ' active' : ''}`;
+      div.dataset.path = p.path;
+      div.onclick = () => selectLoraxPath(p.path);
       const accessLabel = getAccessLabel(p.access);
       const accessClass = getAccessClass(p.access);
-      const statusBadge = p.status === 'experimental' ? `<span class="lorax-badge lorax-badge-exp">exp</span>` : '';
-
+      const statusBadge = p.status === 'experimental' ? '<span class="lorax-badge lorax-badge-exp">exp</span>' : '';
+      const leafName = String(p.path || '').split('/').filter(Boolean).pop() || p.path;
       div.innerHTML = `
-        <div class="path-name" title="${escAttr(p.path)}">${escHtml(p.path)}</div>
+        <div class="path-name" title="${escAttr(p.path)}">${escHtml(leafName)}</div>
         <div class="path-meta">
           ${statusBadge}
           <span class="lorax-badge ${accessClass}">${escHtml(accessLabel)}</span>
         </div>
       `;
-      list.appendChild(div);
-    });
+      return div;
+    };
+
+    const build = (node, prefix, depth) => {
+      const frag = document.createDocumentFragment();
+      Array.from(node.children.keys()).sort().forEach((seg) => {
+        const child = node.children.get(seg);
+        const folderPath = `${prefix}/${seg}`;
+        const details = document.createElement('details');
+        details.className = 'lorax-tree-folder';
+        if (searching || loraxTreeOpen.has(folderPath) || depth < 1) details.open = true;
+        details.addEventListener('toggle', () => {
+          if (details.open) loraxTreeOpen.add(folderPath);
+          else loraxTreeOpen.delete(folderPath);
+        });
+        const summary = document.createElement('summary');
+        summary.className = 'lorax-tree-summary';
+        summary.innerHTML = `
+          <svg class="lorax-tree-caret" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+          <svg class="lorax-tree-foldericon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span class="lorax-tree-foldername">${escHtml(seg)}</span>
+          <span class="lorax-tree-count">${loraxTreeCount(child)}</span>
+        `;
+        details.appendChild(summary);
+        const inner = document.createElement('div');
+        inner.className = 'lorax-tree-children';
+        inner.appendChild(build(child, folderPath, depth + 1));
+        details.appendChild(inner);
+        frag.appendChild(details);
+      });
+      node.entries
+        .slice()
+        .sort((a, b) => String(a.path).localeCompare(String(b.path)))
+        .forEach((p) => frag.appendChild(buildLeaf(p)));
+      return frag;
+    };
+
+    list.appendChild(build(root, '', 0));
   }
 
   function selectLoraxPath(pathStr) {
@@ -5823,15 +7882,10 @@ const app = (() => {
     if (!entry) return;
     selectedPathEntry = entry;
 
-    // Highlight active in list
-    const items = document.querySelectorAll('.lorax-path-item');
-    items.forEach(item => {
-      const nameEl = item.querySelector('.path-name');
-      if (nameEl && nameEl.textContent === pathStr) {
-        item.classList.add('active');
-      } else {
-        item.classList.remove('active');
-      }
+    // Highlight active in the tree (leaves carry the full path in a
+    // data attribute since they display only the final segment).
+    document.querySelectorAll('.lorax-path-item').forEach((item) => {
+      item.classList.toggle('active', item.dataset.path === pathStr);
     });
 
     renderLoraxDetails();
@@ -6130,6 +8184,114 @@ const app = (() => {
     send('official_attributes');
   }
 
+  // ---- Inhale sensor tools ----
+  function devDrawObserve(promote = false) {
+    const sent = send('draw_strength_observe', { samples: 6, interval: 0.5, promote: Boolean(promote) });
+    if (sent) renderDevResult('draw_strength_observe', { started: true, promote: Boolean(promote), hint: 'Take a draw during the scan.' });
+  }
+
+  function devDrawClearPin() {
+    try {
+      const client = transportMode === 'browser_ble' ? getBrowserBle() : null;
+      if (client) client.clearDrawStrengthPin();
+    } catch { /* bridge mode */ }
+    send('draw_strength_source', { clear: true });
+    renderDevResult('draw_strength_pin', { cleared: true, hint: 'Next snapshot re-resolves the inhale source.' });
+  }
+
+  function devDrawState() {
+    renderDevResult('inhale_sensor_state', {
+      source: deviceState?.draw_strength_source ?? null,
+      mode: deviceState?.draw_strength_mode ?? null,
+      raw_percent: deviceState?.draw_strength_percent ?? null,
+      normalized_percent: Math.round(dabNormalizePercent(Number(deviceState?.draw_strength_percent) || 0)),
+      learned_max_raw: Math.round(dabLearnedMaxPct * 10) / 10,
+      pinned: deviceState?.draw_strength_source_mapping ?? null,
+    });
+  }
+
+  // ---- Dab scoring harness ----
+  function devDabState() {
+    renderDevResult('dab_scoring_state', {
+      dabState,
+      enabled: dabEnabled,
+      threshold_pct: dabThreshold,
+      difficulty: dabDifficulty,
+      samples: dabSamples.length,
+      fast_sampler_running: Boolean(dabFastTimer),
+      fast_sample_ms: DAB_FAST_SAMPLE_MS,
+      drop_timeout_ms: dabDropTimeoutMs,
+      max_duration_ms: dabMaxDurationMs,
+      preheat_offset_s: Math.round(dabPreheatOffset * 100) / 100,
+      learned_max_raw: Math.round(dabLearnedMaxPct * 10) / 10,
+      session_peak_raw: Math.round(dabSessionPeakRaw * 10) / 10,
+    });
+  }
+
+  // Quick gate self-test: replays the PREHEAT -> ACTIVE flow through
+  // the real dabOnStatus pipeline and reports whether the session
+  // started. Restores prior state when done.
+  function devDabGateTest() {
+    const before = { dabState, dabLastStateKey, dabEnabled, samples: dabSamples.length };
+    const wasEnabled = dabEnabled;
+    const results = [];
+    try {
+      dabEnabled = true;
+      const fire = (state, pct) => {
+        dabOnStatus({ connected: true, heat: state === 'IDLE' ? 'IDLE' : 'HEATING', state, draw_strength_percent: pct });
+        results.push({ sent: state, pct, dabState });
+      };
+      closeDabPanel();
+      fire('HEAT_CYCLE_PREHEAT', 0);
+      const armed = dabState === 'preheating';
+      fire('HEAT_CYCLE_ACTIVE', 5);
+      const started = dabState === 'active';
+      closeDabPanel();
+      renderDevResult('dab_gate_self_test', {
+        pass: armed && started,
+        armed_on_preheat: armed,
+        started_on_active_edge: started,
+        trace: results,
+      });
+    } finally {
+      dabEnabled = wasEnabled;
+      dabLastStateKey = before.dabLastStateKey;
+    }
+  }
+
+  function devDabSynthetic() {
+    try {
+      window.__puffcoTest?.startDabDiagnostic({ durationMs: 8000, stepMs: 100 });
+      renderDevResult('dab_synthetic_diagnostic', { started: true, duration_ms: 8000, hint: 'Watch the dab panel — IDLE -> PREHEAT -> ACTIVE -> FADE replay.' });
+    } catch (e) {
+      renderDevResult('dab_synthetic_diagnostic', { started: false, error: e?.message || String(e) });
+    }
+  }
+
+  // ---- Raw path read ----
+  function devReadPath() {
+    const path = document.getElementById('dev-read-path')?.value?.trim();
+    const type = document.getElementById('dev-read-type')?.value || 'float32';
+    if (!path || !path.startsWith('/')) {
+      renderDevResult('lorax_read', { error: 'Enter a lorax path starting with /' });
+      return;
+    }
+    send('lorax_read', { path, type, size: type === 'text' ? 32 : 4 });
+    renderDevResult('lorax_read', { requested: path, type, hint: 'Result lands in the activity log / explorer details.' });
+  }
+
+  // ---- Calibration tools ----
+  function devCalibrationState() {
+    const history = readPeakHistory();
+    renderDevResult('calibration_state', {
+      preheat_offset_s: Math.round(dabPreheatOffset * 100) / 100,
+      draw_learned_max_raw: Math.round(dabLearnedMaxPct * 10) / 10,
+      draw_recent_peaks_raw: history.map((n) => Math.round(n * 10) / 10),
+      draw_recent_max_raw: history.length ? Math.round(Math.max(...history) * 10) / 10 : null,
+      hint: 'Reset either from Settings > Dab, or app.resetDabPreheatCalibration() / app.resetDabDrawCalibration().',
+    });
+  }
+
   function devHeatProbe() {
     send('heat_probe', {
       status: 'experimental',
@@ -6187,6 +8349,287 @@ const app = (() => {
 
   function devClearTemperatureSource() {
     send('temperature_source', { clear: true });
+  }
+
+  // ---- Maxed-out dev deck additions ----
+  // These round out the deck with the highest-value dev/testing
+  // operations a power user needs: backups, vapor mass-edit, time
+  // sync, dab history export, profile duplication, snapshot dump,
+  // local storage wipe, and a lorax path regex search.
+  function devProfileExport() {
+    const profiles = Array.isArray(deviceState?.profiles)
+      ? applySavedProfileOrder(deviceState.profiles).map((profile, i) => profileWithVapor(profile, i))
+      : [];
+    if (!profiles.length) {
+      renderDevResult('profile_export', { error: 'No profiles on the device yet.' });
+      return;
+    }
+    const payload = {
+      kind: 'puffco_profile_export',
+      version: 1,
+      exported_at: new Date().toISOString(),
+      device: {
+        name: deviceState?.name || null,
+        serial: deviceState?.serial || null,
+        current_profile: deviceState?.current_profile ?? null,
+      },
+      profiles,
+    };
+    const text = safeJsonStringify(payload);
+    const blob = new Blob([text], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `puffco-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    renderDevResult('profile_export', { ok: true, count: profiles.length, file: link.download });
+  }
+
+  function devProfileImport() {
+    const input = document.getElementById('dev-profile-import-file');
+    if (!input) {
+      renderDevResult('profile_import', { error: 'No file input wired.' });
+      return;
+    }
+    input.click();
+  }
+
+  // Read the file picked by devProfileImport and write any profiles
+  // it contains into the device, preserving slot order.
+  function devProfileImportFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || ''));
+        const profiles = Array.isArray(data?.profiles) ? data.profiles : null;
+        if (!profiles) throw new Error('No profiles array in file');
+        renderDevResult('profile_import', {
+          ok: true,
+          received: profiles.length,
+          hint: 'Profiles staged — call app.applyImportedProfiles() from devtools to push them to the device.',
+        });
+        window.__lastProfileImport = data;
+      } catch (err) {
+        renderDevResult('profile_import', { error: err?.message || String(err) });
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function applyImportedProfiles() {
+    const data = window.__lastProfileImport;
+    if (!data || !Array.isArray(data?.profiles)) {
+      toast('No staged import available', 'error');
+      return;
+    }
+    const ok = saveProfileBackup('pre-import');
+    if (ok) toast('Backup saved, writing profiles…', 'info');
+    saveProfileBackup('pre-import');
+    // Use the same payload shape the device expects. Each profile's
+    // vapor field is normalized so the reorder-stomp bug can't recur.
+    const next = data.profiles.slice(0, 4).map((profile, slotIndex) => profilePayloadForDevice(profile, slotIndex));
+    send('set_profiles', { profiles: next });
+    toast('Imported profiles sent to device', 'success');
+    renderDevResult('profile_import', { ok: true, applied: next.length });
+  }
+
+  function devVaporSetAll() {
+    const vapor = document.getElementById('dev-vapor-mode')?.value || 'standard';
+    const profiles = Array.isArray(deviceState?.profiles)
+      ? applySavedProfileOrder(deviceState.profiles).map((profile, i) => ({ ...profileWithVapor(profile, i), vapor }))
+      : [];
+    if (!profiles.length) {
+      renderDevResult('vapor_set_all', { error: 'No profiles on the device.' });
+      return;
+    }
+    const next = profiles.map((profile, slotIndex) => profilePayloadForDevice(profile, slotIndex));
+    // Persist the per-slot vapor in localStorage so it sticks after a
+    // reorder (the same fix that landed for commitDeviceProfileOrder).
+    profiles.forEach((profile, fallbackIndex) => {
+      const index = Number(profile?.index ?? fallbackIndex);
+      writeProfileVaporOverride(index, vapor);
+    });
+    send('set_profiles', { profiles: next });
+    renderDevResult('vapor_set_all', { ok: true, vapor, applied: next.length });
+  }
+
+  function devTimeSync() {
+    const now = new Date();
+    const utc = now.getTime();
+    const iso = now.toISOString();
+    // The device accepts a unix timestamp via this path; we also stamp
+    // the local clock in the activity log so a missing time-write
+    // still shows up in the user's flow.
+    appendLog(`Time sync requested: ${iso}`, 'info');
+    send('lorax_write', { path: '/u/app/sys/time', value: utc, type: 'uint32' });
+    renderDevResult('time_sync', { sent: true, utc_ms: utc, iso });
+  }
+
+  function devDabHistoryExport() {
+    const history = getDabHistory();
+    if (!history.length) {
+      renderDevResult('dab_history_export', { error: 'No dab history recorded yet.' });
+      return;
+    }
+    const payload = {
+      kind: 'puffco_dab_history',
+      version: 1,
+      exported_at: new Date().toISOString(),
+      count: history.length,
+      sessions: history,
+    };
+    const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `puffco-dab-history-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    renderDevResult('dab_history_export', { ok: true, count: history.length, file: link.download });
+  }
+
+  function devBrightnessQuickSet() {
+    const pct = numericInput('dev-brightness-pct', 80);
+    const clamped = Math.max(1, Math.min(100, Math.round(pct)));
+    const sent = setAllBrightnessPercent(clamped);
+    renderDevResult('brightness_set', { sent, percent: clamped });
+  }
+
+  function devProfileDuplicate() {
+    const from = numericInput('dev-profile-dup-from', 0);
+    const to = numericInput('dev-profile-dup-to', 0);
+    const profiles = Array.isArray(deviceState?.profiles)
+      ? applySavedProfileOrder(deviceState.profiles).map((profile, i) => profileWithVapor(profile, i))
+      : [];
+    if (!profiles.length || from < 0 || to < 0 || from >= profiles.length || to >= profiles.length) {
+      renderDevResult('profile_duplicate', { error: 'Bad source/target slot.' });
+      return;
+    }
+    const next = profiles.slice();
+    next[to] = { ...next[from], id: next[to]?.id || next[to]?.name, name: next[to]?.name || next[from].name };
+    const payload = next.map((profile, slotIndex) => profilePayloadForDevice(profile, slotIndex));
+    send('set_profiles', { profiles: payload });
+    renderDevResult('profile_duplicate', { ok: true, from, to, hint: `Copied profile ${from + 1} → slot ${to + 1}` });
+  }
+
+  // Wipe all puffco:* localStorage keys. Useful when state is wedged
+  // or after a major version bump. Keeps the cache/snapshots the
+  // user explicitly asked to keep by tag.
+  function devResetLocalSettings() {
+    const before = { ...localStorage };
+    const kept = new Set(['puffco:profile-library']); // user library is sacred
+    const removed = [];
+    for (const key of Object.keys(before)) {
+      if (!key.startsWith('puffco:')) continue;
+      if (kept.has(key)) continue;
+      try { localStorage.removeItem(key); removed.push(key); }
+      catch { /* ignore */ }
+    }
+    renderDevResult('reset_local_settings', {
+      ok: true,
+      removed_count: removed.length,
+      kept: Array.from(kept),
+      hint: 'Reload the page for the wipe to fully apply.',
+    });
+    toast(`Wiped ${removed.length} local settings`, 'success');
+  }
+
+  function devFullSnapshot() {
+    const snapshot = {
+      connected,
+      transport_mode: transportMode,
+      device_name: deviceState?.name || null,
+      serial: deviceState?.serial || null,
+      firmware: deviceState?.firmware || null,
+      bootloader: deviceState?.bootloader || null,
+      state: deviceState?.state || null,
+      heat: deviceState?.heat || null,
+      chamber_temp_c: deviceState?.chamber_temp_c ?? null,
+      target_temp_c: deviceState?.target_temp_c ?? null,
+      battery_pct: deviceState?.battery_pct ?? null,
+      battery_volts: deviceState?.battery_volts ?? null,
+      profile_count: Array.isArray(deviceState?.profiles) ? deviceState.profiles.length : 0,
+      current_profile: deviceState?.current_profile ?? null,
+      brightness: deviceState?.brightness ?? null,
+      lantern: deviceState?.lantern ?? null,
+      stealth: deviceState?.stealth ?? null,
+      last_snapshot_at: lastDeviceSnapshot?.received_at || null,
+    };
+    renderDevResult('full_snapshot', snapshot);
+  }
+
+  function devSessionInfo() {
+    renderDevResult('session_info', {
+      transport: transportMode,
+      connected,
+      voice_intent: Boolean(voiceIntentRunning),
+      voice_listening: Boolean(voiceListening),
+      voice_prefix: voicePrefix,
+      voice_last_action: voiceLastAction ? { ...voiceLastAction } : null,
+      customize_mode: Boolean(customizeMode),
+      advanced_user: document.body.classList.contains('advanced-user'),
+      theme: document.documentElement.getAttribute('data-theme'),
+      accent: document.documentElement.getAttribute('data-accent') || 'teal',
+      settings_count: readAllSettingsLocalStorageKeys().length,
+      local_storage_bytes: (() => {
+        try { return Object.keys(localStorage).reduce((n, k) => n + (localStorage.getItem(k) || '').length, 0); }
+        catch { return null; }
+      })(),
+    });
+  }
+
+  // Search the loaded lorax registry by free-text regex, useful when
+  // scanning for a path the user half-remembers ("/p/app/htr/...something").
+  function devLoraxSearch() {
+    const raw = document.getElementById('dev-lorax-search')?.value || '';
+    let pattern = raw;
+    if (!pattern) { renderDevResult('lorax_search', { error: 'Enter a search pattern.' }); return; }
+    let re;
+    try { re = new RegExp(pattern, 'i'); }
+    catch (err) { renderDevResult('lorax_search', { error: `Invalid regex: ${err.message}` }); return; }
+    const matches = (loraxPaths || []).filter((p) =>
+      re.test(String(p.path || '')) || re.test(String(p.name || '')) || re.test(String(p.function || ''))
+    );
+    renderDevResult('lorax_search', { pattern, count: matches.length, sample: matches.slice(0, 25) });
+  }
+
+  // Quick "is everything reachable" probe — used by the dev console
+  // to confirm the localStorage layer + device snapshot path are
+  // alive before running a longer test.
+  function devSystemCheck() {
+    const checks = [];
+    const probe = (label, fn) => {
+      const t0 = performance.now();
+      try { fn(); checks.push({ label, ok: true, ms: Math.round((performance.now() - t0) * 100) / 100 }); }
+      catch (err) { checks.push({ label, ok: false, error: err?.message || String(err) }); }
+    };
+    probe('localStorage.getItem', () => localStorage.getItem('puffco:theme'));
+    probe('localStorage.setItem', () => localStorage.setItem('puffco:system-check', String(Date.now())));
+    probe('loraxPaths', () => Array.isArray(loraxPaths));
+    probe('deviceState', () => Boolean(deviceState));
+    probe('voiceRecognition', () => Boolean(voiceRecognition || voiceSupportConstructor()));
+    probe('dabSamples', () => Array.isArray(dabSamples));
+    probe('dabHistory', () => Array.isArray(getDabHistory()));
+    probe('Sortable', () => typeof Sortable !== 'undefined');
+    probe('audioContext', () => Boolean(window.AudioContext || window.webkitAudioContext));
+    renderDevResult('system_check', { ok: checks.every((c) => c.ok), checks });
+  }
+
+  function readAllSettingsLocalStorageKeys() {
+    const out = [];
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('puffco:')) out.push(k);
+      }
+    } catch { /* ignore */ }
+    return out;
   }
 
   function voiceSupportConstructor() {
@@ -6516,10 +8959,38 @@ const app = (() => {
       },
     },
     {
+      // Placed before 'stop' so "stop cleaning" cancels the cleaning
+      // cycle (timer + heat) instead of only sending a bare stop.
+      id: 'clean',
+      label: 'Cleaning mode',
+      icon: 'heat',
+      match: /\b(?:clean(?:ing)?(?:\s+(?:mode|cycle|the\s+chamber))?|burn[\s-]?off|self[\s-]?clean)\b/,
+      run: (text) => {
+        if (/\b(stop|cancel|end|abort)\b/.test(text)) {
+          stopCleaningMode('Cleaning cancelled');
+          return { ok: true, detail: 'Cleaning cancelled' };
+        }
+        startCleaningMode();
+        return { ok: true, detail: `Cleaning ${CLEANING_TEMP_F}°F / ${CLEANING_SECONDS}s` };
+      },
+    },
+    {
+      // Dab scoring panel: "score my dab", "dab score", "start scoring",
+      // "open scoring", "rate my dab".
+      id: 'dab_score',
+      label: 'Dab scoring',
+      icon: 'status',
+      match: /\b(?:score|rate)\b[^.]{0,12}\bdab\b|\bdab\s+scor(?:e|ing)\b|\b(?:open|start|show)\s+scor(?:e|ing)\b/,
+      run: () => {
+        startDab();
+        return { ok: true, detail: 'Scoring panel opened' };
+      },
+    },
+    {
       id: 'stop',
       label: 'Stop heat',
       icon: 'stop',
-      match: /\b(?:please\s+)?(?:stop|cancel|end|abort)(?:\s+(?:it|the\s+heat|heat|session|cycle|dab|now))?\b/,
+      match: /\b(?:please\s+)?(?:stop|cancel|end|abort|kill)(?:\s+(?:it|the\s+heat|heat|session|cycle|dab|now))?\b|\bcool\s+(?:it|down)\b|\bthat'?s\s+enough\b/,
       run: () => {
         const sent = stop(true);
         return sent ? { ok: true, detail: 'Stop sent' } : { ok: false, blocked: 'No active heat to stop' };
@@ -6529,7 +9000,7 @@ const app = (() => {
       id: 'boost',
       label: 'Boost',
       icon: 'boost',
-      match: /\bboost(?:\s+it)?\b|\bturn\s+up(?:\s+the)?\s+(?:heat|temp)/,
+      match: /\bboost(?:\s+it)?\b|\bturn\s+up(?:\s+the)?\s+(?:heat|temp)|\b(?:hotter|more\s+heat|bump\s+it(?:\s+up)?|crank\s+it)\b/,
       run: () => {
         const sent = boost();
         return sent ? { ok: true, detail: 'Boost sent' } : { ok: false, blocked: 'Boost needs active heat' };
@@ -6539,7 +9010,7 @@ const app = (() => {
       id: 'heat',
       label: 'Start heat',
       icon: 'heat',
-      match: /\b(?:start|begin|run|do|fire|initiate)\b[^.]{0,20}\b(?:heat|session|cycle|dab)\b|\bheat\s*up\b|\b(?:get|go)\s+hot\b|\b(?:start|begin|fire)\b\s+(?:it|the)\b/,
+      match: /\b(?:start|begin|run|do|fire|initiate)\b[^.]{0,20}\b(?:heat|session|cycle|dab)\b|\bheat\s*(?:it\s*)?up\b|\b(?:get|go)\s+hot\b|\b(?:start|begin|fire)\b\s+(?:it|the)\b|\blight\s+(?:it|her)\s+up\b|\bwarm\s+(?:it\s+)?up\b|\btorch\s+it\b|\bspark\s+it\b|\brip\s+it\b|\blet'?s\s+dab\b|\bsend\s+it\b/,
       run: () => {
         const sent = heat();
         return sent ? { ok: true, detail: 'Heat sent' } : { ok: false, blocked: isHeatActive(deviceState) ? 'Heat already running' : 'Heat unavailable' };
@@ -6549,7 +9020,7 @@ const app = (() => {
       id: 'battery',
       label: 'Show battery',
       icon: 'battery',
-      match: /\b(?:battery(?:\s+level)?|show\s+battery|charge\s+level)\b/,
+      match: /\b(?:battery(?:\s+level)?|show\s+battery|charge\s+level|how\s+much\s+(?:battery|charge|juice)|power\s+level)\b/,
       run: () => {
         const sent = showBattery();
         return sent ? { ok: true, detail: 'Battery sent' } : { ok: false, blocked: 'Battery readback blocked' };
@@ -6619,6 +9090,163 @@ const app = (() => {
         return sent
           ? { ok: true, detail: `Brightness ${value}%` }
           : { ok: false, blocked: 'Brightness blocked' };
+      },
+    },
+    {
+      // Relative brightness — "brighter", "dim it", "a little darker".
+      // Resolves to a +- step from the current brightness; clamps 5–100.
+      id: 'brightness_relative',
+      label: 'Brightness relative',
+      icon: 'brightness',
+      match: /\b(?:brighter|louder|lighter|more\s+light|dim(?:mer)?|darker|less\s+(?:light|bright))\b|\b(?:turn\s+(?:it|the\s+lights?)\s+(?:up|down))\b/,
+      run: (text) => {
+        const up = /\b(?:brighter|louder|lighter|more\s+light|turn\s+(?:it|the\s+lights?)\s+up)\b/.test(text);
+        const cur = Number(deviceState?.brightness) || 80;
+        const step = /\b(?:a\s+(?:little|bit)|slightly|marginally)\b/.test(text) ? 5 : 15;
+        const next = Math.max(5, Math.min(100, cur + (up ? step : -step)));
+        const sent = setAllBrightnessPercent(next);
+        return sent
+          ? { ok: true, detail: `Brightness ${next}% (${up ? '+' : '-'}${step})` }
+          : { ok: false, blocked: 'Brightness blocked' };
+      },
+    },
+    {
+      id: 'profile_next',
+      label: 'Next profile',
+      icon: 'profile',
+      match: /\b(?:next|cycle\s+to)\s+profile\b|\bprofile\s+up\b|\bswitch\s+(?:to\s+the\s+)?next\b/,
+      run: () => {
+        const count = Array.isArray(deviceState?.profiles) ? deviceState.profiles.length : 0;
+        if (!count) return { ok: false, blocked: 'No profiles loaded' };
+        const cur = Number.isFinite(Number(deviceState?.current_profile)) ? Number(deviceState.current_profile) : 0;
+        const next = (cur + 1) % count;
+        const sent = selectProfile(next);
+        const profile = findProfile(next);
+        return sent
+          ? { ok: true, detail: profile?.name ? `Profile ${next + 1} · ${profile.name}` : `Profile ${next + 1}` }
+          : { ok: false, blocked: 'Profile switch blocked' };
+      },
+    },
+    {
+      id: 'profile_prev',
+      label: 'Previous profile',
+      icon: 'profile',
+      match: /\b(?:previous|prev|last)\s+profile\b|\bprofile\s+down\b|\b(?:go\s+)?back\s+a\s+profile\b/,
+      run: () => {
+        const count = Array.isArray(deviceState?.profiles) ? deviceState.profiles.length : 0;
+        if (!count) return { ok: false, blocked: 'No profiles loaded' };
+        const cur = Number.isFinite(Number(deviceState?.current_profile)) ? Number(deviceState.current_profile) : 0;
+        const prev = (cur - 1 + count) % count;
+        const sent = selectProfile(prev);
+        const profile = findProfile(prev);
+        return sent
+          ? { ok: true, detail: profile?.name ? `Profile ${prev + 1} · ${profile.name}` : `Profile ${prev + 1}` }
+          : { ok: false, blocked: 'Profile switch blocked' };
+      },
+    },
+    {
+      id: 'difficulty',
+      label: 'Set dab difficulty',
+      icon: 'status',
+      match: /\b(?:set\s+)?difficulty\s*(?:to|=|as)?\s*(casual|standard|beast|easy|normal|hard|hardcore)\b|\b(?:casual|standard|beast|easy|normal|hard|hardcore)\s+mode\b/,
+      run: (text) => {
+        const m = text.match(/\b(casual|standard|beast|easy|normal|hard|hardcore)\b/);
+        if (!m) return { ok: false, blocked: 'Difficulty not heard' };
+        const word = m[1].toLowerCase();
+        const map = { casual: 'casual', easy: 'casual', standard: 'standard', normal: 'standard', beast: 'beast', hard: 'beast', hardcore: 'beast' };
+        const next = map[word];
+        try { settingsApi.set('dabDifficulty', next); return { ok: true, detail: `Difficulty ${next}` }; }
+        catch (e) { return { ok: false, blocked: e?.message || 'Settings blocked' }; }
+      },
+    },
+    {
+      id: 'dab_threshold',
+      label: 'Set dab threshold',
+      icon: 'status',
+      match: /\b(?:set\s+)?(?:sensitivity|threshold)\s*(?:to|=|at)?\s*(\d{1,2})\b|\b(?:sensitivity|threshold)\s+(\d{1,2})\s*(?:percent|%)?\b/,
+      run: (text) => {
+        const m = text.match(/\b(\d{1,2})\b/);
+        const n = m ? Number(m[1]) : NaN;
+        if (!Number.isFinite(n)) return { ok: false, blocked: 'No threshold number heard' };
+        const v = Math.max(1, Math.min(30, Math.round(n)));
+        try { settingsApi.set('dabThreshold', v); return { ok: true, detail: `Threshold ${v}%` }; }
+        catch (e) { return { ok: false, blocked: e?.message || 'Settings blocked' }; }
+      },
+    },
+    {
+      id: 'theme',
+      label: 'Set theme',
+      icon: 'status',
+      match: /\b(?:theme|mode)\s+(?:to\s+|is\s+|=\s*)?(light|dark|auto)\b|\b(?:switch|turn)\s+(?:to\s+)?(light|dark)\s+mode\b|\b(dark|light)\s+mode\b/,
+      run: (text) => {
+        const m = text.match(/\b(light|dark|auto)\b/);
+        if (!m) return { ok: false, blocked: 'Theme not heard' };
+        try { settingsApi.set('theme', m[1].toLowerCase()); return { ok: true, detail: `Theme ${m[1]}` }; }
+        catch (e) { return { ok: false, blocked: e?.message || 'Settings blocked' }; }
+      },
+    },
+    {
+      id: 'auto_arm',
+      label: 'Toggle auto-arm',
+      icon: 'status',
+      match: /\b(?:auto[\s-]?arm|auto[\s-]?open)\s*(?:on|off)?\b|\b(?:toggle|flip)\s+auto[\s-]?arm\b/,
+      run: (text) => {
+        const want = !/\boff\b/.test(text);
+        try { settingsApi.set('dabAutoArm', want); return { ok: true, detail: `Auto-arm ${want ? 'on' : 'off'}` }; }
+        catch (e) { return { ok: false, blocked: e?.message || 'Settings blocked' }; }
+      },
+    },
+    {
+      id: 'open_settings',
+      label: 'Open settings',
+      icon: 'status',
+      match: /\b(?:open|show|launch|bring\s+up)\s+(?:the\s+)?settings?\b|\bsettings\s+(?:open|please)\b/,
+      run: () => { try { openSettingsPanel(); return { ok: true, detail: 'Settings opened' }; } catch (e) { return { ok: false, blocked: e?.message || 'Settings blocked' }; } },
+    },
+    {
+      id: 'close_settings',
+      label: 'Close settings',
+      icon: 'status',
+      match: /\b(?:close|hide|dismiss)\s+(?:the\s+)?settings?\b|\bsettings\s+(?:close|done)\b/,
+      run: () => { try { closeSettingsPanel(); return { ok: true, detail: 'Settings closed' }; } catch (e) { return { ok: false, blocked: e?.message || 'Settings blocked' }; } },
+    },
+    {
+      id: 'dab_end',
+      label: 'End dab',
+      icon: 'status',
+      match: /\b(?:end|finish|stop)\s+(?:the\s+|my\s+)?(?:dab|draw|session)\b|\b(?:i\s+)?done\b/,
+      run: () => {
+        const ok = typeof stopDab === 'function' ? stopDab() : true;
+        return ok ? { ok: true, detail: 'Dab ended' } : { ok: false, blocked: 'No active dab' };
+      },
+    },
+    {
+      // Color hint — covers the common "change to red" / "set color
+      // blue" patterns. Opens the editor with the named color
+      // pre-selected so the user can confirm or tweak.
+      id: 'profile_color',
+      label: 'Set profile color',
+      icon: 'profile',
+      match: /\b(?:set|change|make|put)\s+(?:the\s+)?(?:profile\s+)?color\s+(?:to\s+)?(red|blue|green|yellow|orange|purple|pink|cyan|white|black|gold|teal|violet|magenta)\b|\bcolor\s+(red|blue|green|yellow|orange|purple|pink|cyan|white|black|gold|teal|violet|magenta)\b/,
+      run: (text) => {
+        const m = text.match(/\b(red|blue|green|yellow|orange|purple|pink|cyan|white|black|gold|teal|violet|magenta)\b/);
+        if (!m) return { ok: false, blocked: 'Color not heard' };
+        try {
+          editProfile(Number(deviceState?.current_profile) || 0);
+          const colorInput = document.getElementById('modal-color');
+          if (colorInput) {
+            const namedColors = {
+              red: '#ef4444', blue: '#3b82f6', green: '#22c55e', yellow: '#eab308',
+              orange: '#f97316', purple: '#a855f7', pink: '#ec4899', cyan: '#06b6d4',
+              white: '#f8fafc', black: '#0f172a', gold: '#eab308', teal: '#14b8a6',
+              violet: '#8b5cf6', magenta: '#d946ef',
+            };
+            const hex = namedColors[m[1].toLowerCase()] || '#ef4444';
+            colorInput.value = hex;
+            colorInput.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          return { ok: true, detail: `Color ${m[1]}` };
+        } catch (e) { return { ok: false, blocked: e?.message || 'Color edit blocked' }; }
       },
     },
     {
@@ -7043,6 +9671,21 @@ const app = (() => {
     voiceEnabled: false,
     // Voice (separate from the puffco:voice-* keys)
     voicePrefix: '',
+    // Dab Scoring
+    dabEnabled: false,
+    dabDifficulty: 'standard',    // 'casual' | 'standard' | 'beast'
+    dabThreshold: 12,            // airflow % required to start a dab — raised from 6 to filter preheat noise
+    dabAutoArm: true,            // auto-open the preheat view when a heat cycle starts
+    dabFastSampler: true,        // 4Hz sensor reads during a live session (browser BLE)
+    dabFastSampleMs: 150,        // fast sampler interval (as live as BLE allows)
+    dabDropTimeoutMs: 1200,      // below-threshold time that ends the dab
+    dabMaxDurationS: 90,         // hard session cap, seconds
+    dabUiAirflowMax: 150,        // chart/readout ceiling for raw airflow %
+    // Cleaning reminder: after this many qualifying dabs (>5s, no
+    // cleaning cycles), the status card counts up to the threshold
+    // then prompts the user to run a burn-off. 0 disables the
+    // reminder entirely — the status card shows "—".
+    cleaningThreshold: 0,
   };
 
   function getAppSetting(key) {
@@ -7091,6 +9734,10 @@ const app = (() => {
     applyDensity('comfortable');
     document.getElementById('advanced-user-toggle')?.removeAttribute('checked');
     setAdvancedUser(false);
+    // The customize-layout toggle is a display setting, but it's
+    // stored under its own key. Reset it too so "Reset all settings"
+    // gives the user the same calm default the page ships with.
+    setCustomizeMode(false);
     renderSettingsPanel();
     toast('Settings reset to defaults', 'success');
   }
@@ -7103,9 +9750,16 @@ const app = (() => {
   }
 
   function applyDensity(density) {
-    const gap = { compact: '8px', comfortable: '12px', spacious: '20px' }[density] || '12px';
+    const valid = ['compact', 'comfortable', 'spacious'].includes(density) ? density : 'comfortable';
+    const gap = { compact: '8px', comfortable: '12px', spacious: '20px' }[valid];
     document.documentElement.style.setProperty('--card-gap', gap);
-    setAppSetting('density', density);
+    // A body class drives the rest: card padding, section spacing,
+    // control sizes, and type scale all respond (see density rules in
+    // style.css), so the setting visibly changes the layout instead of
+    // only nudging the grid gap.
+    document.body.classList.remove('density-compact', 'density-comfortable', 'density-spacious');
+    document.body.classList.add(`density-${valid}`);
+    setAppSetting('density', valid);
   }
 
   function openSettingsPanel() {
@@ -7154,6 +9808,12 @@ const app = (() => {
     setRadioGroup('settings-font-size', all.fontSize);
     setRadioGroup('settings-density', all.density);
     document.getElementById('advanced-user-toggle').checked = isAdvancedUser();
+    // Customize-layout toggle mirrors the live customizeMode state so
+    // opening the settings panel after entering customize mode (via
+    // the header popover, keyboard shortcut, or a previous session)
+    // shows the right checked state.
+    const customizeToggle = document.getElementById('settings-customize-mode');
+    if (customizeToggle) customizeToggle.checked = Boolean(customizeMode);
 
     // Behavior
     document.getElementById('settings-auto-reconnect').checked = Boolean(all.autoReconnect);
@@ -7161,6 +9821,34 @@ const app = (() => {
     document.getElementById('settings-sound').checked = Boolean(all.soundEnabled);
     document.getElementById('settings-voice-enabled').checked = Boolean(all.voiceEnabled);
     document.getElementById('settings-voice-prefix').value = all.voicePrefix || '';
+
+    // Dab Scoring
+    document.getElementById('settings-dab-enabled').checked = Boolean(all.dabEnabled);
+    setRadioGroup('settings-dab-difficulty', all.dabDifficulty || 'standard');
+    document.getElementById('settings-dab-threshold').value = Number(all.dabThreshold || 12);
+    document.getElementById('dab-threshold-val').textContent = Number(all.dabThreshold || 12) + '%';
+    const setIf = (id, fn) => { const el = document.getElementById(id); if (el) fn(el); };
+    setIf('settings-dab-auto-arm', (el) => { el.checked = all.dabAutoArm !== false; });
+    setIf('settings-dab-fast-sampler', (el) => { el.checked = all.dabFastSampler !== false; });
+    setIf('settings-dab-fast-ms', (el) => { el.value = Number(all.dabFastSampleMs || 150); });
+    setIf('dab-fast-ms-val', (el) => { el.textContent = Number(all.dabFastSampleMs || 150) + 'ms'; });
+    setIf('settings-dab-idle-bar-ms', (el) => { el.value = Number(all.dabIdleBarSampleMs || 100); });
+    setIf('dab-idle-bar-ms-val', (el) => { el.textContent = Number(all.dabIdleBarSampleMs || 100) + 'ms'; });
+    setIf('settings-dab-draw-max', (el) => {
+      el.textContent = `${Math.round(dabLearnedMaxPct)} raw = 100%`;
+    });
+    setIf('settings-dab-drop-timeout', (el) => { el.value = Number(all.dabDropTimeoutMs || 1200); });
+    setIf('dab-drop-timeout-val', (el) => { el.textContent = (Number(all.dabDropTimeoutMs || 1200) / 1000).toFixed(1) + 's'; });
+    setIf('settings-dab-max-duration', (el) => { el.value = Number(all.dabMaxDurationS || 90); });
+    setIf('dab-max-duration-val', (el) => { el.textContent = Number(all.dabMaxDurationS || 90) + 's'; });
+    setIf('settings-dab-ui-max', (el) => { el.value = Number(all.dabUiAirflowMax || 150); });
+    setIf('dab-ui-max-val', (el) => { el.textContent = Number(all.dabUiAirflowMax || 150) + '%'; });
+    setIf('settings-dab-preheat-offset', (el) => {
+      el.textContent = `${dabPreheatOffset >= 0 ? '+' : ''}${dabPreheatOffset.toFixed(1)}s learned`;
+    });
+    setIf('settings-cleaning-threshold', (el) => {
+      el.value = Number(all.cleaningThreshold || 0);
+    });
 
     // update accent swatch ring on each swatch
     document.querySelectorAll('.settings-accent-swatch').forEach((btn) => {
@@ -7213,7 +9901,28 @@ const app = (() => {
         break;
       case 'voicePrefix':
         voicePrefix = String(value || '').trim();
-        try { localStorage.setItem(VOICE_PREFIX_KEY, voicePrefix); } catch { /* ignore */ }
+        try { localStorage.setItem(VOICE_PREFIX_KEY, voicePrefix); } catch (_) { /* ignore */ }
+        break;
+      case 'dabEnabled':
+        dabSession.setEnabled(Boolean(value));
+        break;
+      case 'dabDifficulty':
+        dabSession.setDifficulty(String(value));
+        break;
+      case 'dabThreshold':
+        dabSession.setThreshold(Number(value));
+        break;
+      case 'dabAutoArm':
+      case 'dabFastSampler':
+      case 'dabFastSampleMs':
+      case 'dabDropTimeoutMs':
+      case 'dabMaxDurationS':
+      case 'dabUiAirflowMax':
+        applyDabTuning(getAllSettings());
+        break;
+      case 'cleaningThreshold':
+        // Cleaning reminder count re-renders to show the new cap.
+        updateCleaningReminder();
         break;
     }
     renderSettingsPanel();
@@ -7609,11 +10318,45 @@ const app = (() => {
     // pick up a card by its handle — that's how the macOS app
     // organizer behaves and it keeps text selection inside cards
     // working in the default (non-customize) state.
+    //
+    // The filter is a function (not a CSS selector) so we can also
+    // ignore `.reorder-handle` nodes that belong to a NESTED
+    // `[data-card-item-list]` inside the card. Without this guard a
+    // mousedown on a small item's handle (e.g. a brightness slider)
+    // would activate both this card-level Sortable AND the inner
+    // item-list Sortable, producing a "phantom" of the entire card
+    // following the cursor. The fix: the card-level Sortable only
+    // owns handles that are direct children of the card itself; the
+    // item-level Sortable owns the rest.
+    //
+    // The non-handle selectors from the original filter (`.app-header`,
+    // `.sort-guide`, `.app-menu`, etc.) are static siblings of the
+    // cards inside `.app-container` — they don't carry `data-card-id`
+    // so Sortable's `draggable` selector would never match them, but
+    // we keep matching them in the filter anyway as a belt-and-braces
+    // guard.
+    const NON_DRAGGABLE_STATIC_SELECTOR = '.sort-guide, .app-header, .app-menu, .app-footer, script, style';
+    const cardLevelFilter = (event, target) => {
+      if (event && event.target) {
+        // 1) Reject nested item-handle mousedowns so the card-level
+        //    Sortable doesn't try to grab the parent card.
+        if (typeof event.target.closest === 'function') {
+          const handle = event.target.closest('.reorder-handle');
+          if (handle && handle.parentElement !== target) return true;
+        }
+        // 2) Reject clicks on static siblings of the cards.
+        if (typeof event.target.matches === 'function' &&
+            event.target.matches(NON_DRAGGABLE_STATIC_SELECTOR)) {
+          return true;
+        }
+      }
+      return false;
+    };
     const instance = Sortable.create(container, {
       animation: 220,
       draggable: '[data-card-id]',
       handle: '.reorder-handle',
-      filter: '.sort-guide, .app-header, .app-menu, .app-footer, script, style',
+      filter: cardLevelFilter,
       preventOnFilter: true,
       ghostClass: 'card-drag-ghost',
       chosenClass: 'card-drag-chosen',
@@ -7734,6 +10477,15 @@ const app = (() => {
     }
     const btn = document.getElementById('btn-customize-layout');
     if (btn) btn.setAttribute('aria-pressed', customizeMode ? 'true' : 'false');
+    // Keep the settings-panel toggle in sync with the current mode so
+    // both entry points (header popover + Display settings) read the
+    // same state. If the user is mid-toggle from the settings panel
+    // the change handler already wrote the right value, but a
+    // programmatic flip from anywhere should still reflect here.
+    const settingsToggle = document.getElementById('settings-customize-mode');
+    if (settingsToggle && settingsToggle.checked !== customizeMode) {
+      settingsToggle.checked = customizeMode;
+    }
     if (customizeMode) {
       injectReorderHandles();
       applyDraggableToStatusItems(true);
@@ -7785,13 +10537,21 @@ const app = (() => {
   }
 
   function syncAllSortableDisabled() {
+    // Mac-home-screen behavior: while customizing, the WHOLE card /
+    // item is a drag surface (handle selector dropped), interactive
+    // children are made inert via CSS pointer-events, and everything
+    // wiggles. Outside customize mode the sortables are disabled and
+    // the handle selector is restored as a guard.
+    const handleOpt = customizeMode ? null : '.reorder-handle';
     const container = getCardOrderContainer();
     if (container && container.__sortableCardInstance) {
       container.__sortableCardInstance.option('disabled', !customizeMode);
+      try { container.__sortableCardInstance.option('handle', handleOpt); } catch (_) { /* older Sortable */ }
     }
     document.querySelectorAll('[data-card-item-list]').forEach((list) => {
       if (list.__sortableItemInstance) {
         list.__sortableItemInstance.option('disabled', !customizeMode);
+        try { list.__sortableItemInstance.option('handle', handleOpt); } catch (_) { /* older Sortable */ }
       }
     });
   }
@@ -8567,6 +11327,15 @@ const app = (() => {
     if (moodImport) {
       moodImport.addEventListener('change', () => importMoodFile(moodImport.files?.[0]));
     }
+    const devProfileImport = document.getElementById('dev-profile-import-file');
+    if (devProfileImport) {
+      devProfileImport.addEventListener('change', () => devProfileImportFile(devProfileImport.files?.[0]));
+    }
+    // Cleaning-reminder counter: rebuild from history on boot so
+    // imported/cleared histories stay in sync, then render. Cheap
+    // (a single O(n) pass over localStorage history).
+    rebuildCleaningCounterFromHistory();
+    updateCleaningReminder();
     if (transportMode === 'bridge') {
       initWebSocket(bridgeUrl);
     } else {
@@ -8590,6 +11359,17 @@ const app = (() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
     initServiceWorker();
+    // Dab scoring: restore dab settings and update history summary
+    const allSettings = getAllSettings();
+    dabEnabled = Boolean(allSettings.dabEnabled);
+    dabDifficulty = allSettings.dabDifficulty || 'standard';
+    // Default raised from 6 -> 12 so a single preheat pulse of 6%
+    // can't kick off a false-positive dab session. Existing localStorage
+    // values are left alone — the user can lower the threshold manually
+    // if their hardware produces a different noise floor.
+    dabThreshold = Number(allSettings.dabThreshold || 12);
+    applyDabTuning(allSettings);
+    updateDabHistorySummary();
   }
 
   // Boot
@@ -8632,6 +11412,11 @@ const app = (() => {
     openSettingsPanel,
     closeSettingsPanel,
     renderSettingsPanel,
+    // Customize-layout entry points — exposed so the new Settings >
+    // Display > "Customize layout" checkbox can drive the same state
+    // machine the header popover's "Customize layout…" button uses.
+    setCustomizeMode,
+    toggleCustomizeMode,
     exportSettingsJson,
     importSettingsJson,
     processSettingsImport,
@@ -8681,6 +11466,7 @@ const app = (() => {
     heat,
     stop,
     boost,
+    startCleaningMode,
     showBattery,
     showVersion,
     power,
@@ -8697,6 +11483,14 @@ const app = (() => {
     clearDevOutput,
     clearBrowserDebugLog,
     devOfficialAttrs,
+    devDrawObserve,
+    devDrawClearPin,
+    devDrawState,
+    devDabState,
+    devDabGateTest,
+    devDabSynthetic,
+    devReadPath,
+    devCalibrationState,
     devHeatProbe,
     devHeatObserve,
     devLoraxProbe,
@@ -8704,6 +11498,24 @@ const app = (() => {
     devSetTemperatureSource,
     devClearTemperatureSource,
     devRunLoraxAction,
+    // Maxed-out dev deck additions: profile backup/restore, vapor
+    // mass-edit, time sync, dab history export, brightness quick-set,
+    // profile duplicate, local storage wipe, full snapshot, session
+    // info, lorax regex search, system check.
+    devProfileExport,
+    devProfileImport,
+    devProfileImportFile,
+    applyImportedProfiles,
+    devVaporSetAll,
+    devTimeSync,
+    devDabHistoryExport,
+    devBrightnessQuickSet,
+    devProfileDuplicate,
+    devResetLocalSettings,
+    devSessionInfo,
+    devFullSnapshot,
+    devLoraxSearch,
+    devSystemCheck,
     exportBrowserDebugLog,
     copyBrowserDebugLog,
     downloadBrowserDebugLog,
@@ -8720,9 +11532,66 @@ const app = (() => {
     runLoraxPathTests,
     consumeLoraxTestResponse,
     copyLoraxTestResults,
+    redetectDrawStrengthSource,
+    clearDrawStrengthPin,
     // Test hook for the draw-sensor wiring (also used by the
     // smoke test in tools/draw_sensor_smoke.js).
     _simulateDrawStrength: (state) => updateDrawStrengthUI(state),
+    // Dab Scoring
+    startDab,
+    stopDab,
+    closeDabPanel,
+    saveDabScore,
+    updateDabHistorySummary,
+    resetDabPreheatCalibration,
+    resetDabDrawCalibration,
+    clearDabHistory,
+    // Test-facing entry point for the scorer's per-poll gate. The
+    // real pipeline calls this from updateDeviceState; the test hook
+    // (window.__puffcoTest.injectDabStatus) drives it via the
+    // _updateDeviceStateForTest shim below, which sets the IIFE-scoped
+    // `connected` boolean and re-runs dabOnStatus. Underscore-prefixed
+    // so callers know it's intended for verification, not user UI.
+    _dabOnStatusForTest: dabOnStatus,
+    // Test shim: set the IIFE-scoped `connected` flag and replay a
+    // partial snapshot through the dab gate. Without this, the
+    // headless test hook (injectDabStatus) is a "false promise" —
+    // the underlying dabOnStatus early-returns when connected is
+    // false, and there's no other way to flip the private boolean.
+    // Bypasses the heavy UI re-render path of updateDeviceState
+    // (profile library, status card, etc.) so a smoke runner can
+    // fire dozens of snapshots per second without thrashing the DOM.
+    _updateDeviceStateForTest: (partial) => {
+      if (!partial) return null;
+      const base = deviceState || {};
+      const merged = { ...base, ...partial };
+      if (merged.connected !== false) merged.connected = true;
+      deviceState = merged;
+      lastDeviceSnapshot = merged;
+      connected = merged.connected === true;
+      if (dabEnabled && connected) dabOnStatus(merged);
+      return app._getDabStateForTest();
+    },
+    // State-inspection hook for headless tests. Returns a snapshot
+    // of the IIFE-scoped dab variables so a verifier can assert
+    // what the gate actually did (dabState, debounce count, sample
+    // count, last state key) without poking into the closure.
+    _getDabStateForTest: () => ({
+      dabState,
+      dabDebounceCount,
+      dabSamples: dabSamples.slice(),
+      dabLastStateKey,
+      dabEnabled,
+      connected,
+      deviceStateConnected: deviceState?.connected === true,
+      deviceStateHeat: deviceState?.heat ?? null,
+      deviceStateKey: deviceState ? normalizeStateKey(deviceState.state) : '',
+    }),
+    // Diagnostic harness for the BLE sensor layer
+    startDabDiagnostic: dabStartDiagnostic,
+    stopDabDiagnostic: dabStopDiagnostic,
+    finishDabDiagnostic: dabFinishDiagnostic,
+    downloadDabDiagnosticLog: dabDownloadDiagnosticLog,
   };
 })();
 
@@ -8741,6 +11610,14 @@ window.puffcoDebug = {
 //   __puffcoTest.simulateDraw(0, { source: false }) // no source
 //   __puffcoTest.simulateDraw(50, { connected: false }) // disconnect
 //   __puffcoTest.resetSession()              // zero the counter
+//
+// Draw-strength path probe (for diagnosing the "static 34% / 42%" bug):
+//   __puffcoTest.clearDrawStrengthPin()      // drop the saved pin, re-resolve next snapshot
+//   __puffcoTest.redetectDrawStrength()      // drop the pin + run a fresh path probe
+//
+// Dab scoring harness (no real device required):
+//   __puffcoTest.injectDabStatus({ state: 'HEAT_CYCLE_PREHEAT', draw_strength_percent: 25 })
+//   __puffcoTest.startDabDiagnostic()  // 30s of simulated samples, then downloads a log
 window.__puffcoTest = {
   simulateDraw(percent, overrides = {}) {
     const state = {
@@ -8759,5 +11636,139 @@ window.__puffcoTest = {
   resetSession() {
     try { localStorage.setItem('puffco:draw-session', '0'); } catch (_) {}
     try { app._simulateDrawStrength({ connected: true, heat: 'IDLE', draw_strength_source: '/p/app/htr/inh', draw_strength_percent: 0, draw_strength_active: false, draw_strength_mode: 'dynamic_inhale' }); } catch (_) {}
+  },
+  clearDrawStrengthPin() {
+    try { return app.clearDrawStrengthPin(); } catch (e) { console.warn('clearDrawStrengthPin failed:', e); }
+  },
+  async redetectDrawStrength() {
+    try { return await app.redetectDrawStrengthSource(); } catch (e) { console.warn('redetectDrawStrength failed:', e); return null; }
+  },
+  // Push a single status payload into the dab scorer. Lets a smoke
+  // test exercise the new HEAT_CYCLE_ACTIVE gate without owning a
+  // Puffco. partials get merged on top of a connected-IDLE baseline.
+  // Returns the post-injection state (dabState, dabDebounceCount,
+  // dabSamples length, last state key) so the caller can assert the
+  // gate did or didn't fire without poking into the closure.
+  injectDabStatus(partial = {}) {
+    const base = {
+      connected: true,
+      heat: 'IDLE',
+      state: 'IDLE',
+      draw_strength_source: '/p/app/htr/inh',
+      draw_strength_percent: 0,
+      draw_strength_active: false,
+      draw_strength_mode: 'dynamic_inhale',
+      current_temperature_f: 0,
+      target_temperature_f: 0,
+      state_elapsed_time_s: 0,
+      state_total_time_s: 30,
+    };
+    const merged = { ...base, ...partial };
+    if (merged.connected !== false) merged.connected = true;
+    try {
+      // Route through _updateDeviceStateForTest so the IIFE-scoped
+      // `connected` flag actually flips. The old path called
+      // _dabOnStatusForTest directly, which early-returned on
+      // !connected — i.e. the gate was never exercised and the hook
+      // was a "false promise".
+      if (typeof app._updateDeviceStateForTest === 'function') {
+        return app._updateDeviceStateForTest(merged);
+      }
+      // Older build: fall back to the chip-UI path and warn the
+      // operator that the gate is not actually being driven.
+      try { app._simulateDrawStrength(merged); } catch (_) {}
+      if (typeof app._dabOnStatusForTest === 'function') {
+        app._dabOnStatusForTest(merged);
+      } else {
+        console.warn('__puffcoTest.injectDabStatus: no test entry point; cannot drive scorer');
+      }
+      return null;
+    } catch (e) { console.warn('injectDabStatus failed:', e); return null; }
+  },
+  // Synthesises a 30-second diagnostic capture without needing a real
+  // BLE device. Drives the scorer's diagnostic code path with fake
+  // state transitions and airflow ramps so the download can be
+  // verified headlessly. Returns the synthetic log so a node-side
+  // runner can inspect it.
+  startDabDiagnostic(opts = {}) {
+    // Open the panel first so the diagnostic view is mounted.
+    if (typeof app.startDab !== 'function') return null;
+    // Make sure dab scoring is enabled.
+    if (typeof app.settings?.set === 'function') {
+      try { app.settings.set('dabEnabled', true); } catch (_) {}
+    }
+    // Flip the IIFE-scoped `connected` flag so dabStartDiagnostic
+    // doesn't bail on its "Connect to a device first" toast. The
+    // _updateDeviceStateForTest shim handles this; we send a single
+    // IDLE snapshot to set up the connection state.
+    if (typeof app._updateDeviceStateForTest === 'function') {
+      try { app._updateDeviceStateForTest({ connected: true, heat: 'IDLE', state: 'IDLE' }); } catch (_) {}
+    } else {
+      console.warn('__puffcoTest.startDabDiagnostic: _updateDeviceStateForTest not exposed; diagnostic will not actually run');
+    }
+    // The diagnostic capture normally lives on the IIFE-scoped
+    // `dabDiag` variable. We have no way to read that back from
+    // outside the closure, so we install a one-shot hook the scorer
+    // calls via app.downloadDabDiagnosticLog / a manual capture.
+    // The simplest reliable approach: call the public diagnostic
+    // entry, then immediately download at the end of the synthetic
+    // burst.
+    app.startDabDiagnostic();
+    // Build a synthetic data burst and stream it into the live
+    // diagnostic by repeatedly calling _updateDeviceStateForTest
+    // with a state that progresses IDLE -> PREHEAT -> ACTIVE ->
+    // FADE -> IDLE.
+    const durationMs = Number(opts.durationMs) || 30000;
+    const stepMs = Number(opts.stepMs) || 100;
+    const steps = Math.max(1, Math.floor(durationMs / stepMs));
+    let i = 0;
+    const tick = () => {
+      i++;
+      const phase = i / steps;
+      let state, percent, temp;
+      if (phase < 0.1) { state = 'IDLE'; percent = 0; temp = 70; }
+      else if (phase < 0.4) { state = 'HEAT_CYCLE_PREHEAT'; percent = 5; temp = 200 + (phase - 0.1) * 800; }
+      else if (phase < 0.7) { state = 'HEAT_CYCLE_ACTIVE'; percent = 30 + Math.sin(i / 5) * 10; temp = 420; }
+      else if (phase < 0.9) { state = 'HEAT_CYCLE_FADE'; percent = 10; temp = 320; }
+      else { state = 'IDLE'; percent = 0; temp = 90; }
+      try {
+        if (typeof app._updateDeviceStateForTest === 'function') {
+          app._updateDeviceStateForTest({
+            connected: true,
+            heat: state === 'IDLE' ? 'IDLE' : 'HEATING',
+            state,
+            draw_strength_source: '/p/app/htr/inh',
+            draw_strength_percent: percent,
+            draw_strength_active: percent >= 8,
+            draw_strength_mode: 'dynamic_inhale',
+            current_temperature_f: temp,
+            target_temperature_f: 420,
+            state_elapsed_time_s: i * stepMs / 1000,
+            state_total_time_s: 30,
+          });
+        } else {
+          app._simulateDrawStrength({
+            connected: true,
+            heat: state === 'IDLE' ? 'IDLE' : 'HEATING',
+            state,
+            draw_strength_source: '/p/app/htr/inh',
+            draw_strength_percent: percent,
+            draw_strength_active: percent >= 8,
+            draw_strength_mode: 'dynamic_inhale',
+            current_temperature_f: temp,
+            target_temperature_f: 420,
+            state_elapsed_time_s: i * stepMs / 1000,
+            state_total_time_s: 30,
+          });
+        }
+      } catch (_) {}
+      if (i < steps) setTimeout(tick, stepMs);
+      else {
+        // End the diagnostic immediately so the Save button appears.
+        try { app.finishDabDiagnostic(); } catch (_) {}
+      }
+    };
+    setTimeout(tick, stepMs);
+    return { started: true, steps, stepMs };
   },
 };
