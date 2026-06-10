@@ -84,6 +84,60 @@
 <body>
   <div class="toast-container" id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
 
+  <!-- Mobile debug: visible when app.js hasn't initialized yet -->
+  <div id="init-debug" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#1a1a2e;color:#00ffd5;font-family:monospace;font-size:12px;padding:10px 14px;display:none;line-height:1.8;">
+    <b>DEBUG — PuffcoBLE mobile init</b><br>
+    innerWidth: <span id="dbg-w">—</span>px<br>
+    app.js loaded: <span id="dbg-app">no</span><br>
+    mobile-view-connect children: <span id="dbg-children">—</span><br>
+    <button id="dbg-btn" onclick="window.__dbgForce && window.__dbgForce()"
+            style="background:#1a1a2e;color:#00ffd5;border:1px solid #00ffd5;padding:3px 10px;cursor:pointer;font-size:11px;margin-top:4px;">
+      Force initMobileSwipeViews
+    </button>
+  </div>
+  <script>
+    (function() {
+      var dbg = document.getElementById('init-debug');
+      var dbgW = document.getElementById('dbg-w');
+      var dbgApp = document.getElementById('dbg-app');
+      var dbgChildren = document.getElementById('dbg-children');
+      var dbgBtn = document.getElementById('dbg-btn');
+
+      function show() {
+        dbg.style.display = 'block';
+        dbgW.textContent = window.innerWidth;
+        dbgApp.textContent = typeof window.app !== 'undefined' ? 'yes' : 'NO';
+        var mv = document.getElementById('mobile-view-connect');
+        dbgChildren.textContent = mv ? mv.children.length : 'mobile-view-connect NOT FOUND';
+      }
+
+      show();
+
+      // Keep updating as the page loads
+      var ticker = setInterval(show, 500);
+
+      // When app.js fires DOMContentLoaded, it calls init() which runs
+      // initMobileSwipeViews(). Once that happens, hide the debug panel.
+      window.__dbgDone = function() {
+        clearInterval(ticker);
+        dbg.style.display = 'none';
+      };
+
+      // Manual trigger in case the auto-hide didn't fire
+      window.__dbgForce = function() {
+        if (typeof window.app !== 'undefined' && window.app.initMobileSwipeViews) {
+          window.app.initMobileSwipeViews();
+          show();
+        } else if (typeof initMobileSwipeViews === 'function') {
+          initMobileSwipeViews();
+          show();
+        } else {
+          dbgChildren.textContent = 'initMobileSwipeViews NOT FOUND — app.js may be old/stale';
+        }
+      };
+    })();
+  </script>
+
   <div class="app-container" data-card-order-key="puffco:card-order" data-default-order="connect-card,status-card,profiles-card,controls-grid,brightness-card,power-card,advanced-panel">
     <!-- Header -->
     <header class="app-header">

@@ -9661,6 +9661,9 @@ const app = (() => {
     move('brightness-card','mobile-view-controls');
     move('power-card',     'mobile-view-controls');
     // voice-card is already inside controls-grid so no separate move needed
+
+    // Hide the inline debug panel if it exists
+    if (window.__dbgDone) window.__dbgDone();
   }
     });
     // Also move voice-card, brightness-card, and power-card into controls view
