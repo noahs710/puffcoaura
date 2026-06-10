@@ -1,19 +1,19 @@
 // Puffco BLE Controller — GitHub Pages app shell cache
 // Keeps the static UI available and avoids stale assets by versioning the cache.
 
-const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-04';
+const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-05';
 // APP_SHELL keys must match the URLs the page actually requests. index.html
 // uses cache-buster query strings (?v=15 for all assets); pre-caching the
 // un-versioned paths leaves the runtime cache to
 // discover those assets the hard way, which fails on a cold offline start.
-// style.css (v=13 -> v=14) and app.js (v=16 -> v=17) were bumped for the
-// mobile swipeable views with bottom tab bar. The CACHE_NAME bump forces
-// clients on the old shell to drop their cache and re-fetch everything.
+// Swiper.js added (v11) for smooth mobile swipe gestures. app.js (v=17 -> v=19),
+// swiper.min.js added. CACHE_NAME bump forces stale-cache clients to refresh.
 const APP_SHELL = [
   './',
   './index.html',
   './style.css?v=14',
-  './app.js?v=17',
+  './app.js?v=19',
+  './swiper.min.js',
   './ble-client.js?v=15',
   './Sortable.min.js?v=15',
   './manifest.json',

@@ -13,6 +13,7 @@
   <title>Puffco Controller</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="style.css?v=14" />
+  <link rel="stylesheet" href="swiper.min.css" />
   <style>
     @media (min-width: 701px) { .app-menu { display: none !important; } }
     /* Round 2: hold the card surface-in animation until the
@@ -265,29 +266,31 @@
          On desktop (701px+) these are hidden and the original card layout shows.
          On mobile the .app-views container handles scroll-snap and the tab bar
          switches views. Each .mobile-view wraps the relevant card sections. -->
-    <div class="app-views" id="app-views" aria-label="App sections">
+    <div class="app-views swiper" id="app-views" aria-label="App sections">
+      <div class="swiper-wrapper">
 
-      <!-- Connect -->
-      <div class="mobile-view" id="mobile-view-connect" data-view="connect">
-        <!-- Real connect-card is moved here from .app-container below -->
-      </div>
+        <!-- Connect -->
+        <div class="mobile-view swiper-slide" id="mobile-view-connect" data-view="connect">
+          <!-- Real connect-card is moved here by initMobileSwipeViews() -->
+        </div>
 
-      <!-- Status -->
-      <div class="mobile-view" id="mobile-view-status" data-view="status">
-        <!-- Real status-card is moved here from .app-container below -->
-      </div>
+        <!-- Status -->
+        <div class="mobile-view swiper-slide" id="mobile-view-status" data-view="status">
+          <!-- Real status-card is moved here by initMobileSwipeViews() -->
+        </div>
 
-      <!-- Profiles -->
-      <div class="mobile-view" id="mobile-view-profiles" data-view="profiles">
-        <!-- Real profiles-card is moved here from .app-container below -->
-      </div>
+        <!-- Profiles -->
+        <div class="mobile-view swiper-slide" id="mobile-view-profiles" data-view="profiles">
+          <!-- Real profiles-card is moved here by initMobileSwipeViews() -->
+        </div>
 
-      <!-- Controls -->
-      <div class="mobile-view" id="mobile-view-controls" data-view="controls">
-        <!-- Real controls-grid, voice-card, brightness-card, power-card are moved here from .app-container below -->
-      </div>
+        <!-- Controls -->
+        <div class="mobile-view swiper-slide" id="mobile-view-controls" data-view="controls">
+          <!-- Real controls-grid, voice-card, brightness-card, power-card are moved here by initMobileSwipeViews() -->
+        </div>
 
-    </div><!-- end .app-views -->
+      </div><!-- end .swiper-wrapper -->
+    </div><!-- end .app-views / .swiper -->
 
     <!-- Bottom tab bar — mobile only. Hidden on desktop (701px+). -->
     <nav class="app-tab-bar" id="app-tab-bar" aria-label="App sections">
@@ -2295,7 +2298,8 @@
 
   <script src="ble-client.js?v=15"></script>
   <script src="Sortable.min.js?v=15"></script>
-  <script src="app.js?v=17"></script>
+  <script src="swiper.min.js"></script>
+  <script src="app.js?v=19"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(function(err) {
