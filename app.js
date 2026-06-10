@@ -9546,6 +9546,124 @@ const app = (() => {
     setAppSetting('density', valid);
   }
 
+  // ============================================================
+  // Mobile view switching (horizontal swipe + bottom tab bar)
+  // ============================================================
+
+  // Maps tab data-view values to their corresponding mobile-view element IDs.
+  const MOBILE_VIEW_MAP = {
+    connect:   'mobile-view-connect',
+    status:    'mobile-view-status',
+    profiles:  'mobile-view-profiles',
+    controls:  'mobile-view-controls',
+    settings:  null,   // settings is handled by the settings panel
+  };
+
+  function switchToView(viewName) {
+    if (viewName === 'settings') {
+      // Settings is a slide-in panel, not a swipe view
+      openSettingsPanel();
+      return;
+    }
+    const viewId = MOBILE_VIEW_MAP[viewName];
+    if (!viewId) return;
+    const viewsEl = document.getElementById('app-views');
+    const targetView = document.getElementById(viewId);
+    if (!viewsEl || !targetView) return;
+
+    // Scroll the views container so the target view snaps into view
+    const targetLeft = targetView.offsetLeft;
+    viewsEl.scrollTo({ left: targetLeft, top: 0, behavior: 'smooth' });
+
+    // Update active tab button
+    updateActiveTab(viewName);
+  }
+
+  function updateActiveTab(viewName) {
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      const isActive = btn.getAttribute('data-view') === viewName;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+  }
+
+  // Sync active tab as the user swipes between views
+  function setupViewScrollSync() {
+    const viewsEl = document.getElementById('app-views');
+    if (!viewsEl) return;
+
+    let scrollTimeout = null;
+    viewsEl.addEventListener('scroll', () => {
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        const views = document.querySelectorAll('.mobile-view');
+        const containerLeft = viewsEl.scrollLeft;
+        const containerWidth = viewsEl.clientWidth;
+        // Find which view is most visible
+        let activeView = null;
+        let maxVisible = 0;
+        views.forEach((view) => {
+          const viewLeft = view.offsetLeft;
+          const viewRight = viewLeft + view.clientWidth;
+          const visibleLeft = Math.max(containerLeft, viewLeft);
+          const visibleRight = Math.min(containerLeft + containerWidth, viewRight);
+          const visibleWidth = Math.max(0, visibleRight - visibleLeft);
+          if (visibleWidth > maxVisible) {
+            maxVisible = visibleWidth;
+            activeView = view;
+          }
+        });
+        if (activeView) {
+          const viewName = activeView.getAttribute('data-view');
+          updateActiveTab(viewName);
+        }
+      }, 80); // debounce
+    }, { passive: true });
+  }
+
+  // Move card DOM from .app-container into .mobile-view wrappers on init.
+  // This gives mobile swipe views and desktop layout a single source of truth.
+  // Only runs on mobile (≤700px) — on desktop the cards stay in .app-container.
+  function initMobileSwipeViews() {
+    const isMobile = window.matchMedia('(max-width: 700px)').matches;
+    if (!isMobile) return; // desktop: keep cards in .app-container
+
+    const viewMap = {
+      connect:    'connect-card',
+      status:     'status-card',
+      profiles:   'profiles-card',
+      controls:   'controls-grid',
+    };
+    Object.entries(viewMap).forEach(([viewName, cardId]) => {
+      const card = document.getElementById(cardId);
+      const viewEl = document.getElementById('mobile-view-' + viewName);
+      if (card && viewEl) {
+        viewEl.appendChild(card);
+      }
+    });
+    // Also move voice-card, brightness-card, and power-card into controls view
+    ['voice-card', 'brightness-card', 'power-card'].forEach((id) => {
+      const card = document.getElementById(id);
+      const controlsView = document.getElementById('mobile-view-controls');
+      if (card && controlsView) {
+        controlsView.appendChild(card);
+      }
+    });
+  }
+    });
+    // Also move voice-card, brightness-card, and power-card into controls view
+    ['voice-card', 'brightness-card', 'power-card'].forEach((id) => {
+      const card = document.getElementById(id);
+      const controlsView = document.getElementById('mobile-view-controls');
+      if (card && controlsView) {
+        controlsView.appendChild(card);
+      }
+    });
+  }
+
+  // Called from tab bar buttons (onclick in HTML)
+  window.appSwitchToView = switchToView;
+
   function openSettingsPanel() {
     const panel = document.getElementById('settings-panel');
     const backdrop = document.getElementById('settings-backdrop');
@@ -11139,6 +11257,11 @@ const app = (() => {
     // restores the saved customize-mode state. This is the entry
     // point for reordering both cards and items within cards.
     initCustomizeMode();
+    // Mobile: set up horizontal swipe scroll sync with bottom tab bar
+    setupViewScrollSync();
+    // Mobile swipe UI: move card DOM from .app-container into .mobile-view
+    // wrappers so there is one source of truth for both desktop and mobile.
+    initMobileSwipeViews();
     renderTimer = setInterval(() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
@@ -11193,6 +11316,8 @@ const app = (() => {
     openSettingsPanel,
     closeSettingsPanel,
     renderSettingsPanel,
+    switchToView,
+    setupViewScrollSync,
     // Customize-layout entry points — exposed so the new Settings >
     // Display > "Customize layout" checkbox can drive the same state
     // machine the header popover's "Customize layout…" button uses.

@@ -721,6 +721,111 @@ body.device-disconnected .connected-only-nav {
     width: calc(100vw - 32px);
     right: -8px;
   }
+
+  /* ---- Mobile swipeable views ---- */
+
+  /* Desktop nav (anchor links) is hidden on mobile */
+  .app-menu { display: none !important; }
+
+  /* Hide the main desktop container on mobile — cards are moved into
+     .app-views / .mobile-view wrappers by initMobileSwipeViews(). */
+  .app-container { display: none !important; }
+
+  /* Header becomes sticky on mobile — stays visible while swiping */
+  .app-header {
+    position: sticky;
+    top: 0;
+    z-index: 150;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    margin-bottom: 0;
+  }
+
+  /* Mobile views container: horizontal scroll-snap, fills the screen below header */
+  .app-views {
+    display: flex;
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    /* height set by CSS custom property injected by JS, fallback */
+    height: calc(100vh - 120px - env(safe-area-inset-bottom, 0px));
+  }
+  .app-views::-webkit-scrollbar { display: none; }
+
+  /* Each view snaps to exactly one screen width */
+  .mobile-view {
+    flex: 0 0 100vw;
+    width: 100vw;
+    scroll-snap-align: start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 12px 16px calc(68px + env(safe-area-inset-bottom, 0px));
+    /* 68px = tab bar height (60px + bottom padding) */
+    box-sizing: border-box;
+  }
+
+  /* Tab bar: fixed at bottom, safe-area aware */
+  .app-tab-bar {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 300;
+    background: rgba(13, 15, 20, 0.92);
+    backdrop-filter: blur(20px) saturate(1.6);
+    -webkit-backdrop-filter: blur(20px) saturate(1.6);
+    border-top: 1px solid var(--border-subtle);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    /* Reserve height so the fixed bar doesn't cover content */
+    height: calc(60px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+  }
+
+  .tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 8px 4px 6px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font);
+    font-size: 0.6rem;
+    font-weight: 500;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: color 180ms ease;
+    border-top: 2px solid transparent;
+    letter-spacing: 0.02em;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tab-btn:active {
+    color: var(--text-secondary);
+  }
+  .tab-btn.active {
+    color: var(--accent-teal);
+    border-top-color: var(--accent-teal);
+  }
+  .tab-btn svg {
+    display: block;
+    flex-shrink: 0;
+  }
+}
+
+/* Desktop: hide mobile-only views and tab bar */
+@media (min-width: 701px) {
+  .app-views,
+  .app-tab-bar {
+    display: none !important;
+  }
 }
 
 .connection-badge {
