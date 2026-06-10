@@ -56,12 +56,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Network-first: always try the network, update cache, fall back to cache only on failure.
+  // This prevents stale cached JS/CSS from being served when new versions are available.
   event.respondWith(
-    caches.match(request)
-      .then((cached) => cached || fetch(request).then((response) => {
+    fetch(request)
+      .then((response) => {
         const copy = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
         return response;
-      }))
+      })
+      .catch(() => caches.match(request))
   );
 });
