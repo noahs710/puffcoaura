@@ -9626,36 +9626,41 @@ const app = (() => {
   // Only runs on mobile (≤700px) — on desktop the cards stay in .app-container.
   function initMobileSwipeViews() {
     const isMobile = window.innerWidth <= 700;
+    console.log('[Mavis] initMobileSwipeViews — innerWidth:', window.innerWidth, '→ isMobile:', isMobile);
     if (!isMobile) return; // desktop: keep cards in .app-container
     console.log('[Mavis] Mobile detected, initializing swipe views…');
 
-    const viewMap = {
-      connect:    'connect-card',
-      status:     'status-card',
-      profiles:   'profiles-card',
-      controls:   'controls-grid',
+    // Belt-and-suspenders: explicitly style the containers so CSS loading
+    // timing doesn't matter. These override anything the CSS set.
+    const appContainer = document.querySelector('.app-container');
+    const appViews     = document.getElementById('app-views');
+    const tabBar       = document.getElementById('app-tab-bar');
+    if (appContainer) appContainer.style.display = 'none';
+    if (appViews)     appViews.style.display      = 'flex';
+    if (tabBar)       tabBar.style.display        = 'flex';
+
+    // Helper: move an element into a target container if it exists
+    const move = (id, targetId) => {
+      const el    = document.getElementById(id);
+      const target = document.getElementById(targetId);
+      if (el && target) {
+        target.appendChild(el);
+        console.log('[Mavis] Moved', id, '→', targetId);
+      } else {
+        console.warn('[Mavis] Missing', id, '?', !el, '/', targetId, '?', !target);
+      }
     };
-    Object.entries(viewMap).forEach(([viewName, cardId]) => {
-      const card = document.getElementById(cardId);
-      const viewEl = document.getElementById('mobile-view-' + viewName);
-      if (card && viewEl) {
-        viewEl.appendChild(card);
-        console.log('[Mavis] Moved', cardId, '→ mobile-view-' + viewName);
-      } else {
-        console.warn('[Mavis] Could not find', cardId, 'or mobile-view-' + viewName);
-      }
-    });
-    // Also move voice-card, brightness-card, and power-card into controls view
-    ['voice-card', 'brightness-card', 'power-card'].forEach((id) => {
-      const card = document.getElementById(id);
-      const controlsView = document.getElementById('mobile-view-controls');
-      if (card && controlsView) {
-        controlsView.appendChild(card);
-        console.log('[Mavis] Moved', id, '→ mobile-view-controls');
-      } else {
-        console.warn('[Mavis] Could not find', id, 'or mobile-view-controls');
-      }
-    });
+
+    // Each view gets its top-level card/section
+    move('connect-card',    'mobile-view-connect');
+    move('status-card',    'mobile-view-status');
+    move('profiles-card',  'mobile-view-profiles');
+    // Controls: controls-grid (contains voice-card) + brightness-card + power-card
+    // are all siblings in .app-container — move each separately
+    move('controls-grid',  'mobile-view-controls');
+    move('brightness-card','mobile-view-controls');
+    move('power-card',     'mobile-view-controls');
+    // voice-card is already inside controls-grid so no separate move needed
   }
     });
     // Also move voice-card, brightness-card, and power-card into controls view
