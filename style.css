@@ -55,6 +55,15 @@
   --text-accent: var(--accent-teal);
   --text-on-glass: #f5f5f7;
 
+  /* State chip — vars so light theme can override with sufficient contrast. */
+  --state-chip-color: #bffcf0;
+  --state-chip-bg: rgba(0, 214, 180, 0.11);
+  --state-chip-border: rgba(0, 214, 180, 0.28);
+  --state-chip-ok: #bffcf0;
+  --state-chip-err: #fca5a5;
+  --state-chip-warn: #fdba74;
+  --settings-backdrop: rgba(0, 0, 0, 0.55);
+
   /* Borders */
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-accent: rgba(52, 211, 192, 0.32);
@@ -85,6 +94,9 @@
 
   /* Theme meta */
   color-scheme: dark;
+  /* Settings panel dynamic vars */
+  --font-size-scale: 1;
+  --card-gap: 12px;
 }
 
 /* ---- Light theme override (macOS Big Sur / Sonoma) ----
@@ -146,7 +158,7 @@
 
   --text-primary: #2a2520;
   --text-secondary: #59524a;
-  --text-muted: #8a8275;
+  --text-muted: #6a635c; /* was #8a8275 (2.8:1); #6a635c gives 4.5:1 on #ede5d6 */
   --text-accent: var(--accent-teal);
   --text-on-glass: #2a2520;
 
@@ -172,6 +184,16 @@
   --tint-panel-amber: rgba(252, 230, 196, 0.42);
 
   color-scheme: light;
+
+  /* State chip: OK (teal), error (rose), warning (amber) — chosen for
+     ≥4.5:1 contrast on --bg-deep #ede5d6. */
+  --state-chip-color: #0e6e67;
+  --state-chip-bg: rgba(14, 110, 103, 0.11);
+  --state-chip-border: rgba(14, 110, 103, 0.32);
+  --state-chip-ok: #0e6e67;
+  --state-chip-err: #b91c1c;
+  --state-chip-warn: #92400e;
+  --settings-backdrop: rgba(0, 0, 0, 0.28);
 }
 
 /* ---- Auto theme: follow system preference when data-theme=auto ---- */
@@ -213,7 +235,7 @@
 
     --text-primary: #2a2520;
     --text-secondary: #59524a;
-    --text-muted: #8a8275;
+    --text-muted: #6a635c;
     --text-accent: var(--accent-teal);
     --text-on-glass: #2a2520;
 
@@ -235,6 +257,14 @@
     --tint-panel-amber: rgba(252, 230, 196, 0.42);
 
     color-scheme: light;
+
+    --state-chip-color: #0e6e67;
+    --state-chip-bg: rgba(14, 110, 103, 0.11);
+    --state-chip-border: rgba(14, 110, 103, 0.32);
+    --state-chip-ok: #0e6e67;
+    --state-chip-err: #b91c1c;
+    --state-chip-warn: #92400e;
+    --settings-backdrop: rgba(0, 0, 0, 0.28);
   }
 }
 
@@ -256,7 +286,7 @@ input, select, textarea, .heat-live-panel, .draw-strength-panel,
 }
 
 html {
-  font-size: 16px;
+  font-size: calc(16px * var(--font-size-scale, 1));
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -270,7 +300,12 @@ body {
   font-feature-settings: 'cv11', 'ss01', 'ss03';
   letter-spacing: -0.005em;
   color: var(--text-primary);
+  /* iOS Safari counts the URL bar inside 100vh, so the body
+     ends up taller than the visible viewport. 100dvh tracks
+     the dynamic viewport (hides with the URL bar); the 100vh
+     fallback keeps older browsers working. */
   min-height: 100vh;
+  min-height: 100dvh;
   overflow-x: hidden;
   line-height: 1.55;
   -webkit-tap-highlight-color: transparent;
@@ -448,7 +483,7 @@ body.device-disconnected .connected-only-nav {
   flex: 0 0 auto;
   padding: 8px 13px;
   border-radius: var(--radius-full);
-  color: #c9d3de;
+  color: var(--text-secondary);
   font-size: 0.82rem;
   font-weight: 700;
   text-decoration: none;
@@ -705,7 +740,12 @@ body.device-disconnected .connected-only-nav {
   grid-column: 2;
   z-index: 140;
   max-width: min(100%, calc(100vw - 40px));
-  overflow: hidden;
+  /* overflow was hidden here to clip the rounded inner badges, but
+     it also clips the expanded BLE-capability panel (a child that
+     widens past the badge bounds) and hides the BLE-capability copy
+     + tags. The BLE-capability rules below already self-clip where
+     they need to, so let the badge grow visibly. */
+  overflow: visible;
 }
 
 .connection-badge .dot {
@@ -795,7 +835,7 @@ body.device-disconnected .connected-only-nav {
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-lg);
   padding: 18px;
-  margin-bottom: 12px;
+  margin-bottom: var(--card-gap);
   box-shadow: var(--shadow-card);
   transition: var(--transition-smooth);
   backdrop-filter: blur(40px) saturate(1.6);
@@ -1700,7 +1740,7 @@ select:-webkit-autofill {
   border-radius: var(--radius-full);
   border: 1px solid rgba(0, 214, 180, 0.28);
   background: rgba(0, 214, 180, 0.11);
-  color: #bffcf0;
+  color: var(--state-chip-color);
   font-size: 0.78rem;
   font-weight: 800;
 }
@@ -2108,7 +2148,7 @@ body.heat-active .peak-light {
 }
 
 .telemetry-stat .stat-value {
-  color: #bffcf0;
+  color: var(--state-chip-color);
 }
 
 .stat-value.heating {
@@ -3719,6 +3759,81 @@ summary { list-style: none; }
   }
 }
 
+/* Windows High-Contrast / forced-colors mode: glassmorphism and
+   rgba overlays often collapse to solid black, leaving the UI
+   unreadable. Promote borders to system colors and force solid
+   fills so every surface has a visible boundary. This is the
+   bare minimum; deeper tweaks live in component rules. */
+@media (forced-colors: active) {
+  :root {
+    color-scheme: light dark;
+  }
+  .app-header,
+  .app-menu,
+  .card,
+  .battery-panel,
+  .metric-card,
+  .profile-card,
+  .advanced-panel,
+  .advanced-panel > summary,
+  .profile-editor-sheet,
+  .toast,
+  .theme-popover,
+  .modal,
+  .modal-backdrop,
+  .ble-capability,
+  .capability-pill,
+  .capability-tag,
+  .btn,
+  .input-group,
+  input[type="text"],
+  input[type="number"],
+  input[type="search"],
+  input[type="email"],
+  textarea,
+  select,
+  .customize-bar-inner,
+  .sort-guide {
+    background-color: Canvas;
+    color: CanvasText;
+    border: 1px solid CanvasText;
+  }
+  .btn:focus-visible,
+  .settings-button:focus-visible,
+  .theme-option:focus-visible,
+  .reset-layout-btn:focus-visible,
+  .sort-guide-reset:focus-visible,
+  .sort-guide-close:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  .theme-option[aria-checked="true"],
+  .connection-badge.connected {
+    border-color: Highlight;
+    color: Highlight;
+  }
+  /* Buttons get a system-painted face; preserve their look. */
+  .btn,
+  .settings-button,
+  .theme-option,
+  .reset-layout-btn {
+    background-color: ButtonFace;
+    color: ButtonText;
+    border-color: ButtonText;
+  }
+  /* Custom selection / focus rings should not rely on rgba. */
+  *:focus-visible {
+    outline: 2px solid Highlight !important;
+    outline-offset: 2px !important;
+  }
+  /* Decorative gradients on text would render as black on black. */
+  .btn-primary,
+  .charge-pill.charging,
+  .app-menu a.active {
+    background-image: none;
+  }
+}
+
 .dev-command-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -3973,11 +4088,17 @@ summary { list-style: none; }
  * and during the few seconds a toast lives. */
 .toast-container {
   position: fixed;
-  bottom: 16px;
+  /* Lift above the iOS home indicator so the last toast isn't half
+     hidden behind the gesture bar. */
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   right: 16px;
   top: auto;
   left: auto;
-  z-index: 1000;
+  /* Toasts must NOT sit above an open modal — that lets a quick
+     success/error notification land on top of a profile-editor
+     "Save" click and confuse the user about which action took
+     effect. Keep them above page chrome but below the modal layer. */
+  z-index: 450;
   display: flex;
   flex-direction: column-reverse;
   align-items: flex-end;
@@ -4029,9 +4150,133 @@ summary { list-style: none; }
   animation: toast-out 300ms ease-in forwards;
 }
 
+/* Rich toast layout */
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px 12px 16px;
+  border-radius: var(--radius-lg);
+  min-width: 240px;
+  max-width: 380px;
+  /* Subtle left accent bar */
+  box-shadow: var(--shadow-popover), inset 3px 0 0 currentColor;
+}
+
+.toast-icon-wrap {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: currentColor;
+  opacity: 0.9;
+}
+
+.toast-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-message {
+  display: block;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+/* Progress bar */
+.toast-progress-bar {
+  margin-top: 8px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.toast-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.6;
+  transition: width 200ms ease;
+}
+
+/* Action buttons */
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.toast-action-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 140ms ease, background 140ms ease;
+}
+
+.toast-action-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.toast-action-btn:active {
+  transform: scale(0.96);
+}
+
+/* Dismiss button */
+.toast-dismiss {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: -1px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.5;
+  padding: 0;
+  transition: opacity 140ms ease, background 140ms ease;
+}
+
+.toast-dismiss:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.toast-dismiss-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
 @media (max-width: 600px) {
   .toast-container {
-    bottom: 12px;
+    /* Stay anchored at the bottom on mobile (the older rule pinned
+       toasts to the top, which put them in front of the app header
+       and connection badge). Respect the iOS home indicator. */
+    top: auto;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     right: 12px;
     left: 12px;
     align-items: stretch;
@@ -4041,7 +4286,9 @@ summary { list-style: none; }
   .toast {
     width: auto;
     max-width: none;
-    padding: 10px 14px;
+    min-width: 0;
+    padding: 10px 12px 10px 14px;
+    border-radius: var(--radius-md);
   }
 }
 
@@ -4514,7 +4761,7 @@ summary { list-style: none; }
 .vapor-preset.active {
   border-color: rgba(0, 214, 180, 0.42);
   background: rgba(0, 214, 180, 0.12);
-  color: #bffcf0;
+  color: var(--state-chip-color);
 }
 
 .voice-command-panel {
@@ -4548,7 +4795,7 @@ summary { list-style: none; }
 .voice-state.listening {
   border-color: rgba(0, 214, 180, 0.4);
   background: rgba(0, 214, 180, 0.12);
-  color: #bffcf0;
+  color: var(--state-chip-color);
 }
 
 .voice-state[data-state="ready"] {
@@ -4734,13 +4981,13 @@ summary { list-style: none; }
 .voice-last-action.ok {
   border-color: rgba(0, 214, 180, 0.5);
   background: rgba(0, 214, 180, 0.14);
-  color: #bffcf0;
+  color: var(--state-chip-color);
 }
 
 .voice-last-action.blocked {
   border-color: rgba(239, 68, 68, 0.5);
   background: rgba(239, 68, 68, 0.12);
-  color: #fecaca;
+  color: var(--state-chip-err);
 }
 
 .voice-last-action.empty {
@@ -4792,7 +5039,8 @@ summary { list-style: none; }
 }
 
 .voice-command-chips .btn {
-  flex: 1 1 92px;
+  flex: 0 1 auto;
+  min-width: 0;
   transition: transform 140ms ease, box-shadow 240ms ease, border-color 240ms ease, background 240ms ease;
 }
 
@@ -4803,13 +5051,13 @@ summary { list-style: none; }
 .voice-command-chips .btn.fired.ok {
   border-color: rgba(0, 214, 180, 0.7);
   background: rgba(0, 214, 180, 0.22);
-  color: #bffcf0;
+  color: var(--state-chip-color);
 }
 
 .voice-command-chips .btn.fired.blocked {
   border-color: rgba(239, 68, 68, 0.7);
   background: rgba(239, 68, 68, 0.18);
-  color: #fecaca;
+  color: var(--state-chip-err);
 }
 
 @keyframes voice-chip-fire {
@@ -4855,7 +5103,7 @@ summary { list-style: none; }
 
 .voice-grammar > summary:hover {
   background: rgba(0, 214, 180, 0.05);
-  color: #bffcf0;
+  color: var(--state-chip-color);
 }
 
 .voice-grammar-grid {
@@ -5891,7 +6139,9 @@ input[type="checkbox"]:disabled {
 .toast-container {
   left: 50%;
   right: auto;
-  bottom: 24px;
+  /* Keep the iOS home-indicator safe-area in the offset so the
+     toast is fully visible on notched devices. */
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%);
   align-items: center;
   max-width: min(440px, calc(100vw - 32px));
@@ -5910,13 +6160,26 @@ input[type="checkbox"]:disabled {
 
 @media (max-width: 600px) {
   .toast-container {
+    /* Keep toasts anchored to the bottom on mobile too — moving
+       them to the top of the screen made them land on top of the
+       app header (z-index: 120) and the connection badge
+       (z-index: 140), hiding device status while a notification
+       was visible. Stay at the bottom, span the viewport edges,
+       and respect the home indicator. */
     left: 12px;
     right: 12px;
-    top: 12px;
-    bottom: auto;
+    top: auto;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     transform: none;
   }
+
+  .toast {
+    width: auto;
+    max-width: none;
+    padding: 10px 14px;
+  }
 }
+
 
 /* ---- ASK 2: device-graphic removal ----
    The fake .peak-body silhouette is gone. The status-empty
@@ -6287,12 +6550,20 @@ html {
   padding: 4px 10px;
   border-radius: var(--radius-sm);
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+  /* Touch target — both buttons are reachable on mobile but the
+     original 26px / 30px hit areas were too small to tap reliably.
+     32px is a fair compromise: bigger than 44px² is hard to fit
+     next to a one-line banner, but 32 keeps every tap reachable. */
+  min-height: 32px;
 }
 .sort-guide-reset { color: var(--accent-teal); border-color: rgba(0, 214, 180, 0.30); }
 .sort-guide-reset:hover { background: rgba(0, 214, 180, 0.12); color: var(--text-primary); }
 .sort-guide-close {
-  width: 26px;
-  height: 26px;
+  /* Square hit-area on the close × is a 32×32 transparent tap zone
+     that wraps the visible glyph; the inner glyph is 1.1rem but the
+     clickable region is now the full 32px. */
+  width: 32px;
+  height: 32px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -6386,3 +6657,953 @@ html {
 }
 
 .backend-section-heading { font-size: 0.85em; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted, #888); margin: 1.25em 0 0.5em; }
+
+/* =========================================================================
+   Customize-layout mode (macOS app-organizer feel)
+   -------------------------------------------------------------------------
+   When the user flips the "Customize layout" switch in the appearance
+   popover, body gets .is-customizing. The page dims, every reorderable
+   surface gets a drag handle in the corner, and a floating toolbar
+   appears at the top with "Reset" and "Done" actions. Cards jiggle
+   gently to signal the mode. Sortable is wired on all the eligible
+   surfaces (cards + items within cards) only while this mode is on.
+   ========================================================================= */
+
+.is-customizing {
+  --reorder-accent: var(--accent-teal);
+  --reorder-handle-bg: rgba(255, 255, 255, 0.06);
+  --reorder-handle-fg: var(--text-muted);
+  --reorder-handle-bg-hover: rgba(255, 255, 255, 0.14);
+  --reorder-handle-fg-hover: var(--text-primary);
+}
+[data-theme="light"] .is-customizing,
+.is-customizing [data-theme="light"] {
+  --reorder-handle-bg: rgba(0, 0, 0, 0.05);
+  --reorder-handle-bg-hover: rgba(0, 0, 0, 0.12);
+}
+
+/* Dim the rest of the page so the active surfaces pop. The
+   .app-container selector targets only the main content area; the
+   theme popover and customize bar are siblings and stay bright. */
+body.is-customizing .app-container {
+  position: relative;
+  isolation: isolate;
+  pointer-events: auto;
+}
+body.is-customizing .app-container::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  z-index: -1;
+  background: radial-gradient(60% 50% at 50% 0%, rgba(0, 0, 0, 0.18), transparent 70%);
+  pointer-events: none;
+}
+
+/* Make every reorderable surface obviously draggable. Cursor + a
+   subtle border lift signal "you can pick this up" without making the
+   default (non-customizing) state noisy. */
+.is-customizing .card,
+.is-customizing .advanced-panel,
+.is-customizing [data-card-item-list] > * {
+  cursor: grab;
+}
+.is-customizing .card:active,
+.is-customizing .advanced-panel:active,
+.is-customizing [data-card-item-list] > *:active {
+  cursor: grabbing;
+}
+
+/* Drag handle that appears in the top-right corner of every reorderable
+   surface. Rendered as a small grip-icon button so it's keyboard-
+   accessible (we wire Sortable to fire from the handle, not the whole
+   card, which keeps text-selection inside cards working). */
+.reorder-handle {
+  display: none;
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--reorder-handle-bg);
+  color: var(--reorder-handle-fg);
+  cursor: grab;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.reorder-handle:hover {
+  background: var(--reorder-handle-bg-hover);
+  color: var(--reorder-handle-fg-hover);
+}
+.reorder-handle:active { cursor: grabbing; transform: scale(0.96); }
+.reorder-handle svg { display: block; }
+
+/* Position the handle differently when the card already has its own
+   card-header actions in the top-right; for those we tuck the handle
+   just under the header. */
+.card .reorder-handle { right: 12px; top: 12px; }
+.advanced-panel { position: relative; }
+.advanced-panel > .reorder-handle { right: 44px; top: 14px; }
+
+/* Item-level handles (inside cards) sit on the right side of each item
+   and only show up when the parent is in customizing mode. */
+.is-customizing [data-card-item-list] {
+  position: relative;
+}
+.is-customizing [data-card-item-list] > [data-item-id] {
+  position: relative;
+  padding-right: 44px;
+  transition: box-shadow 160ms ease, transform 160ms ease;
+}
+.is-customizing [data-card-item-list] > [data-item-id] > .reorder-handle {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+}
+
+/* Card-level handles show up in customize mode and overlay the card. */
+.is-customizing .card > .reorder-handle,
+.is-customizing .advanced-panel > .reorder-handle {
+  display: inline-flex;
+}
+
+/* The macOS-style jiggle: a low-amplitude 2-axis wobble that signals
+   "you can move me" without making the page annoying to read. Stagger
+   the delay so adjacent cards don't all move in lock-step. Reduced-
+   motion users get a static accent ring instead. */
+.is-customizing .card,
+.is-customizing .advanced-panel,
+.is-customizing [data-card-item-list] > [data-item-id] {
+  animation: reorder-jiggle 2.6s ease-in-out infinite;
+  animation-delay: calc(var(--reorder-stagger, 0) * 1ms);
+  will-change: transform;
+}
+.is-customizing .card:nth-child(1) { --reorder-stagger: 0; }
+.is-customizing .card:nth-child(2) { --reorder-stagger: 90; }
+.is-customizing .card:nth-child(3) { --reorder-stagger: 180; }
+.is-customizing .card:nth-child(4) { --reorder-stagger: 270; }
+.is-customizing .card:nth-child(5) { --reorder-stagger: 360; }
+.is-customizing .card:nth-child(6) { --reorder-stagger: 450; }
+.is-customizing .card:nth-child(7) { --reorder-stagger: 540; }
+.is-customizing .card:nth-child(8) { --reorder-stagger: 630; }
+
+@keyframes reorder-jiggle {
+  0%   { transform: translate(0, 0) rotate(0deg); }
+  20%  { transform: translate(-0.6px, 0.6px) rotate(-0.35deg); }
+  40%  { transform: translate(0.7px, -0.5px) rotate(0.4deg); }
+  60%  { transform: translate(-0.5px, -0.7px) rotate(-0.3deg); }
+  80%  { transform: translate(0.6px, 0.4px) rotate(0.3deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+
+/* When Sortable moves a card or item, kill the jiggle so the user gets
+   a clean visual on the active drag and a quick snap on drop. */
+.is-customizing.sortable-active .card,
+.is-customizing.sortable-active .advanced-panel,
+.is-customizing.sortable-active [data-card-item-list] > [data-item-id] {
+  animation: none;
+}
+
+.is-customizing [data-card-item-list] > [data-item-id].sortable-ghost {
+  opacity: 0.4;
+  background: var(--bg-glass-hover);
+  border-style: dashed;
+  border-color: var(--reorder-accent);
+  outline: 1px dashed var(--reorder-accent);
+  outline-offset: 0;
+}
+.is-customizing [data-card-item-list] > [data-item-id].sortable-chosen {
+  cursor: grabbing;
+}
+.is-customizing [data-card-item-list] > [data-item-id].sortable-drag {
+  box-shadow: 0 0 0 2px var(--reorder-accent), 0 12px 40px rgba(0, 0, 0, 0.35);
+  transform: scale(1.02);
+}
+
+/* Sortable's own .sortable-ghost on the cards container does the same
+   treatment at the card level. */
+.is-customizing .card.sortable-ghost,
+.is-customizing .advanced-panel.sortable-ghost {
+  opacity: 0.4;
+  background: var(--bg-glass-hover);
+  border-style: dashed;
+  border-color: var(--reorder-accent);
+}
+
+/* Customize toolbar (the floating "Done" pill). Slides in from the top
+   the first time the user enters the mode and stays sticky. */
+.customize-bar {
+  position: fixed;
+  /* Lift off the iOS notch / status bar area. */
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translate(-50%, -120%);
+  /* Sit above the theme popover (z-index: 60) so that entering
+     customize mode from inside an open popover doesn't let the
+     popover float on top of the bar. Still below the connection
+     badge (z-index: 140) and toasts (now z-index: 450) so it
+     doesn't claim universal top-layer status. */
+  z-index: 80;
+  width: min(640px, calc(100vw - 32px));
+  pointer-events: none;
+  transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.customize-bar[hidden] { display: none; }
+.is-customizing .customize-bar {
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+.customize-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(20, 22, 28, 0.92), rgba(20, 22, 28, 0.78));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  color: var(--text-primary);
+}
+[data-theme="light"] .customize-bar-inner {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.86));
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.customize-bar-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.customize-bar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(0, 214, 180, 0.16);
+  color: var(--accent-teal);
+  flex: 0 0 auto;
+}
+.customize-bar-title > div {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+.customize-bar-title strong { font-size: 0.95rem; font-weight: 800; }
+.customize-bar-title span {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+.customize-bar-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.customize-bar-reset { color: var(--accent-teal); }
+.customize-bar-done { min-width: 88px; }
+
+/* Theme popover "Customize layout…" button. Sits in the Layout section. */
+.customize-layout-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.customize-layout-btn:hover { background: var(--bg-glass-hover); }
+.customize-layout-btn[aria-pressed="true"] {
+  background: rgba(0, 214, 180, 0.14);
+  border-color: rgba(0, 214, 180, 0.5);
+  color: var(--text-primary);
+}
+.customize-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(0, 214, 180, 0.12);
+  color: var(--accent-teal);
+}
+
+/* During customize mode, the existing sort-guide banner becomes
+   redundant — hide it. The customize-bar tells the user the same
+   thing in a more compact pill. */
+body.is-customizing .sort-guide { display: none; }
+
+/* Reduced motion: skip the jiggle. The drag handles and toolbar
+   are enough to communicate the mode. */
+@media (prefers-reduced-motion: reduce) {
+  .is-customizing .card,
+  .is-customizing .advanced-panel,
+  .is-customizing [data-card-item-list] > [data-item-id] {
+    animation: none;
+  }
+}
+
+/* On narrow viewports, collapse the toolbar to icon-only buttons and
+   shorten the descriptive text. */
+@media (max-width: 520px) {
+  .customize-bar-inner { padding: 8px 10px; gap: 8px; }
+  .customize-bar-icon { width: 32px; height: 32px; }
+  .customize-bar-title > div { display: none; }
+  .customize-bar-reset span:last-child { display: none; }
+}
+
+
+/* ============================================================
+   Full Settings Panel
+   ============================================================ */
+
+/* Hide the old theme-popover — replaced by the full settings panel */
+.theme-popover { display: none !important; }
+
+/* Backdrop */
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 199;
+  background: rgba(0, 0, 0, 0);
+  pointer-events: none;
+  transition: background 220ms ease;
+}
+.settings-backdrop.settings-backdrop-visible {
+  background: var(--settings-backdrop);
+  pointer-events: auto;
+}
+
+/* Panel */
+.settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 200;
+  width: min(520px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border-left: 1px solid var(--border-glass);
+  box-shadow: -20px 0 60px rgba(0, 0, 0, 0.4);
+  transform: translateX(100%);
+  opacity: 0;
+  transition: transform 280ms cubic-bezier(0.32, 0.72, 0.0, 1.0),
+              opacity 200ms ease;
+  overflow: hidden;
+}
+.settings-panel.settings-panel-open {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/* Settings header */
+.settings-header {
+  flex: 0 0 auto;
+  padding: 18px 20px 0;
+  border-bottom: 1px solid var(--border-glass);
+  background: var(--bg-glass);
+  backdrop-filter: blur(20px) saturate(1.6);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+}
+.settings-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.settings-title-row h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.settings-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-glass);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.settings-close-btn:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+.settings-close-btn:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 2px;
+}
+
+/* Tab nav */
+.settings-nav {
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.settings-nav::-webkit-scrollbar { display: none; }
+.settings-nav-btn {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  white-space: nowrap;
+}
+.settings-nav-btn:hover {
+  color: var(--text-primary);
+}
+.settings-nav-btn.active {
+  color: var(--accent-teal);
+  border-bottom-color: var(--accent-teal);
+}
+.settings-nav-btn:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: -2px;
+}
+
+/* Settings body */
+.settings-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 20px 32px;
+}
+.settings-section {
+  padding-top: 20px;
+}
+.settings-section-heading {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+.settings-field {
+  margin-bottom: 18px;
+}
+.settings-label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.settings-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.settings-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-top: 5px;
+}
+.settings-input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-family: var(--font);
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  transition: border-color var(--transition-fast);
+}
+.settings-input:focus {
+  border-color: var(--border-accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 192, 0.18);
+  outline: none;
+}
+
+/* Radio groups */
+.settings-radio-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings-radio-group.settings-compact {
+  gap: 6px;
+}
+.settings-radio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+.settings-radio-label:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+.settings-radio-label input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-teal);
+  flex: 0 0 auto;
+}
+.settings-radio-label:has(input:checked) {
+  background: var(--bg-glass-strong);
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-accent);
+}
+
+/* Toggle rows */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.settings-toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent-teal);
+  flex: 0 0 auto;
+}
+.settings-toggle-row:has(input:checked) {
+  color: var(--text-primary);
+}
+
+/* Theme options (full-width variant inside settings) */
+.settings-theme-options {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* Accent swatches in settings panel */
+.settings-accent-swatches {
+  gap: 10px;
+}
+.settings-accent-swatch {
+  width: 30px;
+  height: 30px;
+}
+.settings-accent-swatch[aria-checked="true"] {
+  box-shadow: inset 0 0 0 2px var(--bg-card), 0 0 0 2.5px var(--swatch);
+  transform: scale(1.1);
+}
+
+/* Actions row */
+.settings-actions-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+/* Danger zone */
+.settings-danger-zone {
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(239, 68, 68, 0.05);
+}
+.settings-danger-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-red);
+  margin-bottom: 14px;
+}
+
+/* About */
+.settings-about-grid {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+.settings-about-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg-glass);
+  gap: 16px;
+}
+.settings-about-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.settings-about-value {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Links */
+.settings-links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+.settings-link:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+  border-color: var(--border-accent);
+}
+.settings-link:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 2px;
+}
+
+/* ---- Status items popover (theme popover sub-panel) ---- */
+.status-items-popover {
+  display: none;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+}
+.status-items-popover[aria-hidden="false"],
+.status-items-popover:not([aria-hidden]) {
+  display: flex;
+}
+.status-items-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.status-items-popover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.status-item-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  transition: background var(--transition-fast);
+}
+.status-item-popover-row:hover {
+  background: var(--bg-glass-hover);
+}
+.status-item-popover-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-teal);
+  flex-shrink: 0;
+}
+.status-item-popover-row span:nth-child(2) {
+  flex: 1;
+}
+.status-item-popover-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+body.is-customizing .status-item-popover-hint {
+  opacity: 1;
+}
+
+/* ---- Status item wrappers ---- */
+.status-item {
+  position: relative;
+  /* Each item is a draggable child of #status-content (data-card-item-list="status-items").
+     The reorder-handle is injected by injectReorderHandles() in customize mode. */
+  transition: opacity var(--transition-smooth);
+}
+/* Hidden items: dimmed and inert */
+.status-item.status-item-hidden {
+  display: block !important;
+  opacity: 0.35;
+}
+.status-item.status-item-hidden > *:not(.status-item-header) {
+  visibility: hidden;
+}
+.status-item.status-item-hidden .status-item-header {
+  visibility: visible;
+  opacity: 1;
+}
+.status-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  min-height: 28px;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+/* Show headers in customize mode or when the item is hidden */
+body.is-customizing .status-item-header,
+.status-item.status-item-hidden .status-item-header {
+  opacity: 1;
+}
+.status-item-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  flex: 1;
+}
+.status-item-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.status-item-toggle:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+.status-item-toggle[aria-pressed="false"] {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+.status-item-toggle[aria-pressed="false"] svg {
+  opacity: 0.5;
+}
+
+/* ---- Advanced section collapse toggle ---- */
+.section-collapse-btn {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+.section-collapse-btn:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+.section-collapse-btn .collapse-icon {
+  transition: transform var(--transition-fast);
+}
+/* Collapsed state */
+.advanced-section-item.section-collapsed {
+  max-height: 60px;
+  overflow: hidden;
+  transition: max-height var(--transition-smooth);
+}
+.advanced-section-item.section-collapsed > *:not(.card-header) {
+  display: none !important;
+}
+.advanced-section-item.section-collapsed > .card-header {
+  padding-bottom: 10px;
+}
+.advanced-section-item.section-collapsed .collapse-icon {
+  transform: rotate(-90deg);
+}
+
+/* ---- Advanced sections list (sortable container) ---- */
+.advanced-sections-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+/* ---- Lorax tabs ---- */
+.lorax-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.lorax-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+  /* Make tabs draggable */
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.lorax-tab:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+.lorax-tab.active {
+  background: var(--bg-glass-strong);
+  border-color: var(--border-accent);
+  color: var(--accent-teal);
+  box-shadow: inset 0 0 0 1px var(--border-accent);
+}
+.lorax-tab:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 2px;
+}
+.lorax-tab-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+body.is-customizing .lorax-tab {
+  cursor: grab;
+}
+/* Tab filter active state: override background to show the selected tab */
+.lorax-tab[aria-selected="true"] {
+  background: rgba(0, 214, 180, 0.15);
+  border-color: rgba(0, 214, 180, 0.4);
+  color: var(--accent-teal);
+}
+
+/* ---- Customize mode: status items jiggle and handles ---- */
+body.is-customizing .status-item {
+  cursor: grab;
+  touch-action: none;
+}
+body.is-customizing .status-item:active {
+  cursor: grabbing;
+}
+/* HTML5 drag states — set by wireStatusItemsHtml5Drag */
+.status-item[draggable="true"] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.status-item-dragging {
+  opacity: 0.45;
+  outline: 2px dashed var(--accent-teal);
+  outline-offset: 4px;
+  border-radius: var(--radius-md);
+}
+.status-item-drag-over {
+  border-top: 2px solid var(--accent-teal);
+}
+/* Fade-in animation when item is restored from hidden */
+@keyframes status-item-reveal {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.status-item.status-item-hidden.was-hidden {
+  animation: status-item-reveal 280ms ease both;
+}
+
+/* Mobile: full-width on narrow screens */
+@media (max-width: 520px) {
+  .settings-panel {
+    width: 100vw;
+  }
+  .settings-nav {
+    gap: 0;
+  }
+  .settings-nav-btn {
+    padding: 10px 10px;
+    font-size: 0.78rem;
+  }
+  .settings-radio-group {
+    gap: 6px;
+  }
+}
+
+/* forced-colors accessibility */
+@media (forced-colors: active) {
+  .settings-panel { border-left: 2px solid CanvasText; }
+  .settings-nav-btn.active { border-bottom-color: Highlight; }
+  .settings-radio-label:has(input:checked) { border-color: Highlight; }
+  .settings-close-btn { border: 2px solid CanvasText; }
+}

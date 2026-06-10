@@ -638,25 +638,42 @@ class PuffcoBrowserBleClient {
     const data = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || []);
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     let offset = 0;
+    // Guard every read against running past the end of the buffer. The
+    // original implementation happily called `data[offset++]`,
+    // `view.getUint16(offset, false)`, and `data.slice(offset, offset+length)`
+    // without any bounds check, so a malformed or truncated CBOR payload
+    // would either read undefined/garbage or produce a partial result while
+    // the offset silently walked past the data — corrupting every subsequent
+    // read in the same decode. We now throw a clear error and stop.
+    const need = (n) => {
+      if (offset + n > data.length) throw new Error('CBOR decode underflow');
+    };
     const readLength = (additional) => {
       if (additional < 24) return additional;
-      if (additional === 24) return data[offset++];
+      if (additional === 24) {
+        need(1);
+        return data[offset++];
+      }
       if (additional === 25) {
+        need(2);
         const value = view.getUint16(offset, false);
         offset += 2;
         return value;
       }
       if (additional === 26) {
+        need(4);
         const value = view.getUint32(offset, false);
         offset += 4;
         return value;
       }
       if (additional === 27) {
+        need(8);
         const high = view.getUint32(offset, false);
         const low = view.getUint32(offset + 4, false);
         offset += 8;
         return high * 4294967296 + low;
       }
+      // additional === 31 → indefinite-length container, not supported here.
       throw new Error('Unsupported indefinite CBOR length');
     };
     const readItem = () => {
@@ -668,12 +685,14 @@ class PuffcoBrowserBleClient {
       if (major === 1) return -1 - readLength(additional);
       if (major === 2) {
         const length = readLength(additional);
+        need(length);
         const value = Array.from(data.slice(offset, offset + length));
         offset += length;
         return value;
       }
       if (major === 3) {
         const length = readLength(additional);
+        need(length);
         const value = new TextDecoder().decode(data.slice(offset, offset + length));
         offset += length;
         return value;
@@ -693,11 +712,13 @@ class PuffcoBrowserBleClient {
         if (additional === 21) return true;
         if (additional === 22 || additional === 23) return null;
         if (additional === 26) {
+          need(4);
           const value = view.getFloat32(offset, false);
           offset += 4;
           return value;
         }
         if (additional === 27) {
+          need(8);
           const value = view.getFloat64(offset, false);
           offset += 8;
           return value;
@@ -1123,7 +1144,16 @@ class PuffcoBrowserBleClient {
     const preset = PuffcoBrowserBleClient.MOOD_PRESETS[presetKey];
     if (!preset) throw new Error(`Unknown mood preset: ${presetId}`);
     const userColors = this.normalizeColorList(colors, preset);
-    const tempo = Math.max(0, Math.min(1, Number(options.tempo_frac ?? options.tempoFrac ?? 0.5) || 0.5));
+    // tempo_frac=0 is a valid user intent ("freeze the animation" or "use
+    // the preset's natural pace"). The previous `... || 0.5` fallback
+    // silently rewrote a user-supplied 0 to 0.5 because `Number(0) || 0.5`
+    // is 0.5, not 0. Use ?? so only nullish (undefined/null) falls back
+    // to the default; a real 0 survives and gets clamped to [0, 1].
+    const tempoInput = options.tempo_frac ?? options.tempoFrac ?? 0.5;
+    const tempoParsed = Number(tempoInput);
+    const tempo = Number.isFinite(tempoParsed)
+      ? Math.max(0, Math.min(1, tempoParsed))
+      : 0.5;
     const dynamic = (options.dynamic_inhale ?? options.dynamicInhale) ? 1 : 0;
     const count = userColors.length;
     const speed = this.moodSpeed(presetKey, tempo);

@@ -78,7 +78,14 @@ from lorax_registry import (  # noqa: E402
 SERVER_VERBOSE = False
 PROFILE_COUNT = 4
 HEAT_STATES = {"HEAT_CYCLE_PREHEAT", "HEAT_CYCLE_ACTIVE", "HEAT_CYCLE_FADE"}
-BATTERY_PERCENT_PATHS = ("/p/bat/soc", "/p/bat/lev")
+# Per-Lorax-call timeout. The PuffcoBLE library doesn't surface a per-read
+# timeout and the BleakClient can take 30s+ before its own OS-level timeout
+# fires; the bridge runs these reads under `command_lock`, so a single hung
+# read would freeze every WS client. 4s is well above normal firmware
+# latency (single-digit ms) but short enough to keep the bridge responsive
+# even if the radio wedges.
+LORAX_OP_TIMEOUT_S = 4.0
+BATTERY_PERCENT_PATHS = ("/p/bat/soc",)
 TEMP_MAPPING_FILE = ROOT / "lorax_mappings.json"
 OPERATING_STATE_NAMES = {
     0: "InitMemory",
@@ -240,11 +247,28 @@ def save_temperature_source(source: dict[str, Any]) -> None:
 
 def set_live_temperature_source(source: dict[str, Any] | None, *, persist: bool = True) -> dict[str, Any]:
     global live_temperature_source
-    live_temperature_source = source.copy() if source and source.get("path") else empty_temperature_source()
-    live_temperature_source["persisted"] = bool(live_temperature_source.get("path") and persist)
+    # Re-bind to a local so callers see a fully-populated dict, not a snapshot
+    # taken between `source.copy()` and the `persisted` flag being stamped on.
+    next_source = source.copy() if source and source.get("path") else empty_temperature_source()
+    next_source["persisted"] = bool(next_source.get("path") and persist)
+    live_temperature_source = next_source
     if persist:
         save_temperature_source(live_temperature_source)
     return live_temperature_source
+
+
+async def set_live_temperature_source_locked(source: dict[str, Any] | None, *, persist: bool = True) -> dict[str, Any]:
+    """Async variant of `set_live_temperature_source` that serialises against
+    concurrent discovery/promotion. The sync version is still used at module
+    import (before any lock exists) and is the right entry point for the
+    temperature_discovery_tick and the user-driven handler that both already
+    run under `command_lock` — this async wrapper is for call sites that do
+    not hold the command lock (e.g. probe/observe) so the disk write + dict
+    mutation cannot interleave with another writer."""
+    if temperature_source_lock is None:
+        return set_live_temperature_source(source, persist=persist)
+    async with temperature_source_lock:
+        return set_live_temperature_source(source, persist=persist)
 
 device: Optional[PuffcoBLE] = None
 device_connected = False
@@ -252,6 +276,17 @@ clients: set[Any] = set()
 poll_task: Optional[asyncio.Task] = None
 command_lock: Optional[asyncio.Lock] = None
 connection_lock: Optional[asyncio.Lock] = None
+# `set_live_temperature_source` is called from three different call sites
+# (user-driven `handle_temperature_source`, automatic `annotate_temperature_observation`,
+# and the per-poll `temperature_discovery_tick`). The two automatic paths are
+# awaited under `command_lock` already, but the user-driven path can run while
+# a discovery tick is mid-evaluation, and the module-load default
+# (`OFFICIAL_LIVE_TEMPERATURE_SOURCE`) runs before any lock exists. Guard
+# mutation + disk write behind a dedicated lock so the global + the on-disk
+# `lorax_mappings.json` always move together, and so the per-poll discovery
+# loop can't read a partially-initialised dict between `.copy()` and the
+# `persisted` field being stamped.
+temperature_source_lock: Optional[asyncio.Lock] = None
 server_loop: Optional[asyncio.AbstractEventLoop] = None
 heat_session: dict[str, Any] = {"active": False}
 live_temperature_source: dict[str, Any] = load_temperature_source()
@@ -382,6 +417,24 @@ def ble_error_hint(exc: Exception) -> str | None:
         return "The device was not advertising during the scan. Wake it, keep it nearby, and retry."
     if "timed out" in text or "timeout" in text:
         return "Windows did not finish the BLE handshake in time. Retrying with a clean client usually helps."
+    if "access denied" in text or "denied" in text and "access" in text:
+        return (
+            "Windows blocked the Bluetooth radio access. Check Settings → Privacy & security → "
+            "Bluetooth and make sure the Python process is allowed to use the radio. If you are "
+            "running under a service account, the radio may be assigned to a different user session."
+        )
+    if (
+        "pairing" in text
+        or "bond" in text
+        or "authentication" in text
+        or "auth failed" in text
+        or "insufficient authentication" in text
+    ):
+        return (
+            "The Puffco rejected the BLE authentication/bonding. Open the official Puffco app once "
+            "on this Windows PC to register the radio, then retry. If it still fails, unpair the "
+            "Puffco from Windows Settings → Bluetooth & devices and let the bridge re-pair it."
+        )
     return None
 
 
@@ -457,7 +510,30 @@ def schedule_backend_disconnect(
         is_current_device = source is None or source is device
         is_current_session = session_id is None or session_id == active_session
         if device_connected and is_current_device and is_current_session:
-            asyncio.create_task(broadcast_backend_disconnect(reason))
+            # Bleak invokes the disconnected callback from its own background
+            # thread; we use call_soon_threadsafe above to hop onto the event
+            # loop. The task below is fire-and-forget on the loop — it has no
+            # awaiter to surface an exception, so asyncio's default behaviour
+            # is to log a warning and drop the traceback. Wire up a done
+            # callback that routes task failures through `log_event` so a
+            # broken disconnect path shows up in the same log as everything
+            # else instead of being silently swallowed.
+            task = asyncio.create_task(broadcast_backend_disconnect(reason))
+
+            def _log_task_failure(done: asyncio.Task) -> None:
+                if done.cancelled():
+                    return
+                exc = done.exception()
+                if exc is not None:
+                    log_event(
+                        "ws",
+                        "backend disconnect task crashed",
+                        level="ERROR",
+                        reason=reason,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+
+            task.add_done_callback(_log_task_failure)
         else:
             ignored_disconnect_callbacks += 1
 
@@ -1523,7 +1599,17 @@ async def read_official_attributes(names: tuple[str, ...] | list[str] | None = N
             continue
         path, data_type = spec
         try:
-            raw = bytes(await device.read_short(path, 0, read_size_for_type(data_type)))
+            # Per-attribute read: bound the time a single hung read can
+            # block the entire snapshot. The full set of attributes can
+            # include ~40 reads; a stuck one would otherwise stall the
+            # whole `device_snapshot` under `command_lock` for as long as
+            # the OS keeps the BLE request pending.
+            raw = bytes(
+                await asyncio.wait_for(
+                    device.read_short(path, 0, read_size_for_type(data_type)),
+                    timeout=LORAX_OP_TIMEOUT_S,
+                )
+            )
             value = decode_lorax_bytes(raw, data_type)
             normalized = normalize_official_attribute(name, value, raw)
             nested_assign(attributes, name, normalized)
@@ -1549,7 +1635,16 @@ async def read_draw_strength() -> dict[str, Any]:
         return {"value": None, "percent": 0, "active": False, "source": None, "mode": "unavailable"}
     for path, data_type, mode in DRAW_STRENGTH_CANDIDATES:
         try:
-            raw = bytes(await device.read_short(path, 0, read_size_for_type(data_type)))
+            # Bound the read so a single slow draw-strength path can't
+            # block the rest of the snapshot — the fallback chain tries
+            # multiple paths, so a stuck first candidate is otherwise
+            # invisible until the OS-level BLE timeout fires.
+            raw = bytes(
+                await asyncio.wait_for(
+                    device.read_short(path, 0, read_size_for_type(data_type)),
+                    timeout=LORAX_OP_TIMEOUT_S,
+                )
+            )
             value = decode_lorax_bytes(raw, data_type)
             numeric = float(value)
             if not math.isfinite(numeric):
@@ -1798,7 +1893,14 @@ async def read_lorax_path(identifier: str, *, offset: int = 0, size: int | None 
     entry = resolve_lorax_path(identifier)
     read_type = data_type or entry.data_type
     read_size = size or entry.size
-    raw = await device.read_short(entry.path, offset, read_size)
+    # A single hung BLE read would otherwise block the WS handler (which holds
+    # `command_lock`) and freeze the entire bridge until bleak's internal
+    # timeout — if any — eventually fires. The bleak defaults can be 30s or
+    # more, far longer than the WS keepalive interval. Bound it.
+    raw = await asyncio.wait_for(
+        device.read_short(entry.path, offset, read_size),
+        timeout=LORAX_OP_TIMEOUT_S,
+    )
     return {
         "path": entry.path,
         "name": entry.name,
@@ -1824,7 +1926,12 @@ async def write_lorax_path(identifier: str, value: Any, *, offset: int = 0, data
         raise ValueError(f"{entry.path} is dangerous and requires confirm='WRITE'")
     write_type = data_type or (entry.data_type if entry.data_type in WRITE_TYPES else "bytes")
     payload = encode_lorax_value(value, write_type)
-    await device.write_short(entry.path, offset, 0, payload)
+    # Same reasoning as `read_lorax_path` — a stuck write leaves the command
+    # lock held and the WS client waiting. Bound the underlying transport.
+    await asyncio.wait_for(
+        device.write_short(entry.path, offset, 0, payload),
+        timeout=LORAX_OP_TIMEOUT_S,
+    )
     return {
         "path": entry.path,
         "name": entry.name,
@@ -2971,13 +3078,14 @@ async def handle_temperature_observe(params: dict[str, Any]) -> dict[str, Any]:
 
 async def handle_temperature_source(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("clear"):
-        return {"type": "temperature_source", "data": set_live_temperature_source(None)}
+        data = await set_live_temperature_source_locked(None)
+        return {"type": "temperature_source", "data": data}
     path = params.get("path")
     encoding = params.get("encoding")
     if path and encoding:
         if path not in PATHS_BY_PATH:
             return {"type": "error", "message": f"Unknown Lorax path: {path}"}
-        set_live_temperature_source(
+        await set_live_temperature_source_locked(
             {
                 "path": path,
                 "encoding": encoding,
@@ -3428,7 +3536,7 @@ async def websocket_endpoint(ws: Any) -> None:
     clients.add(ws)
     log_event("ws", "client connected", clients=len(clients))
     try:
-        await send_json(ws, {"type": "status", "data": await locked_device_snapshot(full=False)})
+        await _safe_send(ws, {"type": "status", "data": await locked_device_snapshot(full=False)})
         async for raw in ws:
             cmd_name = ""
             try:
@@ -3462,7 +3570,7 @@ async def websocket_endpoint(ws: Any) -> None:
                 if broadcast_response:
                     await broadcast(response)
                 else:
-                    await send_json(ws, response)
+                    await _safe_send(ws, response)
 
                 if response.get("type") == "disconnected" and cmd_name != "disconnect" and not broadcast_response:
                     await broadcast(response, exclude=ws)
@@ -3476,14 +3584,21 @@ async def websocket_endpoint(ws: Any) -> None:
                         )
             except json.JSONDecodeError:
                 log_event("ws", "invalid json", level="WARN")
-                await send_json(ws, {"type": "error", "message": "Invalid JSON"})
+                await _safe_send(ws, {"type": "error", "message": "Invalid JSON"})
             except Exception as exc:
                 log_event("ws", "command failed", level="ERROR", cmd=cmd_name, error=f"{type(exc).__name__}: {exc}")
                 hint = ble_error_hint(exc)
                 message = f"{type(exc).__name__}: {exc}"
                 if hint:
                     message = f"{message}. {hint}"
-                await send_json(ws, {"type": "error", "message": message})
+                # If the client closed mid-handler (most common when the browser
+                # tab is reloaded while a write is in flight) the send raises
+                # `ConnectionClosed` and would tear this WS task out of the
+                # outer try. Swallow the close here and let the next iteration
+                # of `async for raw in ws` raise it cleanly to the outer
+                # handler so the client's `clients.discard(ws)` cleanup still
+                # runs.
+                await _safe_send(ws, {"type": "error", "message": message})
                 if cmd_name not in NO_DEVICE_COMMANDS and is_ble_connection_error(exc):
                     await broadcast_backend_disconnect("Bluetooth link became invalid; reconnect required")
                 if SERVER_VERBOSE:
@@ -3493,6 +3608,26 @@ async def websocket_endpoint(ws: Any) -> None:
     finally:
         clients.discard(ws)
         log_event("ws", "client disconnected", clients=len(clients))
+
+
+async def _safe_send(ws: Any, payload: dict[str, Any]) -> None:
+    """`send_json` re-raises `ConnectionClosed` (and the broader `OSError` /
+    `websockets.exceptions` family) when the underlying transport is gone.
+    Inside `websocket_endpoint`'s error-handling paths a raised close would
+    skip the `finally`-driven `clients.discard(ws)`. Catch the close family
+    here so a mid-error close just exits the send and lets the outer loop
+    notice the dead client on the next iteration."""
+    try:
+        await send_json(ws, payload)
+    except ConnectionClosed:
+        return
+    except Exception as exc:  # pragma: no cover - defensive log path
+        log_event(
+            "ws",
+            "send_json failed",
+            level="WARN",
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -3602,10 +3737,11 @@ def start_http_server(host: str, port: int) -> ThreadingHTTPServer:
 
 
 async def run(args: argparse.Namespace) -> None:
-    global command_lock, connection_lock, device, device_connected, server_loop, SERVER_VERBOSE
+    global command_lock, connection_lock, temperature_source_lock, device, device_connected, server_loop, SERVER_VERBOSE
     SERVER_VERBOSE = bool(args.verbose)
     command_lock = asyncio.Lock()
     connection_lock = asyncio.Lock()
+    temperature_source_lock = asyncio.Lock()
     server_loop = asyncio.get_running_loop()
     httpd = start_http_server(args.host, args.port)
     url = f"http://{args.host}:{args.port}"

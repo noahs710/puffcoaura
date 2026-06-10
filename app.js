@@ -13,6 +13,7 @@ const app = (() => {
   let lanternOn = false;
   let stealthOn = false;
   let reconnectTimer = null;
+  let bridgeConnectInFlight = false;
   let connectPending = false;
   let scanPending = false;
   let editingProfileIndex = null;
@@ -96,6 +97,18 @@ const app = (() => {
   // lives in the data-card-id attributes on .app-container children.
   const CARD_ORDER_KEY = 'puffco:card-order';
   const CARD_DRAG_INDICATOR_MS = 180;
+  // Per-card item-order keys follow the pattern "puffco:item-order:<list>".
+  // Each list id is the data-card-item-list value of the parent element.
+  // We keep them separate from the card-order key so resetting cards
+  // doesn't reset internal item orders (or vice versa) unless the user
+  // explicitly asks for a full reset.
+  const ITEM_ORDER_KEY_PREFIX = 'puffco:item-order:';
+  const CUSTOMIZE_MODE_KEY = 'puffco:customize-mode';
+  // When false, no card or item is draggable; the user has to flip the
+  // toggle in the appearance popover to enter customize mode. We start
+  // off (the previous "always-on" card drag is removed) so the page
+  // feels calm by default and reordering is a deliberate action.
+  let customizeMode = false;
   const DRAW_SESSION_KEY = 'puffco:draw-session';
   // Vapor presets — display-only labels. The IDs are stable so saved
   // profiles in localStorage keep working. Intensity 0-1 maps to the
@@ -531,6 +544,7 @@ const app = (() => {
     } catch {}
     renderBrowserDebugSummary();
     appendLog('Browser debug log cleared', 'info', { skipDebug: true });
+    toast('Debug log cleared', 'info');
   }
 
   function exportBrowserDebugLog() {
@@ -566,17 +580,22 @@ const app = (() => {
   }
 
   function downloadBrowserDebugLog() {
-    const text = safeJsonStringify(browserDebugPayload());
-    const blob = new Blob([text], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `puffco-debug-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    appendLog('Browser debug log downloaded', 'success');
+    try {
+      const text = safeJsonStringify(browserDebugPayload());
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `puffco-debug-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      appendLog('Browser debug log downloaded', 'success');
+    } catch (err) {
+      toast('Download failed', 'error');
+      appendLog(`Download failed: ${err?.message || err}`, 'error');
+    }
   }
 
   function renderBrowserDebugLog() {
@@ -659,7 +678,8 @@ const app = (() => {
   function setTransportMode(mode) {
     const nextMode = normalizeTransportMode(mode);
     transportMode = nextMode;
-    localStorage.setItem('puffco_transport_mode', transportMode);
+    try { localStorage.setItem('puffco_transport_mode', transportMode); }
+    catch { /* ignore quota / private mode */ }
     renderBridgeUI();
     if (transportMode === 'browser_ble') {
       closeBridgeSocket();
@@ -689,6 +709,14 @@ const app = (() => {
       };
       setBridgeNote(`Bridge connected: ${url}. Scans show Puffco devices with MAC prefix ${PUFFCO_MANUFACTURER_MAC_PREFIX}.`, 'online');
       renderBackendMirror();
+      // Force a registry re-fetch on every (re)connect. The backend may
+      // have restarted with a different firmware / registry, and the
+      // previous fetch's payload is now stale. Without this, the
+      // requestLoraxRegistry() short-circuit on `registryLoaded` would
+      // leave the Lorax panel showing the old paths after a bridge
+      // drop, even though the device is back and the new registry is
+      // sitting in the backend.
+      registryLoaded = false;
       requestLoraxRegistry();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -723,6 +751,22 @@ const app = (() => {
         connected = false;
         connectPending = false;
         deviceState = null;
+        // A bridge drop in the middle of a save/reload/select leaves
+        // every in-flight UI flag in limbo: the modal would sit on
+        // "Saving…" forever, the profile-reload spinner would never
+        // clear, and the optimistic profile selection would never
+        // reconcile. Wipe them here so the next connection starts
+        // from a clean slate, and surface the error in the modal
+        // if one is open.
+        if (profileSaveInFlight != null) {
+          const inflightIndex = profileSaveInFlight;
+          profileSaveInFlight = null;
+          if (pendingAutoCloseIndex === inflightIndex) pendingAutoCloseIndex = null;
+          setSaveButtonsPending(false);
+          markProfileReadbackError('Bridge disconnected — save not confirmed');
+        }
+        pendingProfileReload = null;
+        optimisticProfileIndex = null;
         lastDeviceSnapshot = normalizeDisconnectedPayload(lastDeviceSnapshot, 'Server connection lost');
         updateConnectionUI(false);
         updateStatusUI(null);
@@ -741,12 +785,25 @@ const app = (() => {
   }
 
   function connectBridge() {
+    // Block re-entry. The `setTimeout(..., 50)` at the bottom opens a
+    // 50 ms window where a second click of "Connect" (or a quick
+    // user-toggle that overlaps with the previous click) lands before
+    // initWebSocket() has assigned the new `ws`. Two pending timers
+    // then race to create two WebSockets; the first is overwritten by
+    // the second but keeps its onmessage handler attached, so a late
+    // response on the orphaned socket would still drive handleMessage
+    // and confuse the UI. The guard also dedupes a single click that
+    // happens to be on a button that auto-replays (voice command etc.).
+    if (bridgeConnectInFlight) return;
+    bridgeConnectInFlight = true;
     transportMode = 'bridge';
-    localStorage.setItem('puffco_transport_mode', transportMode);
+    try { localStorage.setItem('puffco_transport_mode', transportMode); }
+    catch { /* ignore quota / private mode */ }
     stopBrowserBlePolling();
     const input = document.getElementById('bridge-url');
     bridgeUrl = normalizeBridgeUrl(input?.value);
-    localStorage.setItem('puffco_bridge_url', bridgeUrl);
+    try { localStorage.setItem('puffco_bridge_url', bridgeUrl); }
+    catch { /* ignore quota / private mode */ }
     renderBridgeUI();
     setBridgeNote(`Connecting bridge: ${bridgeUrl}`, 'offline');
     if (reconnectTimer) {
@@ -757,7 +814,10 @@ const app = (() => {
       suppressSocketReconnect = true;
       ws.close();
     }
-    setTimeout(() => initWebSocket(bridgeUrl), 50);
+    setTimeout(() => {
+      bridgeConnectInFlight = false;
+      initWebSocket(bridgeUrl);
+    }, 50);
   }
 
   async function sendBrowserBle(cmd, params = {}, options = {}) {
@@ -839,6 +899,20 @@ const app = (() => {
           connected = false;
           stopBrowserBlePolling();
           browserBleDisconnectHandled = true;
+          // Same in-flight state cleanup as the bridge-disconnect
+          // branch: a device-side drop mid-save leaves the modal
+          // stuck on the "Saving…" state until the user manually
+          // closes it. Reset the in-flight flags and surface the
+          // error in the readback panel if one is open.
+          if (profileSaveInFlight != null) {
+            const inflightIndex = profileSaveInFlight;
+            profileSaveInFlight = null;
+            if (pendingAutoCloseIndex === inflightIndex) pendingAutoCloseIndex = null;
+            setSaveButtonsPending(false);
+            markProfileReadbackError('Device disconnected — save not confirmed');
+          }
+          pendingProfileReload = null;
+          optimisticProfileIndex = null;
           lastDeviceSnapshot = normalizeDisconnectedPayload(msg.data, msg.message);
           deviceState = null;
           updateConnectionUI(false);
@@ -1329,13 +1403,18 @@ const app = (() => {
     const macMode = usingMacAddress();
     const current = input?.value.trim() || '';
     if (macMode) {
-      if (current && !isMacAddressString(current)) localStorage.setItem('puffco_device_name', current);
+      if (current && !isMacAddressString(current)) {
+        try { localStorage.setItem('puffco_device_name', current); } catch { /* ignore */ }
+      }
       if (input) input.value = localStorage.getItem('puffco_device_mac') || '';
     } else {
-      if (isMacAddressString(current)) localStorage.setItem('puffco_device_mac', current);
+      if (isMacAddressString(current)) {
+        try { localStorage.setItem('puffco_device_mac', current); } catch { /* ignore */ }
+      }
       if (input) input.value = localStorage.getItem('puffco_device_name') || 'Puffco';
     }
-    localStorage.setItem('puffco_use_mac_address', macMode ? '1' : '0');
+    try { localStorage.setItem('puffco_use_mac_address', macMode ? '1' : '0'); }
+    catch { /* ignore */ }
     syncIdentityModeUI();
   }
 
@@ -2653,7 +2732,12 @@ const app = (() => {
   }
 
   function writeJsonStorage(key, value) {
-    localStorage.setItem(key, JSON.stringify(value));
+    // QuotaExceededError (and Safari private-mode throws) can fire on
+    // setItem. Silently drop the write — the next page load will simply
+    // see the previous value, which is a sane fallback for settings.
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (_) { /* ignore quota / private mode */ }
   }
 
   function profileVaporDeviceKey() {
@@ -2907,11 +2991,13 @@ const app = (() => {
   }
 
   function archiveLocalProfile(id) {
+    if (!confirm('Archive this profile? It will be hidden from the library.')) return;
     const library = readProfileLibrary().profiles.map((profile) => (
       profile.id === id ? { ...profile, archived: true, archived_at: new Date().toISOString() } : profile
     ));
     writeProfileLibrary(library);
     renderProfileLibrary();
+    toast('Profile archived', 'info');
   }
 
   function addNewProfile() {
@@ -3137,11 +3223,12 @@ const app = (() => {
   }
 
   function restoreDefaultProfiles() {
+    if (!confirm('Reset profile order to device defaults?')) return;
     try {
       localStorage.removeItem(PROFILE_ORDER_KEY);
     } catch {}
     if (deviceState?.profiles) updateProfilesUI(deviceState.profiles, deviceState.current_profile);
-    toast('Local profile order reset', 'success');
+    toast('Profile order reset', 'success');
   }
 
   // ---- Color Controls ----
@@ -3495,6 +3582,9 @@ const app = (() => {
   }
 
   function deleteMoodPreset() {
+    if (deleteMoodPreset._inFlight) return;
+    deleteMoodPreset._inFlight = true;
+    setTimeout(() => { deleteMoodPreset._inFlight = false; }, 500);
     const active = activeMoodPreset();
     if (!active.local) {
       toast('Built-in moods cannot be deleted', 'warn');
@@ -3508,17 +3598,22 @@ const app = (() => {
   }
 
   function exportMoods() {
-    const moods = readMoodLibrary();
-    const payload = { version: 1, exported_at: new Date().toISOString(), moods };
-    const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `puffco-moods-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    try {
+      const moods = readMoodLibrary();
+      const payload = { version: 1, exported_at: new Date().toISOString(), moods };
+      const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `puffco-moods-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast('Moods exported', 'success');
+    } catch (err) {
+      toast('Mood export failed', 'error');
+    }
   }
 
   function openMoodImport() {
@@ -3551,6 +3646,7 @@ const app = (() => {
   }
 
   function restoreDefaultMoods() {
+    if (!confirm('Clear all local mood presets and restore defaults?')) return;
     writeMoodLibrary([]);
     moodEditor.preset = 'no_animation';
     setMoodPreset('no_animation');
@@ -3899,6 +3995,16 @@ const app = (() => {
       saveLocalProfileFromModal();
       return;
     }
+    // Block a double-click that lands between the first save setting
+    // profileSaveInFlight and the setSaveButtonsPending call further
+    // down. Without this guard, two set_profile commands go out for
+    // the same profile, the device ends up doing the same write twice,
+    // and the modal still works — but the device flash wear is doubled
+    // and the activity log gets two "Updated profile N" entries.
+    if (profileSaveInFlight != null) {
+      toast('Profile save already in progress', 'info');
+      return;
+    }
     const index = parseInt(document.getElementById('modal-index').value);
     const name = document.getElementById('modal-name').value.trim() || null;
     const tempStr = document.getElementById('modal-temp').value;
@@ -4007,16 +4113,20 @@ const app = (() => {
     try {
       localStorage.setItem(LOCAL_PROFILES_KEY, JSON.stringify(payload));
     } catch {}
-    const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `puffco-profiles-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    toast('Profiles exported', 'success');
+    try {
+      const blob = new Blob([safeJsonStringify(payload)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `puffco-profiles-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast('Profiles exported', 'success');
+    } catch (err) {
+      toast('Profile export failed', 'error');
+    }
   }
 
   function openProfileImport() {
@@ -4174,8 +4284,11 @@ const app = (() => {
     const identity = currentDeviceIdentity();
 
     // Save to localStorage
-    if (identity.mac) localStorage.setItem('puffco_device_mac', identity.mac);
-    else localStorage.setItem('puffco_device_name', identity.device);
+    if (identity.mac) {
+      try { localStorage.setItem('puffco_device_mac', identity.mac); } catch { /* ignore */ }
+    } else {
+      try { localStorage.setItem('puffco_device_name', identity.device); } catch { /* ignore */ }
+    }
 
     const btn = document.getElementById('btn-connect');
     connectPending = true;
@@ -4205,6 +4318,10 @@ const app = (() => {
   }
 
   function resyncDevice() {
+    if (connectPending) {
+      toast('Connection already in progress', 'info');
+      return;
+    }
     const identity = currentDeviceIdentity();
     appendLog('Requesting backend BLE resync', 'info');
     send('connect', { device: identity.device, mac: identity.mac });
@@ -4294,9 +4411,9 @@ const app = (() => {
         const macToggle = document.getElementById('use-mac-address');
         if (macToggle) macToggle.checked = Boolean(address);
         syncIdentityModeUI();
-        localStorage.setItem('puffco_device_name', name);
-        localStorage.setItem('puffco_device_mac', address);
-        localStorage.setItem('puffco_use_mac_address', address ? '1' : '0');
+        try { localStorage.setItem('puffco_device_name', name); } catch { /* ignore */ }
+        try { localStorage.setItem('puffco_device_mac', address); } catch { /* ignore */ }
+        try { localStorage.setItem('puffco_use_mac_address', address ? '1' : '0'); } catch { /* ignore */ }
         appendLog(`Selected ${name} (${address})`, 'success');
         results.classList.remove('active');
         results.innerHTML = '';
@@ -4478,21 +4595,161 @@ const app = (() => {
 
   // ---- Toast System ----
 
-  function toast(message, type = 'info') {
+  // SVG icon set keyed by toast type
+  const TOAST_ICON = {
+    success: `<svg class="toast-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8.5l2 2 3-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    error: `<svg class="toast-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+    warn: `<svg class="toast-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 2.5L14.5 13.5H1.5L8 2.5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.5" r="0.75" fill="currentColor"/></svg>`,
+    info: `<svg class="toast-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M8 7.5v4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="5.5" r="0.75" fill="currentColor"/></svg>`,
+  };
+
+  const TOAST_DISMISS_ICON = `<svg class="toast-dismiss-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+
+  const TOAST_AUTO_DISMISS_MS = {
+    info: 4000,
+    warn: 6000,
+    success: 4000,
+    error: 0, // never auto-dismiss
+  };
+
+  const TOAST_MAX_STACK = 5;
+
+  /**
+   * Unified toast API — backward-compatible with toast(message, type).
+   *
+   * Usage:
+   *   toast('Saved', 'success');                           // existing API
+   *   toast('Processing…', { type: 'info' });               // options object
+   *   toast('Uploading…', { type: 'info', progress: 0 });   // progress toast
+   *   toast('Deleted', { type: 'success', undoLabel: 'Undo', onUndo: fn });
+   *
+   * Returns { updateProgress(pct), dismiss() } for progress toasts,
+   * { dismiss() } for all others, or null for no-op calls.
+   */
+  function toast(message, typeOrOptions) {
+    // Normalise arguments
+    let type = 'info';
+    let options = {};
+    if (typeof typeOrOptions === 'string') {
+      type = typeOrOptions;
+    } else if (typeOrOptions && typeof typeOrOptions === 'object') {
+      options = typeOrOptions;
+      type = options.type || 'info';
+    }
+
+    // progress: 0-100 (special type — rendered as progress toast, type maps colour)
+    // actions: [{ label, onClick }]
+    // undoLabel + onUndo: shorthand for one undo action
+    // duration: override auto-dismiss ms (0 = manual only)
+    const {
+      progress = null,
+      actions = [],
+      undoLabel = '',
+      onUndo = null,
+      duration = TOAST_AUTO_DISMISS_MS[type] ?? 4000,
+    } = options;
+
+    // Build actions list (undo shorthand)
+    const actionList = [...actions];
+    if (undoLabel && typeof onUndo === 'function') {
+      actionList.unshift({ label: undoLabel, onClick: onUndo });
+    }
+
     const container = document.getElementById('toast-container');
-    const duplicate = [...container.children].find((child) => child.textContent === message);
+    if (!container) return null;
+
+    // De-duplicate by exact message text
+    const duplicate = [...container.children].find((child) => {
+      const txt = child.querySelector('.toast-message');
+      return txt && txt.textContent === message;
+    });
     if (duplicate) {
       duplicate.remove();
     }
+
+    // Enforce max stack
+    while (container.children.length >= TOAST_MAX_STACK) {
+      const oldest = container.children[0];
+      oldest.remove();
+    }
+
     const el = document.createElement('div');
     el.className = `toast ${type}`;
-    el.textContent = message;
+    el.setAttribute('role', 'alert');
+    el.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
+
+    // Icon
+    const iconHtml = TOAST_ICON[type] || TOAST_ICON.info;
+
+    // Progress bar
+    const progressHtml =
+      progress !== null
+        ? `<div class="toast-progress-bar"><div class="toast-progress-fill" style="width:${Math.max(0, Math.min(100, progress))}%"></div></div>`
+        : '';
+
+    // Actions
+    const actionsHtml = actionList.length
+      ? `<div class="toast-actions">${actionList
+          .map((a) => `<button class="toast-action-btn" data-label="${escAttr(a.label)}">${escHtml(a.label)}</button>`)
+          .join('')}</div>`
+      : '';
+
+    // Dismiss button
+    const dismissBtn = `<button class="toast-dismiss" aria-label="Dismiss">${TOAST_DISMISS_ICON}</button>`;
+
+    el.innerHTML = `
+      <span class="toast-icon-wrap">${iconHtml}</span>
+      <span class="toast-message">${escHtml(message)}</span>
+      ${progressHtml}
+      ${actionsHtml}
+      ${dismissBtn}
+    `;
+
     container.appendChild(el);
 
-    setTimeout(() => {
-      el.classList.add('exit');
-      setTimeout(() => el.remove(), 300);
-    }, 3500);
+    // Wire action buttons
+    actionList.forEach((action, i) => {
+      const btn = el.querySelectorAll('.toast-action-btn')[i];
+      if (btn) {
+        btn.addEventListener('click', () => {
+          action.onClick();
+          dismissToast(el);
+        });
+      }
+    });
+
+    // Wire dismiss button
+    const dismissEl = el.querySelector('.toast-dismiss');
+    if (dismissEl) dismissEl.addEventListener('click', () => dismissToast(el));
+
+    // Progress update helper
+    const updateProgress = progress !== null
+      ? (pct) => {
+          const fill = el.querySelector('.toast-progress-fill');
+          if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+        }
+      : null;
+
+    // Auto-dismiss timer
+    let timer = null;
+    if (duration > 0) {
+      timer = setTimeout(() => dismissToast(el), duration);
+    }
+
+    function dismissToast(element) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      element.classList.add('exit');
+      setTimeout(() => element.remove(), 300);
+    }
+
+    // Expose dismiss on the element so callers can call el.toastDismiss()
+    el.toastDismiss = dismissToast;
+    if (updateProgress) el.toastUpdateProgress = updateProgress;
+
+    return { updateProgress, dismiss: dismissToast };
   }
 
   // ---- Activity Log ----
@@ -5170,7 +5427,15 @@ const app = (() => {
     const profiles = Array.isArray(data?.profiles) ? data.profiles : [];
     if (!profiles.length) return null;
     const selected = data?.current_profile;
-    const selectedIndex = profiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(selected));
+    // null/undefined current_profile is "no profile selected" — fall
+    // through to the .active marker instead of accidentally matching
+    // profile 0 via Number(null) === 0. Without this guard, a brief
+    // window where the device snapshot has no current_profile (right
+    // after reconnect, for example) would silently mark profile 0 as
+    // "selected" in the UI.
+    const selectedIndex = selected == null
+      ? -1
+      : profiles.findIndex((profile, fallbackIndex) => Number(profile.index ?? fallbackIndex) === Number(selected));
     if (selectedIndex >= 0) return profileWithVapor(profiles[selectedIndex], selectedIndex);
     const activeIndex = profiles.findIndex((profile) => profile?.active);
     return activeIndex >= 0 ? profileWithVapor(profiles[activeIndex], activeIndex) : null;
@@ -5347,7 +5612,15 @@ const app = (() => {
     appendLog(`Probing ${label} on device:`, 'info');
     let outstanding = paths.length;
     const rows = paths.map((entry) => ({ ...entry, result: null }));
+    // Guard finish() so the 4s timer and a late-arriving response can
+    // never both call it. The previous code double-fired the "probe
+    // complete" log + UI state toggle when a response arrived in the
+    // same tick the timer was about to fire.
+    let finished = false;
     const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(timer);
       const summary = rows.map((r) => `${r.path} = ${r.result == null ? 'timeout' : formatLoraxReadValue(r.result)}`).join('\n');
       setLoraxQuickActionsStatus(`${rows.length} tested`, 'done');
       appendLog(`${label} probe complete:\n${summary}`, rows.every((r) => r.result && !r.result.error) ? 'success' : 'warn');
@@ -5357,25 +5630,21 @@ const app = (() => {
       outstanding = 0;
       finish();
     }, 4000);
+    const tryFinish = () => {
+      outstanding -= 1;
+      if (outstanding <= 0) finish();
+    };
     paths.forEach((entry, idx) => {
       const queued = send('lorax_read', { path: entry.path, size: 4, type: entry.encoding });
       if (!queued) {
         rows[idx].result = { error: 'send failed (no transport)' };
-        outstanding -= 1;
-        if (outstanding <= 0) {
-          window.clearTimeout(timer);
-          finish();
-        }
+        tryFinish();
         return;
       }
       const onResponse = (data) => {
         if (!data || data.path !== entry.path) return false;
         rows[idx].result = data;
-        outstanding -= 1;
-        if (outstanding <= 0) {
-          window.clearTimeout(timer);
-          finish();
-        }
+        tryFinish();
         return true;
       };
       pendingLoraxTestResponses.push(onResponse);
@@ -6553,6 +6822,7 @@ const app = (() => {
     const value = input?.value?.trim();
     if (!value) {
       updateVoiceUI('Enter a command');
+      toast('Enter a voice command to test', 'info');
       return false;
     }
     return handleVoiceCommand(value);
@@ -6646,10 +6916,24 @@ const app = (() => {
     voicePermissionGranted = true;
     updateVoiceUI('Starting speech');
     runVoiceMeter();
+    // Guard against double-start. A fast double-click (or a quick
+    // user-toggle that overlaps with the auto-restart setTimeout) can
+    // call startVoiceCommands() while a previous start is still in
+    // flight or while the engine is already running. speechRecognition.
+    // start() throws an InvalidStateError in both cases, and the old
+    // catch handler would tear down the entire session — clobbering
+    // voiceIntentRunning and forcing the user to re-arm voice. A
+    // no-op-start should be a no-op, not a session kill.
+    if (voiceListening) return;
     try {
       voiceRecognition.start();
       toast('Voice commands listening', 'success');
     } catch (err) {
+      const benignState = /already.started|aborted|InvalidState/i.test(err?.message || String(err));
+      if (benignState) {
+        updateVoiceUI('Listening');
+        return;
+      }
       voiceListening = false;
       voiceIntentRunning = false;
       updateVoiceUI('Speech start failed');
@@ -6723,7 +7007,285 @@ const app = (() => {
 
   // ---- Theme System (Mac-style light / dark / auto) ----
 
-  const THEME_STORAGE_KEY = 'puffco_theme';
+  // Theme key uses the `puffco:*` colon style to match the inline
+  // pre-paint script in <head> (index.html line 36). A legacy
+  // underscore variant `puffco_theme` was used in earlier builds;
+  // readSavedTheme() migrates it once and removes the old key.
+  // ---- Full Settings Panel ----
+  // Centralised settings store. Persisted to localStorage under puffco:settings.
+  // Reads from legacy keys on first boot so existing preferences survive.
+  // Exposed as window.app.settings (get / set / getAll / reset).
+  const SETTINGS_STORAGE_KEY = 'puffco:settings';
+  const SETTINGS_DEFAULTS = {
+    // Connection
+    deviceName: 'Puffco',
+    useMacAddress: false,
+    transportMode: null,      // null = use browser-ble default (set at runtime)
+    bridgeUrl: '',
+    // Display
+    theme: 'auto',
+    accent: 'teal',
+    fontSize: 'medium',        // 'small' | 'medium' | 'large'
+    density: 'comfortable',   // 'compact' | 'comfortable' | 'spacious'
+    // Behavior
+    autoReconnect: true,
+    confirmDialogs: true,
+    soundEnabled: true,
+    voiceEnabled: false,
+    // Voice (separate from the puffco:voice-* keys)
+    voicePrefix: '',
+  };
+
+  function getAppSetting(key) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || 'null');
+      const merged = saved && typeof saved === 'object' ? { ...SETTINGS_DEFAULTS, ...saved } : { ...SETTINGS_DEFAULTS };
+      return merged[key];
+    } catch {
+      return SETTINGS_DEFAULTS[key];
+    }
+  }
+
+  function setAppSetting(key, value) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || 'null');
+      const current = (saved && typeof saved === 'object') ? saved : {};
+      current[key] = value;
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(current));
+    } catch { /* ignore */ }
+  }
+
+  function getAllSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || 'null');
+      const merged = saved && typeof saved === 'object' ? { ...SETTINGS_DEFAULTS, ...saved } : { ...SETTINGS_DEFAULTS };
+      // runtime defaults not stored in the JSON
+      if (merged.transportMode === null) {
+        merged.transportMode = browserBleSupported() ? 'browser_ble' : 'bridge';
+      }
+      return merged;
+    } catch {
+      return { ...SETTINGS_DEFAULTS, transportMode: browserBleSupported() ? 'browser_ble' : 'bridge' };
+    }
+  }
+
+  function resetAllSettings() {
+    try { localStorage.removeItem(SETTINGS_STORAGE_KEY); } catch { /* ignore */ }
+    // also wipe legacy keys
+    localStorage.removeItem('puffco:voice-prefix');
+    localStorage.removeItem('puffco:voice-intent');
+    localStorage.removeItem('puffco:advanced-user');
+    // re-apply defaults
+    applyTheme('auto');
+    applyAccent('teal');
+    applyFontSize('medium');
+    applyDensity('comfortable');
+    document.getElementById('advanced-user-toggle')?.removeAttribute('checked');
+    setAdvancedUser(false);
+    renderSettingsPanel();
+    toast('Settings reset to defaults', 'success');
+  }
+
+  function applyFontSize(size) {
+    document.documentElement.style.setProperty('--font-size-scale', {
+      small: '0.875', medium: '1', large: '1.125',
+    }[size] || '1');
+    setAppSetting('fontSize', size);
+  }
+
+  function applyDensity(density) {
+    const gap = { compact: '8px', comfortable: '12px', spacious: '20px' }[density] || '12px';
+    document.documentElement.style.setProperty('--card-gap', gap);
+    setAppSetting('density', density);
+  }
+
+  function openSettingsPanel() {
+    const panel = document.getElementById('settings-panel');
+    const backdrop = document.getElementById('settings-backdrop');
+    if (!panel) return;
+    panel.removeAttribute('inert');
+    panel.setAttribute('aria-hidden', 'false');
+    panel.classList.add('settings-panel-open');
+    if (backdrop) {
+      backdrop.classList.add('settings-backdrop-visible');
+      backdrop.removeAttribute('inert');
+    }
+    document.body.style.overflow = 'hidden';
+    renderSettingsPanel();
+    // focus first interactive element
+    panel.querySelector('button, [href], input, select')?.focus();
+  }
+
+  function closeSettingsPanel() {
+    const panel = document.getElementById('settings-panel');
+    const backdrop = document.getElementById('settings-backdrop');
+    if (!panel) return;
+    panel.setAttribute('inert', '');
+    panel.setAttribute('aria-hidden', 'true');
+    panel.classList.remove('settings-panel-open');
+    if (backdrop) {
+      backdrop.classList.remove('settings-backdrop-visible');
+      backdrop.setAttribute('inert', '');
+    }
+    document.body.style.overflow = '';
+    document.getElementById('btn-settings')?.focus();
+  }
+
+  function renderSettingsPanel() {
+    const all = getAllSettings();
+    // Connection
+    setRadioGroup('settings-transport', all.transportMode || (browserBleSupported() ? 'browser_ble' : 'bridge'));
+    document.getElementById('settings-device-name').value = all.deviceName;
+    document.getElementById('settings-use-mac').checked = Boolean(all.useMacAddress);
+    document.getElementById('settings-bridge-url').value = all.bridgeUrl;
+
+    // Display
+    setRadioGroup('settings-theme', all.theme);
+    setRadioGroup('settings-accent', all.accent);
+    setRadioGroup('settings-font-size', all.fontSize);
+    setRadioGroup('settings-density', all.density);
+    document.getElementById('advanced-user-toggle').checked = isAdvancedUser();
+
+    // Behavior
+    document.getElementById('settings-auto-reconnect').checked = Boolean(all.autoReconnect);
+    document.getElementById('settings-confirm-dialogs').checked = Boolean(all.confirmDialogs);
+    document.getElementById('settings-sound').checked = Boolean(all.soundEnabled);
+    document.getElementById('settings-voice-enabled').checked = Boolean(all.voiceEnabled);
+    document.getElementById('settings-voice-prefix').value = all.voicePrefix || '';
+
+    // update accent swatch ring on each swatch
+    document.querySelectorAll('.settings-accent-swatch').forEach((btn) => {
+      btn.setAttribute('aria-checked', btn.dataset.accent === all.accent ? 'true' : 'false');
+    });
+  }
+
+  function setRadioGroup(name, value) {
+    document.querySelectorAll(`[name="${name}"]`).forEach((input) => {
+      const isChecked = input.value === value || (input.dataset?.value === value);
+      input.checked = isChecked;
+      if (input.classList.contains('theme-option')) {
+        input.setAttribute('aria-checked', isChecked ? 'true' : 'false');
+      }
+    });
+  }
+
+  function handleSettingsChange(key, value) {
+    setAppSetting(key, value);
+    switch (key) {
+      case 'theme':
+        applyTheme(value);
+        break;
+      case 'accent':
+        applyAccent(value);
+        break;
+      case 'fontSize':
+        applyFontSize(value);
+        break;
+      case 'density':
+        applyDensity(value);
+        break;
+      case 'deviceName':
+        break;
+      case 'transportMode':
+        setTransportMode(value);
+        break;
+      case 'bridgeUrl':
+        bridgeUrl = normalizeBridgeUrl(value);
+        try { localStorage.setItem('puffco_bridge_url', bridgeUrl); } catch { /* ignore */ }
+        renderBridgeUI();
+        break;
+      case 'useMacAddress':
+        break;
+      case 'autoReconnect':
+      case 'confirmDialogs':
+      case 'soundEnabled':
+        break;
+      case 'voiceEnabled':
+        break;
+      case 'voicePrefix':
+        voicePrefix = String(value || '').trim();
+        try { localStorage.setItem(VOICE_PREFIX_KEY, voicePrefix); } catch { /* ignore */ }
+        break;
+    }
+    renderSettingsPanel();
+  }
+
+  function exportSettingsJson() {
+    const all = getAllSettings();
+    const blob = new Blob([JSON.stringify(all, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `puffco-settings-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast('Settings exported', 'success');
+  }
+
+  function importSettingsJson() {
+    const input = document.getElementById('settings-import-file');
+    if (!input) return;
+    input.click();
+  }
+
+  function processSettingsImport(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if (!parsed || typeof parsed !== 'object') throw new Error('Invalid format');
+        // Validate known keys
+        const validKeys = Object.keys(SETTINGS_DEFAULTS);
+        const merged = {};
+        validKeys.forEach((key) => {
+          if (parsed[key] !== undefined) merged[key] = parsed[key];
+        });
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(merged));
+        // Apply
+        applyTheme(merged.theme || 'auto');
+        applyAccent(merged.accent || 'teal');
+        applyFontSize(merged.fontSize || 'medium');
+        applyDensity(merged.density || 'comfortable');
+        renderSettingsPanel();
+        toast('Settings imported — applied', 'success');
+      } catch {
+        toast('Import failed: invalid JSON', 'error');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function requireConfirm(message, action) {
+    if (!getAppSetting('confirmDialogs')) {
+      action();
+      return;
+    }
+    if (confirm(message)) action();
+  }
+
+  // Expose settings API
+  const settingsApi = {
+    get: (key) => {
+      const defaults = SETTINGS_DEFAULTS;
+      const runtime = { transportMode: browserBleSupported() ? 'browser_ble' : 'bridge' };
+      const map = { ...defaults, ...runtime, ...getAllSettings() };
+      return map[key];
+    },
+    set: (key, value) => {
+      handleSettingsChange(key, value);
+    },
+    getAll: () => getAllSettings(),
+    reset: () => {
+      requireConfirm('Reset all settings to defaults?', resetAllSettings);
+    },
+  };
+
+  // ---- Theme System ----
+  const THEME_STORAGE_KEY = 'puffco:theme';
+  const THEME_STORAGE_KEY_LEGACY = 'puffco_theme';
   const ACCENT_STORAGE_KEY = 'puffco_accent';
   const ACCENT_SWATCHES = {
     teal:   { base: '#00d6b4', light: '#0d9488' },
@@ -6742,8 +7304,19 @@ const app = (() => {
 
   function readSavedTheme() {
     try {
+      // New key first.
       const stored = localStorage.getItem(THEME_STORAGE_KEY);
-      return THEME_OPTIONS.includes(stored) ? stored : 'auto';
+      if (THEME_OPTIONS.includes(stored)) return stored;
+      // One-time migration from the old underscore key.
+      const legacy = localStorage.getItem(THEME_STORAGE_KEY_LEGACY);
+      if (THEME_OPTIONS.includes(legacy)) {
+        try {
+          localStorage.setItem(THEME_STORAGE_KEY, legacy);
+          localStorage.removeItem(THEME_STORAGE_KEY_LEGACY);
+        } catch { /* ignore quota / private mode */ }
+        return legacy;
+      }
+      return 'auto';
     } catch {
       return 'auto';
     }
@@ -6826,13 +7399,12 @@ const app = (() => {
   }
 
   function toggleSettings(forceState) {
-    const popover = document.getElementById('theme-popover');
-    const button = document.getElementById('btn-settings');
-    if (!popover || !button) return;
-    const isOpen = popover.getAttribute('aria-hidden') === 'false';
+    const panel = document.getElementById('settings-panel');
+    if (!panel) return; // no full panel on this page
+    const isOpen = panel.getAttribute('aria-hidden') === 'false';
     const next = typeof forceState === 'boolean' ? forceState : !isOpen;
-    popover.setAttribute('aria-hidden', next ? 'false' : 'true');
-    button.setAttribute('aria-expanded', next ? 'true' : 'false');
+    if (next) openSettingsPanel();
+    else closeSettingsPanel();
   }
 
   function initThemeSystem() {
@@ -6840,40 +7412,59 @@ const app = (() => {
     document.documentElement.setAttribute('data-theme', theme);
     applyAccent(readSavedAccent());
     setAdvancedUser(isAdvancedUser());
+    // Apply full settings panel defaults
+    const fontSize = getAppSetting('fontSize') || 'medium';
+    const density = getAppSetting('density') || 'comfortable';
+    applyFontSize(fontSize);
+    applyDensity(density);
     syncThemeUI();
 
-    document.querySelectorAll('[data-theme-option]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        applyTheme(btn.getAttribute('data-theme-option'));
-        btn.focus();
-      });
-    });
-    document.querySelectorAll('[data-accent]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        applyAccent(btn.getAttribute('data-accent'));
-        btn.focus();
-      });
-    });
-
+    // Close settings panel on click-outside (only if panel exists)
     document.addEventListener('click', (event) => {
-      const popover = document.getElementById('theme-popover');
+      const panel = document.getElementById('settings-panel');
       const button = document.getElementById('btn-settings');
-      if (!popover || !button) return;
-      if (popover.getAttribute('aria-hidden') === 'false'
-          && !popover.contains(event.target)
+      if (!panel || !button) return;
+      if (panel.getAttribute('aria-hidden') === 'false'
+          && !panel.contains(event.target)
           && !button.contains(event.target)) {
-        toggleSettings(false);
+        closeSettingsPanel();
       }
     });
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
-        const popover = document.getElementById('theme-popover');
-        if (popover && popover.getAttribute('aria-hidden') === 'false') {
-          toggleSettings(false);
-          document.getElementById('btn-settings')?.focus();
+        const panel = document.getElementById('settings-panel');
+        if (panel && panel.getAttribute('aria-hidden') === 'false') {
+          closeSettingsPanel();
         }
       }
     });
+    // Settings tab navigation
+    document.querySelectorAll('[data-settings-section]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const sectionId = btn.dataset.settingsSection;
+        document.querySelectorAll('[data-settings-section]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+          b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+        });
+        document.querySelectorAll('.settings-section').forEach((sec) => {
+          sec.classList.toggle('hidden', sec.id !== `settings-section-${sectionId}`);
+        });
+        // Sync theme/accent buttons with current settings
+        renderSettingsPanel();
+      });
+    });
+    // Wire import button → file input
+    const importBtn = document.getElementById('btn-import-settings');
+    const importInput = document.getElementById('settings-import-file');
+    if (importBtn && importInput) {
+      importBtn.addEventListener('click', () => importInput.click());
+      importInput.addEventListener('change', () => {
+        if (importInput.files && importInput.files.length) {
+          processSettingsImport(importInput.files[0]);
+          importInput.value = '';
+        }
+      });
+    }
     if (window.matchMedia) {
       const mql = window.matchMedia('(prefers-color-scheme: light)');
       const handler = () => {
@@ -7004,22 +7595,38 @@ const app = (() => {
     // container, do nothing.
     if (container.__sortableCardInstance) return;
     // Only the elements that carry data-card-id are draggable. The
-    // sort guide, header, nav, and other siblings stay put.
+    // sort guide, header, nav, and other siblings stay put. We use
+    // the explicit `.reorder-handle` selector so the user can only
+    // pick up a card by its handle — that's how the macOS app
+    // organizer behaves and it keeps text selection inside cards
+    // working in the default (non-customize) state.
     const instance = Sortable.create(container, {
-      animation: 160,
+      animation: 220,
       draggable: '[data-card-id]',
+      handle: '.reorder-handle',
       filter: '.sort-guide, .app-header, .app-menu, .app-footer, script, style',
       preventOnFilter: true,
       ghostClass: 'card-drag-ghost',
       chosenClass: 'card-drag-chosen',
       dragClass: 'card-drag-active',
-      forceFallback: false,
+      forceFallback: true,
+      fallbackOnBody: true,
+      fallbackTolerance: 4,
+      delay: 80,
+      delayOnTouchOnly: true,
+      touchStartThreshold: 6,
+      // Disabled until the user enters customize mode. The handle is
+      // hidden in the default state, so the disabled flag is mostly
+      // a belt-and-braces guard against programmatic reorders.
+      disabled: !customizeMode,
       onStart(evt) {
         container.classList.add('is-dragging');
+        document.body.classList.add('sortable-active');
         try { evt.item.setAttribute('data-dragging', 'true'); } catch (_) { /* ignore */ }
       },
       onEnd(evt) {
         container.classList.remove('is-dragging');
+        document.body.classList.remove('sortable-active');
         try { evt.item.removeAttribute('data-dragging'); } catch (_) { /* ignore */ }
         // Persist the new order and flash the moved card.
         persistCardOrderFromDom();
@@ -7062,6 +7669,9 @@ const app = (() => {
     // in place. Reload isn't needed; the source of truth is the DOM.
     // We restore the markup-defined default (captured at init time),
     // not the current (possibly-mutated) order.
+    if (resetCardOrder._inFlight) return;
+    resetCardOrder._inFlight = true;
+    setTimeout(() => { resetCardOrder._inFlight = false; }, 500);
     try { localStorage.removeItem(CARD_ORDER_KEY); } catch (_) { /* ignore */ }
     const container = getCardOrderContainer();
     if (!container) return;
@@ -7078,6 +7688,643 @@ const app = (() => {
       toast('Card layout reset to default', 'success');
     }
   }
+
+  // ---- Customize-layout mode ----
+  // The mode is the single entry point for reordering anything on the
+  // page: cards AND items within cards. Toggling it:
+  //   1. Adds the .is-customizing class to <body> (drives jiggle +
+  //      dim + handle visibility in CSS).
+  //   2. Injects .reorder-handle elements into every card and every
+  //      [data-card-item-list] child, so Sortable has something to
+  //      attach to.
+  //   3. Flips the disabled flag on all registered Sortable instances.
+  //   4. Shows/hides the floating "Done" toolbar.
+  // Exiting the mode hides the handles and disables Sortable again,
+  // restoring the calm default look. Persistence happens on every
+  // onEnd of a Sortable, so reloading the page restores both card
+  // and item orders.
+
+  function readCustomizeMode() {
+    try { return localStorage.getItem(CUSTOMIZE_MODE_KEY) === '1'; }
+    catch (_) { return false; }
+  }
+  function writeCustomizeMode(on) {
+    try {
+      if (on) localStorage.setItem(CUSTOMIZE_MODE_KEY, '1');
+      else localStorage.removeItem(CUSTOMIZE_MODE_KEY);
+    } catch (_) { /* ignore */ }
+  }
+
+  function setCustomizeMode(on, { persist = true } = {}) {
+    customizeMode = Boolean(on);
+    document.body.classList.toggle('is-customizing', customizeMode);
+    const bar = document.getElementById('customize-bar');
+    if (bar) {
+      if (customizeMode) bar.removeAttribute('hidden');
+      else bar.setAttribute('hidden', '');
+    }
+    const btn = document.getElementById('btn-customize-layout');
+    if (btn) btn.setAttribute('aria-pressed', customizeMode ? 'true' : 'false');
+    if (customizeMode) {
+      injectReorderHandles();
+      applyDraggableToStatusItems(true);
+    } else {
+      removeReorderHandles();
+      applyDraggableToStatusItems(false);
+    }
+    syncAllSortableDisabled();
+    if (persist) writeCustomizeMode(customizeMode);
+    if (customizeMode && typeof toast === 'function') {
+      toast('Customize mode on — drag the handles to rearrange', 'info');
+    }
+  }
+
+  function toggleCustomizeMode() {
+    setCustomizeMode(!customizeMode);
+  }
+
+  // Builds a single drag-handle DOM node. The same shape is used for
+  // cards and items so the CSS just needs one selector.
+  function buildReorderHandle() {
+    const handle = document.createElement('button');
+    handle.type = 'button';
+    handle.className = 'reorder-handle';
+    handle.setAttribute('aria-label', 'Drag to reorder');
+    handle.setAttribute('tabindex', '-1');
+    handle.innerHTML = `
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="9" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/>
+        <circle cx="15" cy="6" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="15" cy="18" r="1.3"/>
+      </svg>
+    `;
+    return handle;
+  }
+
+  function injectReorderHandles() {
+    document.querySelectorAll('.app-container [data-card-id]').forEach((el) => {
+      if (el.querySelector(':scope > .reorder-handle')) return;
+      el.appendChild(buildReorderHandle());
+    });
+    document.querySelectorAll('[data-card-item-list] > [data-item-id]').forEach((el) => {
+      if (el.querySelector(':scope > .reorder-handle')) return;
+      el.appendChild(buildReorderHandle());
+    });
+  }
+
+  function removeReorderHandles() {
+    document.querySelectorAll('.reorder-handle').forEach((el) => el.remove());
+  }
+
+  function syncAllSortableDisabled() {
+    const container = getCardOrderContainer();
+    if (container && container.__sortableCardInstance) {
+      container.__sortableCardInstance.option('disabled', !customizeMode);
+    }
+    document.querySelectorAll('[data-card-item-list]').forEach((list) => {
+      if (list.__sortableItemInstance) {
+        list.__sortableItemInstance.option('disabled', !customizeMode);
+      }
+    });
+  }
+
+  // ---- Item-list sortables (Brightness, Power, Voice, ...) ----
+  // Each container marked with data-card-item-list gets its own
+  // Sortable instance, persisted under ITEM_ORDER_KEY_PREFIX + list.
+  // The Sortable is created disabled and only enabled when the user
+  // enters customize mode, matching the card-level behavior.
+
+  function wireItemSortables() {
+    if (typeof Sortable === 'undefined') return;
+    document.querySelectorAll('[data-card-item-list]').forEach((list) => {
+      // Skip lorax-tabs: uses native HTML5 drag-and-drop instead.
+      if (list.id === 'lorax-tabs') return;
+      // Skip status-content: uses native HTML5 drag-and-drop instead.
+      if (list.id === 'status-content') return;
+      if (list.__sortableItemInstance) return;
+      const listId = list.getAttribute('data-card-item-list') || list.id || `list-${Math.random().toString(36).slice(2, 8)}`;
+      const instance = Sortable.create(list, {
+        animation: 180,
+        draggable: '[data-item-id]',
+        handle: '.reorder-handle',
+        filter: 'input, select, textarea, button:not(.reorder-handle)',
+        preventOnFilter: true,
+        ghostClass: 'sortable-ghost',
+        chosenClass: 'sortable-chosen',
+        dragClass: 'sortable-drag',
+        forceFallback: true,
+        fallbackOnBody: true,
+        fallbackTolerance: 4,
+        delay: 80,
+        delayOnTouchOnly: true,
+        touchStartThreshold: 6,
+        disabled: !customizeMode,
+        onStart() {
+          document.body.classList.add('sortable-active');
+        },
+        onEnd() {
+          document.body.classList.remove('sortable-active');
+          persistItemOrder(listId, list);
+          flashCardSnap(list);
+          if (typeof announceSortChange === 'function') {
+            const names = Array.from(list.children)
+              .filter((el) => el.getAttribute && el.getAttribute('data-item-id'))
+              .map((el, i) => `${i + 1}. ${el.getAttribute('data-item-id')}`);
+            announceSortChange(`${listId} updated. ${names.join(', ')}`);
+          }
+        },
+      });
+      list.__sortableItemInstance = instance;
+      list.__itemListId = listId;
+      // Apply the saved order to the DOM if any.
+      applyItemOrder(listId, list);
+    });
+  }
+
+  function itemOrderKey(listId) {
+    return `${ITEM_ORDER_KEY_PREFIX}${listId}`;
+  }
+
+  function readItemOrder(listId) {
+    try {
+      const raw = localStorage.getItem(itemOrderKey(listId));
+      if (!raw) return null;
+      const order = JSON.parse(raw);
+      if (!Array.isArray(order)) return null;
+      return order.filter((id) => typeof id === 'string' && id.length);
+    } catch (_) { return null; }
+  }
+
+  function writeItemOrder(listId, ids) {
+    try { localStorage.setItem(itemOrderKey(listId), JSON.stringify(ids)); }
+    catch (_) { /* ignore */ }
+  }
+
+  function applyItemOrder(listId, list) {
+    if (!list) return;
+    const order = readItemOrder(listId);
+    if (!order || !order.length) return;
+    const byId = {};
+    Array.from(list.children).forEach((el) => {
+      const id = el.getAttribute('data-item-id');
+      if (id) byId[id] = el;
+    });
+    order.forEach((id) => {
+      const node = byId[id];
+      if (node && node.parentNode === list) list.appendChild(node);
+    });
+  }
+
+  function persistItemOrder(listId, list) {
+    const ids = Array.from(list.children)
+      .map((el) => el.getAttribute('data-item-id'))
+      .filter(Boolean);
+    writeItemOrder(listId, ids);
+  }
+
+  function resetItemOrders() {
+    // The DOM is the source of truth at init time — we re-apply the
+    // original markup order by clearing the storage key and forcing
+    // a re-init of the lists. Easiest: reload the page so all the
+    // saved item orders are ignored and the markup order is back.
+    try {
+      const prefix = ITEM_ORDER_KEY_PREFIX;
+      for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(prefix)) localStorage.removeItem(key);
+      }
+    } catch (_) { /* ignore */ }
+    // Reload to restore markup order for the item lists.
+    window.location.reload();
+  }
+
+  function resetAllLayouts() {
+    // Wipes both card-order and every item-order, then reloads. This
+    // is the "factory reset" for layout — used by the floating
+    // toolbar's Reset button and the appearance popover's link.
+    if (!confirm('Reset all card and item layout to defaults? This will reload the page.')) {
+      return;
+    }
+    try { localStorage.removeItem(CARD_ORDER_KEY); } catch (_) { /* ignore */ }
+    try {
+      const prefix = ITEM_ORDER_KEY_PREFIX;
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith(prefix) || key === STATUS_ITEMS_VISIBILITY_KEY || key === STATUS_ITEMS_ORDER_KEY || key === LORAX_TABS_ORDER_KEY)) {
+          localStorage.removeItem(key);
+        }
+      }
+    } catch (_) { /* ignore */ }
+    if (typeof toast === 'function') toast('Layout reset — restoring defaults', 'info');
+    setTimeout(() => window.location.reload(), 350);
+  }
+
+  function initCustomizeMode() {
+    wireItemSortables();
+    initStatusItems();
+    wireStatusItemsHtml5Drag();
+    initLoraxTabs();
+    if (readCustomizeMode()) {
+      setCustomizeMode(true, { persist: false });
+    } else {
+      syncAllSortableDisabled();
+    }
+  }
+
+  // ---- Status panel info items (toggle + reorder) ----
+  // Each item in the status-card has a data-item-id attribute and lives
+  // inside #status-content (data-card-item-list="status-items"). Sortable
+  // handles drag-to-reorder via the existing wireItemSortables() path.
+  // Visibility is separate: each item can be hidden via the eye toggle,
+  // and that preference is persisted to localStorage.
+
+  const STATUS_ITEMS_VISIBILITY_KEY = 'puffco:status-items-visibility';
+  const STATUS_ITEMS_ORDER_KEY = 'puffco:status-items-order';
+  const LORAX_TABS_ORDER_KEY = 'puffco:lorax-tabs-order';
+
+  // Default order of status items (used when no saved order exists).
+  const STATUS_ITEMS_DEFAULT_ORDER = [
+    'device-stage', 'heat-control', 'battery', 'diagnostics', 'capabilities',
+  ];
+
+  // Load visibility state: { [itemId]: true|false }. Defaults to all visible.
+  function loadStatusItemsVisibility() {
+    try {
+      const raw = localStorage.getItem(STATUS_ITEMS_VISIBILITY_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (_) { /* ignore */ }
+    return {};
+  }
+
+  // Save visibility state to localStorage.
+  function saveStatusItemsVisibility(visibility) {
+    try {
+      localStorage.setItem(STATUS_ITEMS_VISIBILITY_KEY, JSON.stringify(visibility));
+    } catch (_) { /* ignore */ }
+  }
+
+  // Apply visibility state from localStorage to the DOM on load.
+  function applyStatusItemsVisibility() {
+    const visibility = loadStatusItemsVisibility();
+    const ids = Object.keys(visibility);
+    ids.forEach((id) => {
+      const el = document.querySelector(`[data-item-id="${id}"]`);
+      if (!el) return;
+      const isVisible = visibility[id] !== false;
+      el.classList.toggle('status-item-hidden', !isVisible);
+      // Mark content (non-header children) as hidden so the toggle
+      // button inside .status-item-header stays interactive.
+      Array.from(el.children).forEach((child) => {
+        if (!child.classList.contains('status-item-header')) {
+          child.setAttribute('aria-hidden', String(!isVisible));
+          if ('inert' in child) child.inert = !isVisible;
+        }
+      });
+      // Update the eye toggle button.
+      const btn = document.querySelector(`[data-toggle-btn="${id}"]`);
+      if (btn) {
+        btn.setAttribute('aria-pressed', String(isVisible));
+        const eyeIcon = btn.querySelector('.toggle-eye-icon');
+        if (eyeIcon) {
+          if (isVisible) {
+            eyeIcon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+          } else {
+            eyeIcon.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
+          }
+        }
+      }
+    });
+  }
+
+  // Toggle visibility of a single status item.
+  function toggleStatusItem(itemId) {
+    const el = document.querySelector(`[data-item-id="${itemId}"]`);
+    if (!el) return;
+    const visibility = loadStatusItemsVisibility();
+    // Default to visible if not yet stored.
+    const currentlyVisible = visibility[itemId] !== false;
+    const newVisible = !currentlyVisible;
+    visibility[itemId] = newVisible;
+    saveStatusItemsVisibility(visibility);
+    applyStatusItemsVisibility();
+    // Update the popover checkboxes if the popover is open.
+    updateStatusItemsPopover();
+  }
+
+  // Show or hide the status items popover in the theme popover.
+  function toggleStatusItemsPanel() {
+    const panel = document.getElementById('status-items-popover');
+    if (!panel) return;
+    const isHidden = panel.getAttribute('aria-hidden') === 'true';
+    if (isHidden) {
+      panel.removeAttribute('aria-hidden');
+      updateStatusItemsPopover();
+    } else {
+      panel.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  // Build the popover body with toggle checkboxes for each status item.
+  function updateStatusItemsPopover() {
+    const body = document.getElementById('status-items-popover-body');
+    if (!body) return;
+    const visibility = loadStatusItemsVisibility();
+    const items = document.querySelectorAll('[data-item-id][data-status-item]');
+    if (!items.length) return;
+    body.innerHTML = Array.from(items).map((el) => {
+      const id = el.getAttribute('data-item-id');
+      const label = el.getAttribute('data-status-label') || id;
+      const isVisible = visibility[id] !== false;
+      return `
+        <label class="status-item-popover-row">
+          <input type="checkbox" ${isVisible ? 'checked' : ''}
+                 onchange="app.toggleStatusItem('${escAttr(id)}')"
+                 aria-label="Show ${escAttr(label)}" />
+          <span>${escHtml(label)}</span>
+          <span class="status-item-popover-hint" aria-hidden="true">drag to reorder</span>
+        </label>
+      `;
+    }).join('');
+  }
+
+  // Called on DOMContentLoaded to apply saved visibility and order.
+  function initStatusItems() {
+    applyStatusItemsVisibility();
+    applyStatusItemsOrder();
+  }
+
+  // ---- Status items: native HTML5 drag-and-drop ----
+  // Mirrors the wireLoraxTabsDrag pattern. Each .status-item gets
+  // draggable="true" in customize mode and is reordered via native
+  // drag events. No Sortable dependency here.
+
+  let _draggingStatusItemId = null;
+
+  function wireStatusItemsHtml5Drag() {
+    const container = document.getElementById('status-content');
+    if (!container) return;
+
+    container.addEventListener('dragstart', (e) => {
+      const item = e.target.closest('.status-item');
+      if (!item) return;
+      _draggingStatusItemId = item.getAttribute('data-item-id');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', _draggingStatusItemId);
+      item.classList.add('status-item-dragging');
+      // Use a transparent 1x1 pixel drag image so the native ghost
+      // doesn't show a weird empty box on some browsers.
+      const ghost = document.createElement('div');
+      ghost.style.cssText = 'position:absolute;top:-9999px;left:-9999px;width:1px;height:1px;background:transparent;';
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 0, 0);
+      requestAnimationFrame(() => { ghost.remove(); });
+    });
+
+    container.addEventListener('dragend', () => {
+      _draggingStatusItemId = null;
+      container.querySelectorAll('.status-item-dragging, .status-item-drag-over').forEach((el) => {
+        el.classList.remove('status-item-dragging', 'status-item-drag-over');
+      });
+    });
+
+    container.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const afterEl = getDragAfterElement(container, e.clientY);
+      const dragging = container.querySelector('.status-item-dragging');
+      if (!dragging) return;
+      // Highlight the drop target.
+      container.querySelectorAll('.status-item-drag-over').forEach((el) => el.classList.remove('status-item-drag-over'));
+      if (afterEl === null) {
+        container.appendChild(dragging);
+      } else {
+        container.insertBefore(dragging, afterEl);
+        afterEl.classList.add('status-item-drag-over');
+      }
+    });
+
+    container.addEventListener('drop', (e) => {
+      e.preventDefault();
+      persistStatusItemsOrder();
+    });
+
+    container.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+    });
+  }
+
+  function applyDraggableToStatusItems(draggable) {
+    const container = document.getElementById('status-content');
+    if (!container) return;
+    container.querySelectorAll('.status-item').forEach((item) => {
+      item.setAttribute('draggable', draggable ? 'true' : 'false');
+      if (!draggable) item.removeAttribute('draggable');
+    });
+  }
+
+  function persistStatusItemsOrder() {
+    const container = document.getElementById('status-content');
+    if (!container) return;
+    const order = Array.from(container.children)
+      .map((el) => el.getAttribute && el.getAttribute('data-item-id'))
+      .filter(Boolean);
+    try {
+      localStorage.setItem(STATUS_ITEMS_ORDER_KEY, JSON.stringify(order));
+    } catch (_) { /* ignore */ }
+  }
+
+
+  // Apply saved status items order from localStorage.
+  function applyStatusItemsOrder() {
+    let order;
+    try {
+      const raw = localStorage.getItem(STATUS_ITEMS_ORDER_KEY);
+      if (raw) order = JSON.parse(raw);
+    } catch (_) { /* ignore */ }
+    if (!order || !Array.isArray(order) || !order.length) return;
+    const container = document.getElementById('status-content');
+    if (!container) return;
+    const byId = {};
+    Array.from(container.children).forEach((el) => {
+      const id = el.getAttribute && el.getAttribute('data-item-id');
+      if (id) byId[id] = el;
+    });
+    order.forEach((id) => {
+      const node = byId[id];
+      if (node && node.parentNode === container) {
+        container.appendChild(node);
+      }
+    });
+  }
+
+  // ---- Advanced panel sections (collapse toggle) ----
+  // Each advanced section (#backend-card, etc.) has a .section-collapse-btn
+  // in its card-header. The button toggles a .section-collapsed class on
+  // the section, collapsing its body while keeping the card visible.
+
+  function toggleAdvancedSection(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const collapsed = section.classList.toggle('section-collapsed');
+    // Update the collapse button icon.
+    const btn = section.querySelector('.section-collapse-btn');
+    if (btn) {
+      btn.setAttribute('aria-expanded', String(!collapsed));
+      btn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
+      const icon = btn.querySelector('.collapse-icon');
+      if (icon) {
+        icon.innerHTML = collapsed
+          ? '<polyline points="6 9 12 15 18 9"/>'
+          : '<polyline points="18 15 12 9 6 15"/>';
+      }
+    }
+    if (collapsed) {
+      section.setAttribute('aria-expanded', 'false');
+    } else {
+      section.removeAttribute('aria-expanded');
+    }
+  }
+
+  // ---- Lorax tabs (reorderable tabs) ----
+  // The lorax-card has a tab bar (#lorax-tabs) with category tabs.
+  // Tabs are reorderable via drag-and-drop and the active tab filters
+  // the Lorax path list. Order is persisted to localStorage.
+
+  let currentLoraxTab = 'all';
+
+  function setLoraxTab(tabId) {
+    currentLoraxTab = tabId;
+    document.querySelectorAll('.lorax-tab').forEach((btn) => {
+      const isActive = btn.getAttribute('data-lorax-tab') === tabId;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', String(isActive));
+    });
+    // Sync tabs with the existing filter dropdowns and re-filter.
+    const categorySelect = document.getElementById('lorax-category-filter');
+    const statusSelect = document.getElementById('lorax-status-filter');
+    if (tabId === 'all') {
+      if (categorySelect) categorySelect.value = 'all';
+      if (statusSelect) statusSelect.value = 'all';
+    } else if (tabId === 'experimental') {
+      // "Experimental" tab shows all experimental-status paths.
+      if (categorySelect) categorySelect.value = 'all';
+      if (statusSelect) statusSelect.value = 'experimental';
+    } else {
+      // Named category tabs set the category filter.
+      if (categorySelect) categorySelect.value = tabId;
+      if (statusSelect) statusSelect.value = 'all';
+    }
+    // Trigger the existing filterLoraxPaths to apply the tab filter.
+    if (typeof filterLoraxPaths === 'function') {
+      filterLoraxPaths();
+    }
+  }
+
+  function initLoraxTabs() {
+    applyLoraxTabsOrder();
+    // Wire native HTML5 drag-and-drop on the tab bar.
+    wireLoraxTabsDrag();
+    // Sync the active tab to match the dropdown state on load.
+    syncLoraxDropdownToTab();
+  }
+
+  // Sync the active tab indicator when the dropdown is changed directly.
+  function syncLoraxDropdownToTab() {
+    const categorySelect = document.getElementById('lorax-category-filter');
+    const statusSelect = document.getElementById('lorax-status-filter');
+    if (!categorySelect) return;
+    const cat = categorySelect.value;
+    const status = statusSelect ? statusSelect.value : 'all';
+    let tabId = 'all';
+    if (status === 'experimental') {
+      tabId = 'experimental';
+    } else if (cat !== 'all') {
+      tabId = cat;
+    }
+    currentLoraxTab = tabId;
+    document.querySelectorAll('.lorax-tab').forEach((btn) => {
+      const isActive = btn.getAttribute('data-lorax-tab') === tabId;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', String(isActive));
+    });
+  }
+
+  function applyLoraxTabsOrder() {
+    let order;
+    try {
+      const raw = localStorage.getItem(LORAX_TABS_ORDER_KEY);
+      if (raw) order = JSON.parse(raw);
+    } catch (_) { /* ignore */ }
+    if (!order || !Array.isArray(order) || !order.length) return;
+    const container = document.getElementById('lorax-tabs');
+    if (!container) return;
+    const byId = {};
+    Array.from(container.children).forEach((el) => {
+      const id = el.getAttribute && el.getAttribute('data-item-id');
+      if (id) byId[id] = el;
+    });
+    order.forEach((id) => {
+      const node = byId[id];
+      if (node && node.parentNode === container) {
+        container.appendChild(node);
+      }
+    });
+  }
+
+  // HTML5 native drag-and-drop for Lorax tabs.
+  function wireLoraxTabsDrag() {
+    const container = document.getElementById('lorax-tabs');
+    if (!container) return;
+
+    container.addEventListener('dragstart', (e) => {
+      const tab = e.target.closest('[data-item-id]');
+      if (!tab) return;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', tab.getAttribute('data-item-id'));
+      tab.classList.add('lorax-tab-dragging');
+    });
+
+    container.addEventListener('dragend', (e) => {
+      const tab = e.target.closest('[data-item-id]');
+      if (tab) tab.classList.remove('lorax-tab-dragging');
+    });
+
+    container.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const afterEl = getDragAfterElement(container, e.clientX);
+      const dragging = container.querySelector('.lorax-tab-dragging');
+      if (!dragging) return;
+      if (afterEl === null) {
+        container.appendChild(dragging);
+      } else {
+        container.insertBefore(dragging, afterEl);
+      }
+    });
+
+    container.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const order = Array.from(container.children)
+        .map((el) => el.getAttribute('data-item-id'))
+        .filter(Boolean);
+      try {
+        localStorage.setItem(LORAX_TABS_ORDER_KEY, JSON.stringify(order));
+      } catch (_) { /* ignore */ }
+    });
+  }
+
+  // Helper: determine which element to insert before during drag.
+  function getDragAfterElement(container, x) {
+    const draggableElements = Array.from(container.querySelectorAll('.lorax-tab:not(.lorax-tab-dragging)'));
+    return draggableElements.reduce((closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = x - box.left - box.width / 2;
+      if (offset < 0 && offset > closest.offset) {
+        return { offset, element: child };
+      }
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY }).element || null;
+  }
+
 
   // ---- Sort guide banner ----
   // The banner tells the user they can drag cards to reorder. The
@@ -7326,6 +8573,10 @@ const app = (() => {
     // Round 2: draggable card order — runs after DOM is ready and
     // after the pre-paint script in <head> has applied the saved order.
     initCardOrder();
+    // Customize-layout mode: wires per-card item-list sortables and
+    // restores the saved customize-mode state. This is the entry
+    // point for reordering both cards and items within cards.
+    initCustomizeMode();
     renderTimer = setInterval(() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
@@ -7352,8 +8603,30 @@ const app = (() => {
     resetCardOrder,
     dismissSortGuide,
     showSortGuide,
+    // Customize-layout mode: opt-in drag-and-drop for cards AND items
+    // within cards, in the spirit of the macOS app organizer. The
+    // appearance popover has a "Customize layout…" button that calls
+    // toggleCustomizeMode; resetAllLayouts wipes every saved order
+    // (card + per-list item) and reloads the page to the markup
+    // default.
+    toggleCustomizeMode,
+    resetAllLayouts,
+    // Status panel info items: toggle visibility + reorder
+    toggleStatusItem,
+    toggleStatusItemsPanel,
+    toggleAdvancedSection,
+    // Lorax tabs
+    setLoraxTab,
+    syncLoraxDropdownToTab,
     resetDrawSessionCount,
     toggleSettings,
+    openSettingsPanel,
+    closeSettingsPanel,
+    renderSettingsPanel,
+    exportSettingsJson,
+    importSettingsJson,
+    processSettingsImport,
+    settings: settingsApi,
     selectProfile,
     editProfile,
     addNewProfile,

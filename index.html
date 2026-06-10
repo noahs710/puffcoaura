@@ -82,7 +82,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2307070c'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2300d6b4' stroke-width='7'/%3E%3Cpath d='M22 36c8 8 22 3 22-8' fill='none' stroke='%23f6a623' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E" />
 </head>
 <body>
-  <div class="toast-container" id="toast-container"></div>
+  <div class="toast-container" id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
 
   <div class="app-container" data-card-order-key="puffco:card-order" data-default-order="connect-card,status-card,profiles-card,controls-grid,brightness-card,power-card,advanced-panel">
     <!-- Header -->
@@ -90,9 +90,9 @@
       <div class="logo">Puffco BLE</div>
       <div class="subtitle">Local device console</div>
       <div class="connection-badge" id="connection-badge">
-        <span class="dot"></span>
+        <span class="dot" aria-hidden="true"></span>
         <span id="connection-text">Disconnected</span>
-        <button class="ble-capability" id="ble-capability" type="button" onclick="app.toggleBleCapability()" aria-expanded="false" aria-live="polite">
+        <button class="ble-capability" id="ble-capability" type="button" onclick="app.toggleBleCapability()" aria-expanded="false">
           <div class="capability-ring" id="ble-capability-ring"></div>
           <div class="capability-summary">
             <div class="capability-title" id="ble-capability-title">Checking browser Bluetooth</div>
@@ -110,7 +110,7 @@
             <path fill="currentColor" d="M19.43 12.98c.04-.32.07-.64.07-.98 0-.34-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.03 7.03 0 0 0-1.7-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.18.58-1.7.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98 0 .33.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.09.73 1.7.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.18-.58 1.7-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65zM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5z"/>
           </svg>
         </button>
-        <div class="theme-popover" id="theme-popover" role="dialog" aria-label="Appearance settings" aria-hidden="true">
+        <div class="theme-popover" id="theme-popover" role="dialog" aria-label="Appearance settings" aria-hidden="true" inert>
           <div class="theme-popover-header">
             <span class="theme-popover-title">Appearance</span>
             <button class="theme-popover-close" type="button" onclick="app.toggleSettings()" aria-label="Close">&times;</button>
@@ -155,11 +155,44 @@
               <span>Advanced user</span>
             </label>
           </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Layout</span>
+            <button type="button" class="customize-layout-btn" id="btn-customize-layout" onclick="app.toggleCustomizeMode()" aria-pressed="false" aria-label="Reorder cards and items within cards">
+              <span class="customize-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="9" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/>
+                  <circle cx="15" cy="6" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="15" cy="18" r="1.2"/>
+                </svg>
+              </span>
+              <span class="customize-label">Customize layout…</span>
+            </button>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Status panel</span>
+            <button type="button" class="customize-layout-btn" id="btn-customize-status-items" onclick="app.toggleStatusItemsPanel()" aria-pressed="false" aria-label="Toggle and reorder status panel info items">
+              <span class="customize-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+              </span>
+              <span class="customize-label">Edit status items…</span>
+            </button>
+          </div>
+          <div class="status-items-popover" id="status-items-popover" role="dialog" aria-label="Status panel items" aria-hidden="true">
+            <div class="status-items-popover-header">
+              <span class="theme-popover-title">Status Panel</span>
+              <button class="theme-popover-close" type="button" onclick="app.toggleStatusItemsPanel()" aria-label="Close">×</button>
+            </div>
+            <div class="status-items-popover-body" id="status-items-popover-body">
+              <!-- Dynamically populated by app.initStatusItemsUI() -->
+            </div>
+          </div>
           <div class="theme-popover-footer">
             <span id="theme-popover-hint">Auto follows your system theme.</span>
-            <button type="button" class="reset-layout-btn" onclick="app.resetCardOrder()" aria-label="Reset card layout to default order">
+            <button type="button" class="reset-layout-btn" onclick="app.resetAllLayouts()" aria-label="Reset card and item layout to default order">
               <span aria-hidden="true">↺</span>
-              <span>Reset card layout</span>
+              <span>Reset all layouts</span>
             </button>
           </div>
         </div>
@@ -174,6 +207,351 @@
       <a href="#advanced-panel" data-advanced-only>Advanced</a>
     </nav>
 
+    <!-- Settings backdrop -->
+    <div class="settings-backdrop" id="settings-backdrop" inert aria-hidden="true" onclick="app.closeSettingsPanel()"></div>
+
+    <!-- Full settings panel -->
+    <div class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-label="Settings" aria-hidden="true" inert>
+      <div class="settings-header">
+        <div class="settings-title-row">
+          <h2>Settings</h2>
+          <button type="button" class="settings-close-btn" onclick="app.closeSettingsPanel()" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="settings-nav" role="tablist" aria-label="Settings sections">
+          <button class="settings-nav-btn active" data-settings-section="connection" role="tab" aria-selected="true" aria-controls="settings-section-connection">Connection</button>
+          <button class="settings-nav-btn" data-settings-section="display" role="tab" aria-selected="false" aria-controls="settings-section-display">Display</button>
+          <button class="settings-nav-btn" data-settings-section="behavior" role="tab" aria-selected="false" aria-controls="settings-section-behavior">Behavior</button>
+          <button class="settings-nav-btn" data-settings-section="data" role="tab" aria-selected="false" aria-controls="settings-section-data">Data</button>
+          <button class="settings-nav-btn" data-settings-section="about" role="tab" aria-selected="false" aria-controls="settings-section-about">About</button>
+        </div>
+      </div>
+
+      <div class="settings-body">
+
+        <!-- CONNECTION -->
+        <div class="settings-section" id="settings-section-connection" role="tabpanel">
+          <div class="settings-section-heading">Connection</div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-transport">BLE Transport</label>
+            <div class="settings-radio-group" id="settings-transport" role="radiogroup" aria-label="BLE transport">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-transport" value="browser_ble"
+                       onchange="app.settings.set('transportMode', 'browser_ble')" />
+                <span>Browser Bluetooth</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-transport" value="bridge"
+                       onchange="app.settings.set('transportMode', 'bridge')" />
+                <span>Local Bridge</span>
+              </label>
+            </div>
+            <p class="settings-hint" id="settings-transport-hint">
+              Browser Bluetooth works online from HTTPS. Bridge requires the Windows bridge server.
+            </p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-device-name">Device Name</label>
+            <input type="text" id="settings-device-name" class="settings-input"
+                   placeholder="Peak" maxlength="32"
+                   onchange="app.settings.set('deviceName', this.value)" />
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-use-mac"
+                     onchange="app.settings.set('useMacAddress', this.checked)" />
+              <span>Use MAC address instead of device name</span>
+            </label>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-bridge-url">Bridge URL</label>
+            <input type="text" id="settings-bridge-url" class="settings-input"
+                   placeholder="ws://127.0.0.1:8421/ws" spellcheck="false"
+                   onchange="app.settings.set('bridgeUrl', this.value)" />
+          </div>
+        </div>
+
+        <!-- DISPLAY -->
+        <div class="settings-section hidden" id="settings-section-display" role="tabpanel">
+          <div class="settings-section-heading">Display</div>
+
+          <div class="settings-field">
+            <div class="settings-label-row">
+              <span class="settings-label">Theme</span>
+            </div>
+            <div class="theme-options settings-theme-options" role="radiogroup" aria-label="Color theme">
+              <button class="theme-option" type="button" data-theme-option="light" role="radio" aria-checked="false"
+                      onclick="app.settings.set('theme', 'light')">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5zm0 8a3 3 0 1 1 3-3 3 3 0 0 1-3 3zm0-13a1 1 0 0 0 1-1V1a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1zm0 18a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1zM4.22 4.22a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1 1 0 1 0-1.41 1.41zM19.78 19.78a1 1 0 0 0-1.41 0 1 1 0 0 0 0 1.41l.71.71a1 1 0 1 0 1.41-1.41zM1 12a1 1 0 0 0 1 1h1a1 1 0 0 0 0-2H2a1 1 0 0 0-1 1zm20-1h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2zM4.22 19.78l.71-.71a1 1 0 1 0-1.41-1.41l-.71.71a1 1 0 0 0 1.41 1.41zM19.78 4.22l-.71.71a1 1 0 1 0 1.41 1.41l.71-.71a1 1 0 0 0-1.41-1.41z"/></svg>
+                </span>
+                <span class="theme-option-label">Light</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="dark" role="radio" aria-checked="false"
+                      onclick="app.settings.set('theme', 'dark')">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05z"/></svg>
+                </span>
+                <span class="theme-option-label">Dark</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="auto" role="radio" aria-checked="false"
+                      onclick="app.settings.set('theme', 'auto')">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18V4a8 8 0 0 1 0 16z"/></svg>
+                </span>
+                <span class="theme-option-label">Auto</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-label">Accent Color</span>
+            <div class="accent-swatches settings-accent-swatches" role="radiogroup" aria-label="Accent color">
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="teal"
+                      style="--swatch:#00d6b4" aria-label="Teal" role="radio" aria-checked="true"
+                      onclick="app.settings.set('accent', 'teal')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="orange"
+                      style="--swatch:#f6a623" aria-label="Orange" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'orange')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="violet"
+                      style="--swatch:#7c3aed" aria-label="Violet" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'violet')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="pink"
+                      style="--swatch:#f43f5e" aria-label="Pink" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'pink')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="cyan"
+                      style="--swatch:#38bdf8" aria-label="Cyan" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'cyan')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="gold"
+                      style="--swatch:#f6d365" aria-label="Gold" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'gold')"></button>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-label">Font Size</span>
+            <div class="settings-radio-group settings-compact" role="radiogroup" aria-label="Font size">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-font-size" value="small"
+                       onchange="app.settings.set('fontSize', 'small')" />
+                <span>Small</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-font-size" value="medium" checked
+                       onchange="app.settings.set('fontSize', 'medium')" />
+                <span>Medium</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-font-size" value="large"
+                       onchange="app.settings.set('fontSize', 'large')" />
+                <span>Large</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-label">Layout Density</span>
+            <div class="settings-radio-group settings-compact" role="radiogroup" aria-label="Layout density">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-density" value="compact"
+                       onchange="app.settings.set('density', 'compact')" />
+                <span>Compact</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-density" value="comfortable" checked
+                       onchange="app.settings.set('density', 'comfortable')" />
+                <span>Comfortable</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-density" value="spacious"
+                       onchange="app.settings.set('density', 'spacious')" />
+                <span>Spacious</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="advanced-user-toggle"
+                     onchange="app.toggleAdvancedUser()" />
+              <span>Advanced user mode</span>
+            </label>
+            <p class="settings-hint">Shows the Advanced diagnostics panel, Lorax explorer, and debug console.</p>
+          </div>
+        </div>
+
+        <!-- BEHAVIOR -->
+        <div class="settings-section hidden" id="settings-section-behavior" role="tabpanel">
+          <div class="settings-section-heading">Behavior</div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-auto-reconnect" checked
+                     onchange="app.settings.set('autoReconnect', this.checked)" />
+              <span>Auto-reconnect</span>
+            </label>
+            <p class="settings-hint">Automatically reconnect to the bridge when the connection drops.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-confirm-dialogs" checked
+                     onchange="app.settings.set('confirmDialogs', this.checked)" />
+              <span>Confirm dangerous actions</span>
+            </label>
+            <p class="settings-hint">Show a confirmation dialog before factory reset or destructive operations.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-sound" checked
+                     onchange="app.settings.set('soundEnabled', this.checked)" />
+              <span>Sound effects</span>
+            </label>
+            <p class="settings-hint">Play audio feedback for connection events and errors.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-voice-enabled"
+                     onchange="app.settings.set('voiceEnabled', this.checked)" />
+              <span>Voice commands</span>
+            </label>
+            <p class="settings-hint">Enable hands-free voice control. Requires microphone permission.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-voice-prefix">Voice wake word</label>
+            <input type="text" id="settings-voice-prefix" class="settings-input"
+                   placeholder="puffco" maxlength="24"
+                   onchange="app.settings.set('voicePrefix', this.value)" />
+            <p class="settings-hint">Only transcriptions containing this word will trigger commands. Leave blank to fire on any match.</p>
+          </div>
+        </div>
+
+        <!-- DATA -->
+        <div class="settings-section hidden" id="settings-section-data" role="tabpanel">
+          <div class="settings-section-heading">Data</div>
+
+          <div class="settings-actions-row">
+            <button type="button" class="btn btn-secondary" onclick="app.exportSettingsJson()">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+              Export Settings
+            </button>
+            <button type="button" class="btn btn-secondary" id="btn-import-settings">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/>
+              </svg>
+              Import Settings
+            </button>
+            <input class="hidden" id="settings-import-file" type="file" accept="application/json,.json" />
+          </div>
+
+          <div class="settings-danger-zone">
+            <div class="settings-danger-heading">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+              </svg>
+              <span>Danger Zone</span>
+            </div>
+            <div class="settings-field">
+              <button type="button" class="btn btn-danger"
+                      onclick="app.settings.reset()">
+                Reset All Settings
+              </button>
+              <p class="settings-hint">Restores all settings to their defaults. This does not delete profiles or bridge history.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABOUT -->
+        <div class="settings-section hidden" id="settings-section-about" role="tabpanel">
+          <div class="settings-section-heading">About</div>
+
+          <div class="settings-about-grid">
+            <div class="settings-about-item">
+              <span class="settings-about-label">App</span>
+              <span class="settings-about-value">Puffco BLE Controller</span>
+            </div>
+            <div class="settings-about-item">
+              <span class="settings-about-label">Version</span>
+              <span class="settings-about-value" id="settings-version">1.0.0</span>
+            </div>
+            <div class="settings-about-item">
+              <span class="settings-about-label">Build</span>
+              <span class="settings-about-value" id="settings-build">2025.1</span>
+            </div>
+            <div class="settings-about-item">
+              <span class="settings-about-label">Protocol</span>
+              <span class="settings-about-value">Lorax v2</span>
+            </div>
+          </div>
+
+          <div class="settings-links">
+            <a href="https://github.com/puffcopuffco/PuffcoBLE" target="_blank" rel="noopener noreferrer" class="settings-link">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/>
+              </svg>
+              View on GitHub
+            </a>
+            <a href="https://github.com/puffcopuffco/PuffcoBLE/issues" target="_blank" rel="noopener noreferrer" class="settings-link">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+              </svg>
+              Report an Issue
+            </a>
+            <a href="https://github.com/puffcopuffco/PuffcoBLE/releases" target="_blank" rel="noopener noreferrer" class="settings-link">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l4.59-4.58L18 11l-6 6z"/>
+              </svg>
+              Release Notes
+            </a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Customize-layout floating toolbar. Hidden by default, shown when
+         the user enters customize mode from the appearance popover.
+         Mirrors the macOS app organizer "Done" pill — a single action
+         that exits the mode and saves the current order. -->
+    <div class="customize-bar" id="customize-bar" role="region" aria-label="Customize layout" hidden>
+      <div class="customize-bar-inner">
+        <div class="customize-bar-title">
+          <span class="customize-bar-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="9" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/>
+              <circle cx="15" cy="6" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="15" cy="18" r="1.2"/>
+            </svg>
+          </span>
+          <div>
+            <strong>Customizing layout</strong>
+            <span>Drag cards by their handle, or grab items inside a card to rearrange them.</span>
+          </div>
+        </div>
+        <div class="customize-bar-actions">
+          <button type="button" class="btn btn-sm btn-secondary customize-bar-reset" onclick="app.resetAllLayouts()" aria-label="Reset all card and item layout to default order">
+            <span aria-hidden="true">↺</span>
+            <span>Reset</span>
+          </button>
+          <button type="button" class="btn btn-sm btn-primary customize-bar-done" onclick="app.toggleCustomizeMode()" aria-label="Done customizing layout">
+            <span aria-hidden="true">✓</span>
+            <span>Done</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Drag-and-drop sort guide. Sits at the top of the app container
          so every section can be reordered. Carries no data-card-id, so
          Sortable treats it as a static sibling and never tries to drag
@@ -186,11 +564,10 @@
         </svg>
       </div>
       <div class="sort-guide-body">
-        <strong class="sort-guide-title">Drag to reorder</strong>
+        <strong class="sort-guide-title">Want to rearrange the page?</strong>
         <span class="sort-guide-text">
-          Grab any card by its handle to rearrange sections, or
-          <kbd>Tab</kbd> to a card and press
-          <kbd>Space</kbd> to pick up + <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move.
+          Open <strong>Appearance</strong> and pick <strong>Customize layout…</strong>
+          to drag cards and items within cards, like the macOS app organizer.
         </span>
       </div>
       <div class="sort-guide-actions">
@@ -234,7 +611,7 @@
           <input type="text" id="device-name" placeholder="Peak" value="Peak" />
         </div>
         <label class="checkbox-row optional-device-field" id="device-mac-row" data-advanced-only>
-          <input type="checkbox" id="use-mac-address" onclick="app.toggleMacAddressMode()" onchange="app.toggleMacAddressMode()" />
+          <input type="checkbox" id="use-mac-address" onchange="app.toggleMacAddressMode()" />
           <span>Use MAC address</span>
         </label>
         <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
@@ -287,7 +664,14 @@
         </div>
       </div>
 
-      <div class="hidden" id="status-content">
+      <div class="hidden" id="status-content" data-card-item-list="status-items">
+        <div class="status-item" data-item-id="device-stage" data-status-item data-status-label="Device &amp; temperature">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('device-stage')" aria-label="Toggle Device &amp; temperature" aria-pressed="true" data-toggle-btn="device-stage">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Device &amp; temperature</span>
+          </div>
         <div class="device-stage">
           <div class="device-stage-copy">
             <div class="stage-eyebrow">Live device</div>
@@ -326,15 +710,23 @@
             <div class="device-halo"></div>
           </div>
         </div>
+        </div><!-- end .status-item[data-item-id="device-stage"] -->
 
+        <div class="status-item" data-item-id="heat-control" data-status-item data-status-label="Heat control &amp; timer">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('heat-control')" aria-label="Toggle Heat control" aria-pressed="true" data-toggle-btn="heat-control">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Heat control &amp; timer</span>
+          </div>
         <div class="heat-status-control connected-only" id="heat-control-card">
           <div class="heat-status-heading">
             <div>
               <div class="stat-label">Heat Control</div>
-              <strong id="heat-status-text">Idle</strong>
+              <strong id="heat-status-text" aria-live="polite">Idle</strong>
             </div>
-            <div class="heat-indicator" id="heat-indicator" aria-live="polite">
-              <span class="heat-dot"></span>
+            <div class="heat-indicator" id="heat-indicator">
+              <span class="heat-dot" aria-hidden="true"></span>
             </div>
           </div>
           <div class="heat-controls">
@@ -394,7 +786,15 @@
           <span><b>Chamber</b><i id="session-chamber">—</i></span>
           </div>
         </div>
+        </div><!-- end .status-item[data-item-id="heat-control"] -->
 
+        <div class="status-item" data-item-id="battery" data-status-item data-status-label="Battery">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('battery')" aria-label="Toggle Battery" aria-pressed="true" data-toggle-btn="battery">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Battery</span>
+          </div>
         <div class="status-summary">
           <div class="battery-panel">
             <div class="battery-ring" id="battery-ring" style="--battery-level: 0;">
@@ -412,7 +812,15 @@
             </div>
           </div>
         </div>
+        </div><!-- end .status-item[data-item-id="battery"] -->
 
+        <div class="status-item" data-item-id="diagnostics" data-status-item data-status-label="Diagnostics">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('diagnostics')" aria-label="Toggle Diagnostics" aria-pressed="true" data-toggle-btn="diagnostics">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Diagnostics</span>
+          </div>
         <div class="status-grid mt-md">
           <div class="stat-item">
             <div class="stat-label">Device</div>
@@ -455,9 +863,19 @@
             <div class="stat-value" id="stat-last-connected">—</div>
           </div>
         </div>
+        </div><!-- end .status-item[data-item-id="diagnostics"] -->
+
+        <div class="status-item" data-item-id="capabilities" data-status-item data-status-label="Capabilities">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('capabilities')" aria-label="Toggle Capabilities" aria-pressed="true" data-toggle-btn="capabilities">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Capabilities</span>
+          </div>
         <div class="capability-strip" id="capability-strip" aria-live="polite"></div>
+        </div><!-- end .status-item[data-item-id="capabilities"] -->
         <div id="stat-charge" class="hidden" aria-hidden="true">—</div>
-      </div>
+      </div><!-- end #status-content -->
     </section>
 
     <!-- Profiles -->
@@ -489,7 +907,7 @@
           <h2><span class="icon icon-status"></span> Voice Commands</h2>
           <div class="voice-card-actions">
             <span class="voice-last-action empty" id="voice-last-action" aria-live="polite" title="Last command sent via voice"></span>
-            <button class="btn btn-sm btn-secondary" id="btn-voice" onclick="app.toggleVoiceCommands()">Enable Voice</button>
+            <button class="btn btn-sm btn-secondary" id="btn-voice" onclick="app.toggleVoiceCommands()" aria-pressed="false">Enable Voice</button>
           </div>
         </div>
         <div class="voice-command-panel">
@@ -535,19 +953,19 @@
             <span id="voice-confidence">Confidence: —</span>
           </div>
         </div>
-        <div class="voice-command-chips" aria-label="Test voice commands">
-          <button class="btn btn-sm btn-primary" data-voice-cmd="find device" onclick="app.handleVoiceCommand('find device')">Find Device</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="resync" onclick="app.handleVoiceCommand('resync')">Resync</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="disconnect" onclick="app.handleVoiceCommand('disconnect')">Disconnect</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="status" onclick="app.handleVoiceCommand('status')">Status</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="start heat" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="stop" onclick="app.handleVoiceCommand('stop')">Stop</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="boost" onclick="app.handleVoiceCommand('boost')">Boost</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="profile two" onclick="app.handleVoiceCommand('profile two')">Profile 2</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="battery" onclick="app.handleVoiceCommand('battery')">Battery</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="lantern on" onclick="app.handleVoiceCommand('lantern on')">Lantern</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="stealth on" onclick="app.handleVoiceCommand('stealth on')">Stealth</button>
-          <button class="btn btn-sm btn-secondary" data-voice-cmd="brightness 70" onclick="app.handleVoiceCommand('brightness 70')">Brightness 70</button>
+        <div class="voice-command-chips" data-card-item-list="voice-command-chips" aria-label="Test voice commands">
+          <button class="btn btn-sm btn-primary" data-item-id="find-device" data-voice-cmd="find device" onclick="app.handleVoiceCommand('find device')">Find Device</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="resync" data-voice-cmd="resync" onclick="app.handleVoiceCommand('resync')">Resync</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="disconnect" data-voice-cmd="disconnect" onclick="app.handleVoiceCommand('disconnect')">Disconnect</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="status" data-voice-cmd="status" onclick="app.handleVoiceCommand('status')">Status</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="start-heat" data-voice-cmd="start heat" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="stop" data-voice-cmd="stop" onclick="app.handleVoiceCommand('stop')">Stop</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="boost" data-voice-cmd="boost" onclick="app.handleVoiceCommand('boost')">Boost</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="profile-two" data-voice-cmd="profile two" onclick="app.handleVoiceCommand('profile two')">Profile 2</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="battery" data-voice-cmd="battery" onclick="app.handleVoiceCommand('battery')">Battery</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="lantern" data-voice-cmd="lantern on" onclick="app.handleVoiceCommand('lantern on')">Lantern</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="stealth" data-voice-cmd="stealth on" onclick="app.handleVoiceCommand('stealth on')">Stealth</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="brightness" data-voice-cmd="brightness 70" onclick="app.handleVoiceCommand('brightness 70')">Brightness 70</button>
         </div>
         <details class="voice-grammar">
           <summary>All voice commands</summary>
@@ -597,7 +1015,7 @@
           <button class="btn btn-sm btn-primary" id="voice-open-bluetooth" onclick="app.openBluetoothFromVoice()">Find Device</button>
         </div>
         <div class="voice-test-row">
-          <input type="text" id="voice-test-command" placeholder="Try: start heat" />
+          <input type="text" id="voice-test-command" placeholder="Try: start heat" aria-label="Test voice command" />
           <button class="btn btn-sm btn-secondary" onclick="app.testVoiceCommand()">Run</button>
         </div>
         <div class="voice-transcript" id="voice-transcript">No command heard yet</div>
@@ -611,24 +1029,24 @@
         <h2><span class="icon icon-bright"></span> LED Brightness</h2>
         <button class="btn btn-sm btn-primary" onclick="app.applyBrightness()">Apply</button>
       </div>
-      <div class="brightness-sliders">
-        <div class="slider-group slider-wide">
+      <div class="brightness-sliders" data-card-item-list="brightness-sliders">
+        <div class="slider-group slider-wide" data-item-id="all">
           <label>All LEDs <span class="slider-value" id="val-all">50%</span></label>
           <input type="range" id="slider-all" min="1" max="100" value="50" oninput="app.updateAllBrightness()" />
         </div>
-        <div class="slider-group">
+        <div class="slider-group" data-item-id="base">
           <label>Base <span class="slider-value" id="val-base">50%</span></label>
           <input type="range" id="slider-base" min="1" max="100" value="50" oninput="app.updateSliderLabel('base')" />
         </div>
-        <div class="slider-group">
+        <div class="slider-group" data-item-id="mid">
           <label>Mid <span class="slider-value" id="val-mid">50%</span></label>
           <input type="range" id="slider-mid" min="1" max="100" value="50" oninput="app.updateSliderLabel('mid')" />
         </div>
-        <div class="slider-group">
+        <div class="slider-group" data-item-id="glass">
           <label>Glass <span class="slider-value" id="val-glass">50%</span></label>
           <input type="range" id="slider-glass" min="1" max="100" value="50" oninput="app.updateSliderLabel('glass')" />
         </div>
-        <div class="slider-group">
+        <div class="slider-group" data-item-id="logo">
           <label>Logo <span class="slider-value" id="val-logo">50%</span></label>
           <input type="range" id="slider-logo" min="1" max="100" value="50" oninput="app.updateSliderLabel('logo')" />
         </div>
@@ -642,19 +1060,19 @@
       </div>
       <div class="power-controls">
         <button class="btn btn-secondary" onclick="app.power('sleep')">Sleep</button>
-        <button class="btn btn-danger" onclick="app.power('off')">⏻ Power Off</button>
+        <button class="btn btn-danger" onclick="app.power('off')"><span aria-hidden="true">⏻</span> Power Off</button>
       </div>
-      <div class="power-light-controls">
-        <div class="toggle-wrap">
+      <div class="power-light-controls" data-card-item-list="power-light-controls">
+        <div class="toggle-wrap" data-item-id="lantern">
           <button class="toggle" id="toggle-lantern" type="button" onclick="app.toggleLantern()" aria-pressed="false" aria-label="Toggle lantern mode"></button>
           <span class="toggle-label">Lantern</span>
         </div>
-        <div class="toggle-wrap">
+        <div class="toggle-wrap" data-item-id="stealth">
           <button class="toggle" id="toggle-stealth" type="button" onclick="app.toggleStealth()" aria-pressed="false" aria-label="Toggle stealth mode"></button>
           <span class="toggle-label">Stealth</span>
         </div>
-        <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Show Battery</button>
-        <button class="btn btn-sm btn-secondary" onclick="app.applyMoodToLantern()">Apply Mood</button>
+        <button class="btn btn-sm btn-secondary" data-item-id="show-battery" onclick="app.showBattery()">Show Battery</button>
+        <button class="btn btn-sm btn-secondary" data-item-id="apply-mood" onclick="app.applyMoodToLantern()">Apply Mood</button>
       </div>
     </section>
 
@@ -664,10 +1082,14 @@
         <small>Lorax paths, raw reads, and activity</small>
       </summary>
 
-      <section class="card" id="backend-card">
+      <div class="advanced-sections-list" id="advanced-sections-list" data-card-item-list="advanced-sections">
+        <section class="card advanced-section-item" id="backend-card" data-item-id="backend-card" data-status-item data-status-label="Backend Mirror">
         <div class="card-header">
           <h2><span class="icon icon-status"></span> Backend Mirror</h2>
           <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('backend-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
             <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Sync Now</button>
             <button class="btn btn-sm btn-primary" onclick="app.resyncDevice()">Resync BLE</button>
             <button class="btn btn-sm btn-secondary" onclick="app.copyBrowserDebugLog()">Copy Debug</button>
@@ -878,10 +1300,13 @@
         </div>
       </section>
 
-      <section class="card debug-console-card" id="browser-debug-card">
+      <section class="card debug-console-card advanced-section-item" id="browser-debug-card" data-item-id="browser-debug-card" data-status-item data-status-label="Browser Debug">
         <div class="card-header">
           <h2><span class="icon icon-activity"></span> Browser Debug Console</h2>
           <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('browser-debug-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
             <button class="btn btn-sm btn-secondary" onclick="app.copyBrowserDebugLog()">Copy</button>
             <button class="btn btn-sm btn-secondary" onclick="app.downloadBrowserDebugLog()">Download</button>
             <button class="btn btn-sm btn-danger" onclick="app.clearBrowserDebugLog()">Clear</button>
@@ -926,10 +1351,15 @@
         </div>
       </section>
 
-      <section class="card" id="dev-command-card">
+      <section class="card advanced-section-item" id="dev-command-card" data-item-id="dev-command-card" data-status-item data-status-label="Dev Commands">
         <div class="card-header">
           <h2><span class="icon icon-explorer"></span> Developer Command Deck</h2>
-          <button class="btn btn-sm btn-secondary" onclick="app.clearDevOutput()">Clear Output</button>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('dev-command-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="app.clearDevOutput()">Clear Output</button>
+          </div>
         </div>
         <div class="dev-command-grid">
           <div class="dev-command-box">
@@ -951,7 +1381,7 @@
           <div class="dev-command-box">
             <div class="stat-label">Lorax probe</div>
             <div class="dev-inline-fields">
-              <select id="dev-lorax-category">
+              <select id="dev-lorax-category" aria-label="Lorax category filter">
                 <option value="">Any category</option>
                 <option value="system">System</option>
                 <option value="heater">Heater</option>
@@ -962,12 +1392,12 @@
                 <option value="logs">Logs</option>
                 <option value="misc">Misc</option>
               </select>
-              <select id="dev-lorax-status">
+              <select id="dev-lorax-status" aria-label="Lorax status filter">
                 <option value="experimental">Experimental</option>
                 <option value="known">Known</option>
                 <option value="">Any status</option>
               </select>
-              <input type="number" id="dev-lorax-limit" min="1" max="150" value="40" />
+              <input type="number" id="dev-lorax-limit" min="1" max="150" value="40" aria-label="Lorax probe result limit" />
             </div>
             <div class="inline-actions">
               <button class="btn btn-sm btn-secondary" onclick="app.devLoraxProbe()">Probe</button>
@@ -976,8 +1406,8 @@
           </div>
           <div class="dev-command-box">
             <div class="stat-label">Temperature source</div>
-            <input type="text" id="dev-temp-path" placeholder="/p/app/..." />
-            <select id="dev-temp-encoding">
+            <input type="text" id="dev-temp-path" placeholder="/p/app/..." aria-label="Lorax path for temperature source" />
+            <select id="dev-temp-encoding" aria-label="Temperature source encoding">
               <option value="float32_c">float32 C</option>
               <option value="float32_f">float32 F</option>
               <option value="uint16_c_x10">uint16 C x10</option>
@@ -992,10 +1422,10 @@
           </div>
           <div class="dev-command-box">
             <div class="stat-label">Lorax action</div>
-            <select id="dev-lorax-action">
+            <select id="dev-lorax-action" aria-label="Lorax action to run">
               <option value="">Load registry for actions</option>
             </select>
-            <input type="text" id="dev-action-confirm" placeholder="Confirm text if required" />
+            <input type="text" id="dev-action-confirm" placeholder="Confirm text if required" aria-label="Lorax action confirmation text" />
             <button class="btn btn-sm btn-danger" onclick="app.devRunLoraxAction()">Run Action</button>
           </div>
         </div>
@@ -1003,10 +1433,15 @@
       </section>
 
       <!-- Lorax Path Explorer -->
-      <section class="card" id="lorax-card">
+      <section class="card advanced-section-item" id="lorax-card" data-item-id="lorax-card" data-status-item data-status-label="Lorax Explorer">
         <div class="card-header">
           <h2><span class="icon icon-explorer"></span> Lorax Path Explorer</h2>
-          <button class="btn btn-sm btn-secondary" id="btn-reload-lorax" onclick="app.refreshLoraxRegistry()">Reload Registry</button>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('lorax-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" id="btn-reload-lorax" onclick="app.refreshLoraxRegistry()">Reload Registry</button>
+          </div>
         </div>
 
         <div class="disconnected-overlay visible" id="lorax-empty">
@@ -1015,6 +1450,18 @@
         </div>
 
         <div class="hidden" id="lorax-content">
+          <!-- Category tabs — reorderable via drag -->
+          <div class="lorax-tabs" id="lorax-tabs" data-card-item-list="lorax-tabs">
+            <button type="button" class="lorax-tab active" data-item-id="tab-all" data-lorax-tab="all" onclick="app.setLoraxTab('all')">All</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-system" data-lorax-tab="system" onclick="app.setLoraxTab('system')">System</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-heater" data-lorax-tab="heater" onclick="app.setLoraxTab('heater')">Heater</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-battery" data-lorax-tab="battery" onclick="app.setLoraxTab('battery')">Battery</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-profile" data-lorax-tab="profile" onclick="app.setLoraxTab('profile')">Profile</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-lighting" data-lorax-tab="lighting" onclick="app.setLoraxTab('lighting')">Lighting</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-usage" data-lorax-tab="usage" onclick="app.setLoraxTab('usage')">Usage</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-experimental" data-lorax-tab="experimental" onclick="app.setLoraxTab('experimental')">Experimental</button>
+          </div>
+
           <!-- Filters -->
           <div class="lorax-filters">
             <div class="input-group">
@@ -1023,7 +1470,7 @@
             </div>
             <div class="input-group">
               <label for="lorax-category-filter">Category</label>
-              <select id="lorax-category-filter" onchange="app.filterLoraxPaths()">
+              <select id="lorax-category-filter" onchange="app.filterLoraxPaths(); app.syncLoraxDropdownToTab();">
                 <option value="all">All Categories</option>
                 <option value="system">System</option>
                 <option value="heater">Heater</option>
@@ -1079,15 +1526,21 @@
       </section>
 
       <!-- Activity -->
-      <section class="card" id="activity-card">
+      <section class="card advanced-section-item" id="activity-card" data-item-id="activity-card" data-status-item data-status-label="Activity">
         <div class="card-header">
           <h2><span class="icon icon-activity"></span> Activity</h2>
-          <button class="btn btn-sm btn-secondary" onclick="app.clearLog()">Clear</button>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('activity-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="app.clearLog()">Clear</button>
+          </div>
         </div>
         <div class="activity-log" id="activity-log">
           <div class="log-empty">No activity yet</div>
         </div>
       </section>
+      </div><!-- end #advanced-sections-list -->
     </details>
   </div>
 
@@ -1095,11 +1548,11 @@
   <div class="modal-backdrop" id="profile-modal">
     <div class="modal profile-editor-sheet">
       <div class="profile-editor-hero">
-        <button class="icon-btn modal-close" onclick="app.closeModal()" title="Close editor">×</button>
+        <button class="icon-btn modal-close" onclick="app.closeModal()" aria-label="Close profile editor" title="Close editor">×</button>
         <div class="profile-editor-glow" id="modal-color-preview" style="background:#ff0000;"></div>
         <div class="profile-editor-title">
           <span id="modal-kicker">Profile 0</span>
-          <input type="text" id="modal-name" placeholder="Profile name" maxlength="31" />
+          <input type="text" id="modal-name" placeholder="Profile name" maxlength="31" aria-label="Profile name" />
           <p id="modal-summary">Profile details</p>
         </div>
       </div>
@@ -1176,7 +1629,7 @@
             </div>
           </div>
           <div class="mood-library-actions">
-            <input type="text" id="mood-name" placeholder="Mood preset name" maxlength="40" />
+            <input type="text" id="mood-name" placeholder="Mood preset name" maxlength="40" aria-label="Mood preset name" />
             <button class="btn btn-sm btn-secondary" onclick="app.saveMoodPreset()">Save Mood</button>
             <button class="btn btn-sm btn-secondary" onclick="app.deleteMoodPreset()">Delete</button>
             <button class="btn btn-sm btn-secondary" onclick="app.exportMoods()">Export</button>
@@ -1195,8 +1648,8 @@
               <div class="mood-color-tools">
                 <button class="btn btn-sm btn-secondary" id="mood-add-color" onclick="app.addMoodColor()">Add color</button>
                 <div class="color-input-wrapper">
-                  <input type="color" id="color-wheel" value="#ff0000" />
-                  <input type="text" id="hex-input" class="hex-input" value="#FF0000" placeholder="#RRGGBB" maxlength="7" />
+                  <input type="color" id="color-wheel" value="#ff0000" aria-label="Color wheel" />
+                  <input type="text" id="hex-input" class="hex-input" value="#FF0000" placeholder="#RRGGBB" maxlength="7" aria-label="Hex color value" />
                 </div>
               </div>
             </div>
@@ -1239,9 +1692,9 @@
     </div>
   </div>
 
-  <script src="ble-client.js?v=12"></script>
-  <script src="Sortable.min.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <script src="ble-client.js?v=14"></script>
+  <script src="Sortable.min.js?v=14"></script>
+  <script src="app.js?v=14"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(function(err) {
