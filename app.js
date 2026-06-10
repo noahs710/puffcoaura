@@ -9625,8 +9625,9 @@ const app = (() => {
   // This gives mobile swipe views and desktop layout a single source of truth.
   // Only runs on mobile (≤700px) — on desktop the cards stay in .app-container.
   function initMobileSwipeViews() {
-    const isMobile = window.matchMedia('(max-width: 700px)').matches;
+    const isMobile = window.innerWidth <= 700;
     if (!isMobile) return; // desktop: keep cards in .app-container
+    console.log('[Mavis] Mobile detected, initializing swipe views…');
 
     const viewMap = {
       connect:    'connect-card',
@@ -9639,6 +9640,9 @@ const app = (() => {
       const viewEl = document.getElementById('mobile-view-' + viewName);
       if (card && viewEl) {
         viewEl.appendChild(card);
+        console.log('[Mavis] Moved', cardId, '→ mobile-view-' + viewName);
+      } else {
+        console.warn('[Mavis] Could not find', cardId, 'or mobile-view-' + viewName);
       }
     });
     // Also move voice-card, brightness-card, and power-card into controls view
@@ -9647,6 +9651,9 @@ const app = (() => {
       const controlsView = document.getElementById('mobile-view-controls');
       if (card && controlsView) {
         controlsView.appendChild(card);
+        console.log('[Mavis] Moved', id, '→ mobile-view-controls');
+      } else {
+        console.warn('[Mavis] Could not find', id, 'or mobile-view-controls');
       }
     });
   }
