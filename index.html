@@ -485,11 +485,10 @@
 
           <div class="settings-field">
             <label class="settings-label" for="settings-dab-threshold">Detection threshold</label>
-            <input type="range" id="settings-dab-threshold" min="1" max="30" value="12"
-                   style="width:100%"
+            <input type="range" id="settings-dab-threshold" class="settings-range" min="1" max="30" value="12"
                    oninput="document.getElementById('dab-threshold-val').textContent = this.value + '%'; app.settings.set('dabThreshold', Number(this.value))"
                    onchange="app.settings.set('dabThreshold', Number(this.value))" />
-            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+            <div class="settings-range-scale">
               <span>1%</span><span id="dab-threshold-val">12%</span><span>30%</span>
             </div>
             <p class="settings-hint">Airflow must exceed this (and stay above it for ~3 seconds) to start a dab session. Default 12% filters out preheat pulses.</p>
@@ -515,22 +514,20 @@
 
           <div class="settings-field">
             <label class="settings-label" for="settings-dab-fast-ms">Session sample interval</label>
-            <input type="range" id="settings-dab-fast-ms" min="100" max="1000" step="50" value="150"
-                   style="width:100%"
+            <input type="range" id="settings-dab-fast-ms" class="settings-range" min="100" max="1000" step="50" value="150"
                    oninput="document.getElementById('dab-fast-ms-val').textContent = this.value + 'ms'"
                    onchange="app.settings.set('dabFastSampleMs', Number(this.value))" />
-            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+            <div class="settings-range-scale">
               <span>100ms</span><span id="dab-fast-ms-val">150ms</span><span>1000ms</span>
             </div>
           </div>
 
           <div class="settings-field">
             <label class="settings-label" for="settings-dab-idle-bar-ms">Idle bar poll</label>
-            <input type="range" id="settings-dab-idle-bar-ms" min="50" max="400" step="25" value="100"
-                   style="width:100%"
+            <input type="range" id="settings-dab-idle-bar-ms" class="settings-range" min="50" max="400" step="25" value="100"
                    oninput="document.getElementById('dab-idle-bar-ms-val').textContent = this.value + 'ms'"
                    onchange="app.settings.set('dabIdleBarSampleMs', Number(this.value))" />
-            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+            <div class="settings-range-scale">
               <span>50ms</span><span id="dab-idle-bar-ms-val">100ms</span><span>400ms</span>
             </div>
             <p class="settings-hint">How often the inhale bar reads the sensor between scoring sessions. Lower = snappier bar; the radio is the bottleneck, so 50–200ms is the sweet spot.</p>
@@ -538,8 +535,8 @@
 
           <div class="settings-field">
             <label class="settings-label">Draw calibration</label>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <span id="settings-dab-draw-max" style="font-size:0.875rem;color:var(--text-secondary,#9ca3af);font-variant-numeric:tabular-nums;">90 raw = 100%</span>
+            <div class="settings-inline-row">
+              <span id="settings-dab-draw-max" class="settings-inline-value">90 raw = 100%</span>
               <button class="btn btn-sm btn-secondary" onclick="app.resetDabDrawCalibration()">Re-learn</button>
             </div>
             <p class="settings-hint">The app learns your device's strongest pull and scales every percent to it — your hardest draw reads ~100%. Re-learn after changing chambers.</p>
@@ -547,11 +544,10 @@
 
           <div class="settings-field">
             <label class="settings-label" for="settings-dab-drop-timeout">End-of-dab timeout</label>
-            <input type="range" id="settings-dab-drop-timeout" min="500" max="5000" step="100" value="1200"
-                   style="width:100%"
+            <input type="range" id="settings-dab-drop-timeout" class="settings-range" min="500" max="5000" step="100" value="1200"
                    oninput="document.getElementById('dab-drop-timeout-val').textContent = (this.value / 1000).toFixed(1) + 's'"
                    onchange="app.settings.set('dabDropTimeoutMs', Number(this.value))" />
-            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+            <div class="settings-range-scale">
               <span>0.5s</span><span id="dab-drop-timeout-val">1.2s</span><span>5s</span>
             </div>
             <p class="settings-hint">How long airflow can sit below the threshold before the session ends. Raise this if pause-and-sip draws end your dab early.</p>
@@ -559,22 +555,20 @@
 
           <div class="settings-field">
             <label class="settings-label" for="settings-dab-max-duration">Max session length</label>
-            <input type="range" id="settings-dab-max-duration" min="30" max="300" step="10" value="90"
-                   style="width:100%"
+            <input type="range" id="settings-dab-max-duration" class="settings-range" min="30" max="300" step="10" value="90"
                    oninput="document.getElementById('dab-max-duration-val').textContent = this.value + 's'"
                    onchange="app.settings.set('dabMaxDurationS', Number(this.value))" />
-            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+            <div class="settings-range-scale">
               <span>30s</span><span id="dab-max-duration-val">90s</span><span>300s</span>
             </div>
           </div>
 
           <div class="settings-field">
             <label class="settings-label" for="settings-dab-ui-max">Airflow display ceiling</label>
-            <input type="range" id="settings-dab-ui-max" min="100" max="200" step="10" value="150"
-                   style="width:100%"
+            <input type="range" id="settings-dab-ui-max" class="settings-range" min="100" max="200" step="10" value="150"
                    oninput="document.getElementById('dab-ui-max-val').textContent = this.value + '%'"
                    onchange="app.settings.set('dabUiAirflowMax', Number(this.value))" />
-            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted,var(--text-secondary,#9ca3af));">
+            <div class="settings-range-scale">
               <span>100%</span><span id="dab-ui-max-val">150%</span><span>200%</span>
             </div>
             <p class="settings-hint">Top of the chart and readouts. Hard pulls can overshoot 100% — raise this if your draws pin at the ceiling. Scoring is unaffected.</p>
@@ -582,8 +576,8 @@
 
           <div class="settings-field">
             <label class="settings-label">Preheat timer calibration</label>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <span id="settings-dab-preheat-offset" style="font-size:0.875rem;color:var(--text-secondary,#9ca3af);font-variant-numeric:tabular-nums;">+0.0s learned</span>
+            <div class="settings-inline-row">
+              <span id="settings-dab-preheat-offset" class="settings-inline-value">+0.0s learned</span>
               <button class="btn btn-sm btn-secondary" onclick="app.resetDabPreheatCalibration()">Reset</button>
             </div>
             <p class="settings-hint">The app learns how far the firmware preheat timer runs short on your device and corrects the countdown. Reset to re-learn from scratch.</p>
@@ -591,19 +585,18 @@
 
           <div class="settings-field">
             <label class="settings-label">Score history</label>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <div id="dab-score-history-summary" style="font-size:0.875rem;color:var(--text-secondary,#9ca3af);flex:1;">No dabs recorded yet.</div>
+            <div class="settings-inline-row">
+              <div id="dab-score-history-summary" class="settings-inline-value">No dabs recorded yet.</div>
               <button class="btn btn-sm btn-secondary" onclick="app.clearDabHistory()">Clear</button>
             </div>
           </div>
 
           <div class="settings-field">
             <label class="settings-label" for="settings-cleaning-threshold">Cleaning reminder threshold</label>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <input type="number" id="settings-cleaning-threshold" min="0" max="500" step="5" value="0"
-                     style="width:96px;"
+            <div class="settings-inline-row">
+              <input type="number" id="settings-cleaning-threshold" class="settings-number-input" min="0" max="500" step="5" value="0"
                      onchange="app.settings.set('cleaningThreshold', Number(this.value))" />
-              <span style="font-size:0.8rem;color:var(--text-muted);">dabs per cycle (0 = off)</span>
+              <span class="settings-inline-note">dabs per cycle (0 = off)</span>
             </div>
             <p class="settings-hint">After this many qualifying dabs, the status card shows "Cleaning" instead of the next count, reminding you to run a burn-off cycle. Only dabs longer than 5 seconds count, and cleaning cycles themselves never count.</p>
           </div>
@@ -919,9 +912,9 @@
               <span id="heat-live-meta">Waiting for device</span>
             </div>
           </div>
-          <div class="draw-strength-panel" id="draw-strength-panel" role="progressbar" aria-label="Dynamic inhale draw strength" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Disconnected" style="--draw-strength: 0;">
+          <div class="draw-strength-panel" id="draw-strength-panel" role="progressbar" aria-label="Draw strength" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Disconnected" style="--draw-strength: 0;">
             <div class="draw-strength-head">
-              <span>Dynamic Inhale</span>
+              <span>Draw Strength</span>
               <div class="draw-strength-head-meta">
                 <span class="draw-strength-readout" id="draw-strength-readout" aria-hidden="true">—</span>
                 <strong id="draw-strength-label">Idle</strong>
@@ -931,13 +924,6 @@
               <div class="draw-strength-fill" id="draw-strength-fill"></div>
               <div class="draw-strength-peak" id="draw-strength-peak" aria-hidden="true"></div>
               <div class="draw-strength-threshold" aria-hidden="true"></div>
-            </div>
-            <div class="draw-strength-source" id="draw-strength-source">Path search pending</div>
-            <div class="draw-strength-diagnostic hidden" id="draw-strength-diagnostic" aria-live="polite"></div>
-            <div class="draw-strength-actions">
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-draw-rescan" aria-label="Rescan dynamic inhale path" onclick="app.rescanDrawStrength()">Rescan</button>
-              <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-draw-clear-source" aria-label="Clear pinned dynamic inhale source" onclick="app.clearDrawStrengthSource()">Clear pinned</button>
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-draw-redetect" aria-label="Force redetect dynamic inhale encoding" title="Clear the cached encoding and re-probe the dynamic inhale path with all known encodings (float32, uint8, int8, uint32)" onclick="app.redetectDynamicInhale()">Force redetect</button>
             </div>
           </div>
           <div class="session-metrics" id="session-metrics">
@@ -1802,7 +1788,6 @@
 
           <div class="lorax-quick-actions" id="lorax-quick-actions">
             <span class="lorax-quick-actions-label">Quick tests</span>
-            <button class="btn btn-sm btn-secondary" onclick="app.testDynamicInhalePath()">Test dynamic inhale</button>
             <button class="btn btn-sm btn-secondary" onclick="app.testHeaterSensorPaths()">Test heater sensors</button>
             <button class="btn btn-sm btn-secondary btn-lorax-test-copy hidden" id="btn-lorax-test-copy" disabled
                     aria-label="Copy the latest path test results to the clipboard"
@@ -2214,3 +2199,4 @@
   </script>
 </body>
 </html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 

@@ -1,6 +1,5 @@
 /**
  * Puffco BLE Web Controller — Frontend Application
- * 
  * Manages WebSocket communication, UI state, color controls,
  * profile cards, and real-time device status updates.
  */
@@ -3517,17 +3516,6 @@ const app = (() => {
     // rAF tick can skip the DOM write when the value hasn't changed.
     lastReadoutPct: null,
   };
-  // Airflow-detection polish: when the panel has been stuck in the
-  // "no source" state for this long, fire a single-shot toast so
-  // the silence doesn't look like the bar is just slow. Reset on
-  // any successful read, on a manual rescan, or on disconnect.
-  const DRAW_NOT_FOUND_TOAST_MS = 5_000;
-  const drawNotFoundState = {
-    since: 0,           // Date.now() when we first entered not_found this run
-    fired: false,       // whether the toast has already fired
-    lastHeat: null,     // last data.heat value we saw (for transition detection)
-  };
-
   function tickDrawStrengthBar(nowMs) {
     const panel = document.getElementById('draw-strength-panel');
     if (!panel) {
@@ -3607,9 +3595,7 @@ const app = (() => {
   function updateDrawStrengthUI(data) {
     const panel = document.getElementById('draw-strength-panel');
     const label = document.getElementById('draw-strength-label');
-    const source = document.getElementById('draw-strength-source');
-    const clearBtn = document.getElementById('btn-draw-clear-source');
-    if (!panel || !label || !source) return;
+    if (!panel || !label) return;
     // Readouts are normalized to the device's learned max draw (100 =
     // your hardest pull) and allow up to DAB_UI_AIRFLOW_MAX overshoot;
     // the bar itself stays visually capped at 100.
@@ -3645,9 +3631,6 @@ const app = (() => {
       startDrawBarLoop();
     }
     panel.classList.toggle('active', active);
-    panel.classList.toggle('found', Boolean(data?.draw_strength_source));
-    const mapping = data?.draw_strength_source_mapping;
-    panel.classList.toggle('pinned', Boolean(mapping && mapping.path));
     // Round 2: surface a "heating" state on the draw panel when the
     // sensor is firing while the chamber is heating, so the panel
     // visually agrees with .heat-live-panel.timer-running.
@@ -3690,121 +3673,6 @@ const app = (() => {
       panel.setAttribute('aria-valuetext', 'Disconnected');
       panel.setAttribute('aria-valuenow', '0');
     }
-    const mode = dynamicInhale
-      ? 'dynamic inhale'
-      : data?.draw_strength_mode;
-    if (data?.draw_strength_source) {
-      const pinnedTag = mapping?.path && mapping.path === data.draw_strength_source ? ' · pinned' : '';
-      const rawTag = dynamicInhale && Number.isFinite(Number(data.draw_strength_raw_percent))
-        ? ` · raw ${Math.round(Number(data.draw_strength_raw_percent))}%`
-        : '';
-      const baselineTag = dynamicInhale && Number.isFinite(Number(data.draw_strength_baseline_percent))
-        ? ` · idle ${Math.round(Number(data.draw_strength_baseline_percent))}%`
-        : '';
-      const encodingTag = data.draw_strength_encoding
-        ? ` · ${data.draw_strength_encoding}`
-        : '';
-      const errorTag = data.draw_strength_read_error
-        ? ` · read error: ${data.draw_strength_read_error}`
-        : '';
-      source.textContent = `${mode || 'direct'} · ${data.draw_strength_source}${encodingTag}${errorTag}${rawTag}${baselineTag}${pinnedTag}`;
-    } else if (!data?.connected) {
-      source.textContent = 'Connect to scan for an inhale sensor';
-    } else if (data.heat === 'HEATING') {
-      source.textContent = 'Scanning direct inhale paths during heat';
-    } else {
-      source.textContent = 'Scanning direct inhale paths';
-    }
-    // Airflow-detection polish: the diagnostic sub-line lives under
-    // the source label and only shows up when the scan envelope
-    // tells us something interesting. Three states:
-    //   - source found       -> hidden
-    //   - source not found   -> "scanned N paths, K responded · last error: ..."
-    //   - still scanning     -> hidden (the source label already says
-    //                            "Scanning direct inhale paths")
-    const diagnostic = document.getElementById('draw-strength-diagnostic');
-    if (diagnostic) {
-      const scan = data?.draw_strength_scan_diagnostics;
-      const haveSource = Boolean(data?.draw_strength_source);
-      const heating = data?.heat === 'HEATING';
-      if (!haveSource && data?.connected && scan) {
-        const tried = scan.tried_count || 0;
-        const ok = scan.tried_ok || 0;
-        const skipped = (scan.skipped_paths || []).length;
-        const scanned = Math.round(scan.scanned_ms || 0);
-        const lastErr = scan.last_error || data.draw_strength_read_error || null;
-        const parts = [];
-        if (tried > 0) {
-          parts.push(`scanned ${tried} path${tried === 1 ? '' : 's'}, ${ok} responded`);
-        } else {
-          parts.push('no candidate paths');
-        }
-        if (skipped > 0) parts.push(`${skipped} in cooldown`);
-        if (scanned > 0) parts.push(`${scanned} ms`);
-        if (lastErr && !heating) parts.push(`last error: ${lastErr}`);
-        diagnostic.textContent = parts.join(' · ');
-        diagnostic.classList.remove('hidden');
-        diagnostic.classList.toggle('has-error', Boolean(lastErr));
-      } else {
-        diagnostic.textContent = '';
-        diagnostic.classList.add('hidden');
-        diagnostic.classList.remove('has-error');
-      }
-    }
-    // Panel states. .scanning = we have a connection but no source
-    // yet, the bar is alive and the chip should keep pulsing (the
-    // CSS reads this class). .unavailable = we've been stuck without
-    // a source for a meaningful stretch — render the muted/warning
-    // treatment. These are mutually exclusive: scanning wins during
-    // the first few seconds, unavailable kicks in if we never find
-    // anything.
-    const isScanning = Boolean(data?.connected) && !data?.draw_strength_source;
-    const isUnavailable = isScanning && (data?.draw_strength_scan_diagnostics?.tried_count || 0) > 0;
-    panel.classList.toggle('scanning', isScanning);
-    panel.classList.toggle('unavailable', isUnavailable);
-    if (clearBtn) {
-      clearBtn.classList.toggle('hidden', !(mapping && mapping.path));
-    }
-
-    // Airflow-detection polish: single-shot toast + heat-entry rescan.
-    // We track how long the panel has been in not_found; after
-    // DRAW_NOT_FOUND_TOAST_MS, a single toast fires explaining what
-    // we tried and pointing at the Rescan button. The toast is reset
-    // by any successful read, by a manual rescan, or by disconnect.
-    if (data?.connected) {
-      if (isScanning) {
-        if (!drawNotFoundState.since) drawNotFoundState.since = Date.now();
-        if (!drawNotFoundState.fired
-            && (Date.now() - drawNotFoundState.since) >= DRAW_NOT_FOUND_TOAST_MS) {
-          drawNotFoundState.fired = true;
-          const tried = data?.draw_strength_scan_diagnostics?.tried_count || 0;
-          const summary = tried > 0
-            ? `No airflow path responded on this device (tried ${tried}).`
-            : 'No airflow path responded on this device.';
-          toast(`${summary} Try Rescan while inhaling.`, 'warn');
-        }
-      } else {
-        // Found a source — reset the timer / fired flag.
-        drawNotFoundState.since = 0;
-        drawNotFoundState.fired = false;
-      }
-      // Heat-entry transition: if we just entered HEATING and still
-      // have no source, fire a redetect so a firmware that only
-      // exposes airflow during heat gets another chance to wake up.
-      const wasHeat = drawNotFoundState.lastHeat;
-      const nowHeat = data.heat;
-      if (wasHeat !== 'HEATING' && nowHeat === 'HEATING' && isScanning) {
-        try { send('draw_strength_redetect'); } catch (_) { /* ignore */ }
-      }
-      drawNotFoundState.lastHeat = nowHeat;
-    } else {
-      // Disconnected — wipe the not-found timer so a fresh connect
-      // doesn't fire a stale toast.
-      drawNotFoundState.since = 0;
-      drawNotFoundState.fired = false;
-      drawNotFoundState.lastHeat = null;
-    }
-
     // Round 2: bump the per-session draw counter when a draw starts.
     // Trigger on the inactive->active transition while connected,
     // regardless of whether the device is currently heating (the
@@ -3818,77 +3686,6 @@ const app = (() => {
     // heating states.
     try { updateDrawSensorChip(data); } catch (_) { /* ignore */ }
     try { updateDrawSensorRing(data); } catch (_) { /* ignore */ }
-  }
-
-  function rescanDrawStrength() {
-    if (!connected) {
-      toast('Connect to the device before rescanning dynamic inhale', 'error');
-      return;
-    }
-    const button = document.getElementById('btn-draw-rescan');
-    if (button) {
-      button.disabled = true;
-      button.textContent = 'Scanning…';
-    }
-    // Airflow-detection polish: a manual rescan is the user's
-    // "I just changed something" signal — reset the not-found
-    // toast latch so a fresh round of probing can fire a new
-    // toast if it still can't find an airflow path.
-    drawNotFoundState.since = 0;
-    drawNotFoundState.fired = false;
-    toast('Inhale during the next ~6 s so dynamic inhale can be confirmed', 'info');
-    const sent = send('draw_strength_observe', {
-      samples: 4,
-      interval: 1.5,
-      promote: true,
-    });
-    if (!sent && button) {
-      button.disabled = false;
-      button.textContent = 'Rescan';
-    }
-    // The button gets re-enabled on the next status update / observation reply,
-    // but in case the server never responds we re-enable it after 10 s.
-    setTimeout(() => {
-      if (!button) return;
-      button.disabled = false;
-      button.textContent = 'Rescan';
-    }, 10_000);
-  }
-
-  function clearDrawStrengthSource() {
-    if (!connected) {
-      toast('Connect to the device before clearing the inhale pin', 'error');
-      return;
-    }
-    send('draw_strength_source', { clear: true });
-  }
-
-  // Clear the cached dynamic-inhale encoding and re-probe the path
-  // with every known encoding (float32, uint8, int8, uint32). Useful
-  // when the bar is stuck on a wrong encoding, or when the firmware
-  // was updated and a different read method is now correct.
-  function redetectDynamicInhale() {
-    if (!connected) {
-      toast('Connect to a Puffco before re-detecting the dynamic inhale path', 'error');
-      return;
-    }
-    const btn = document.getElementById('btn-draw-redetect');
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = 'Probing…';
-    }
-    toast('Re-probing /p/app/htr/inh with all encodings', 'info');
-    const sent = send('draw_strength_redetect');
-    if (!sent && btn) {
-      btn.disabled = false;
-      btn.textContent = 'Force redetect';
-    }
-    // Re-enable the button in case the response never comes.
-    setTimeout(() => {
-      if (!btn) return;
-      btn.disabled = false;
-      btn.textContent = 'Force redetect';
-    }, 6_000);
   }
 
   function updateTelemetryFields(data) {
@@ -7466,21 +7263,12 @@ const app = (() => {
     requestLoraxRegistry(true);
   }
 
-  // ---- Dynamic inhale + heater sensor path probes ----
+  // ---- Heater sensor path probes ----
   //
-  // These quick-action helpers let you verify a Lorax path is actually
+  // Quick-action helper that verifies these Lorax paths are actually
   // reachable on the connected device, not just present in the
-  // registry. The dynamic inhale path (/p/app/htr/inh) is in the
-  // OFFICIAL spec but the firmware may not respond on every Puffco
-  // model — the test prints what came back so the user can see
-  // whether their hardware exposes it.
-  const DYNAMIC_INHALE_TEST_PATHS = [
-    { path: '/p/app/htr/inh',  name: 'dynamic_inhale',         encoding: 'float32', category: 'heater' },
-    { path: '/p/app/htr/draw', name: 'draw_strength',          encoding: 'float32', category: 'heater' },
-    { path: '/p/app/htr/air',  name: 'heater_airflow',         encoding: 'float32', category: 'heater' },
-    { path: '/p/htr/air',      name: 'raw_airflow',            encoding: 'float32', category: 'heater' },
-    { path: '/p/htr/flow',     name: 'raw_flow',               encoding: 'float32', category: 'heater' },
-  ];
+  // registry — prints what came back so the user can see whether
+  // their hardware exposes each sensor.
   const HEATER_SENSOR_TEST_PATHS = [
     { path: '/p/htr/pwr',  name: 'heater_power',        encoding: 'float32' },
     { path: '/p/htr/res',  name: 'heater_resistance',   encoding: 'float32' },
@@ -7683,10 +7471,6 @@ const app = (() => {
     client.clearDrawStrengthPin();
     toast('Cleared inhale-sensor pin. Next snapshot will re-detect.', 'info');
     appendLog('draw-strength pin cleared by user', 'info');
-  }
-
-  function testDynamicInhalePath() {
-    runLoraxPathTests(DYNAMIC_INHALE_TEST_PATHS, 'dynamic inhale / airflow paths');
   }
 
   function testHeaterSensorPaths() {
@@ -8137,8 +7921,8 @@ const app = (() => {
 
   function handleLoraxRead(data) {
     if (!data) return;
-    // Quick-action path tests (testDynamicInhalePath, testHeaterSensorPaths)
-    // register a one-shot listener before sending the read. If a test
+    // Quick-action path tests (testHeaterSensorPaths) register a
+    // one-shot listener before sending the read. If a test
     // claimed this response, skip the global handler.
     if (typeof consumeLoraxTestResponse === 'function' && consumeLoraxTestResponse(data)) {
       return;
@@ -11386,9 +11170,6 @@ const app = (() => {
     resyncDevice,
     scanDevices,
     refreshStatus,
-    rescanDrawStrength,
-    clearDrawStrengthSource,
-    redetectDynamicInhale,
     resetCardOrder,
     dismissSortGuide,
     showSortGuide,
@@ -11522,12 +11303,8 @@ const app = (() => {
     getBrowserBle,
     _filterPuffcoScanDevices: filterPuffcoScanDevices,
     _matchesPuffcoManufacturerPrefix: matchesPuffcoManufacturerPrefix,
-    // Quick-action path tests for the Lorax inspector. The user can
-    // hit "Test dynamic inhale" to verify /p/app/htr/inh and the
-    // related airflow paths are reachable on their hardware, since
-    // the OFFICIAL spec lists them but the firmware may not respond
-    // on every Puffco model.
-    testDynamicInhalePath,
+    // Quick-action path test for the Lorax inspector — verifies
+    // heater sensor paths are reachable on the connected hardware.
     testHeaterSensorPaths,
     runLoraxPathTests,
     consumeLoraxTestResponse,

@@ -381,7 +381,6 @@ h3 { font-size: 1rem; font-weight: 600; }
 .heat-status-heading .heat-indicator,
 .capability-hint,
 .session-debug-strip span,
-.draw-strength-source,
 .charge-pill,
 .profile-sync-badge,
 .swatch.active,
@@ -3437,90 +3436,8 @@ input[type="range"]::-moz-range-thumb:hover {
 
 
 
-.draw-strength-source {
-  margin-top: 7px;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-
-/* Airflow-detection polish: a sub-line under the source label that
-   reports what the last scan actually did — paths tried, paths
-   skipped in cooldown, scan duration, and the most recent read
-   error. Hidden by default; the JS toggles it on only when there's
-   something useful to show. The "has-error" variant tints the line
-   amber so the user immediately sees that the silence isn't
-   "still loading" but "we tried and the device didn't respond". */
-.draw-strength-diagnostic {
-  margin-top: 4px;
-  color: var(--text-muted);
-  font-size: 0.66rem;
-  font-weight: 600;
-  font-style: italic;
-  letter-spacing: 0.01em;
-  opacity: 0.85;
-  overflow-wrap: anywhere;
-  transition: color 180ms ease, opacity 180ms ease;
-}
-
-.draw-strength-diagnostic.has-error {
-  color: #f6a623;
-  opacity: 1;
-  font-style: normal;
-}
-
-.draw-strength-diagnostic.hidden {
-  display: none;
-}
-
-/* .scanning = we have a connection but no airflow source yet, the
-   bar is alive and the panel border pulses to signal "we're
-   working on it". The pulse is gentle so it doesn't fight the
-   bar's own activity animation. The animation is dropped by the
-   global prefers-reduced-motion override. */
-@keyframes draw-strength-scanning-pulse {
-  0%, 100% { border-color: var(--border-glass); }
-  50%      { border-color: rgba(0, 214, 180, 0.45); }
-}
-
-.draw-strength-panel.scanning {
-  animation: draw-strength-scanning-pulse 1.6s ease-in-out infinite;
-}
-
-/* .unavailable = we tried, nothing on the device responded, and
-   the silence has lasted long enough that the user deserves a
-   distinct visual treatment. Muted amber border, desaturated
-   background, and a small caret to suggest "open me for the
-   diagnostic sub-line". Tells the user at a glance: this is not
-   a slow connection, the device just doesn't expose a path. */
-.draw-strength-panel.unavailable {
-  border-color: rgba(246, 166, 35, 0.45);
-  background: rgba(246, 166, 35, 0.06);
-  box-shadow: 0 0 16px rgba(246, 166, 35, 0.10);
-}
-
-.draw-strength-panel.unavailable .draw-strength-source {
-  color: #f6a623;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .draw-strength-panel.scanning { animation: none; }
-}
-
-.draw-strength-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-  flex-wrap: wrap;
-}
-
-.draw-strength-actions .btn {
-  flex: 0 0 auto;
-}
-
-/* Narrow viewport: stack the head, shrink the readout, and let the
-   action buttons take a full row so nothing overflows on phones. */
+/* Narrow viewport: stack the head and shrink the readout so nothing
+   overflows on phones. */
 @media (max-width: 520px) {
   .draw-strength-head {
     flex-wrap: wrap;
@@ -3540,9 +3457,25 @@ input[type="range"]::-moz-range-thumb:hover {
   .draw-strength-track {
     height: 12px;
   }
-  .draw-strength-actions .btn {
-    flex: 1 1 auto;
-    min-width: 0;
+}
+
+/* Smallest phones (iPhone SE/mini, small Android, ~360-380px wide).
+   The 500/520/600px rules above already tighten outer padding and
+   card padding; this just shrinks a couple of remaining oversized
+   numerals and button labels so nothing wraps or crowds the edges.
+   Additive only — no layout restructuring. */
+@media (max-width: 380px) {
+  #heat-countdown {
+    font-size: 1.8rem;
+  }
+  .draw-strength-readout {
+    font-size: 1.2rem;
+  }
+  .heat-controls .btn,
+  .boost-options .btn {
+    font-size: 0.85rem;
+    padding-left: 8px;
+    padding-right: 8px;
   }
 }
 
@@ -6946,6 +6879,22 @@ body.is-customizing .app-container::before {
   border-color: var(--reorder-accent);
 }
 
+/* The floating clone Sortable creates while a whole card/panel is being
+   dragged. Mirrors the item-level "lift" treatment above (accent halo +
+   drop shadow + slight scale-up) so dragging a card feels like picking
+   up a real object, matching macOS's Stage Manager / Mission Control
+   drag affordance. */
+.is-customizing .card.sortable-drag,
+.is-customizing .advanced-panel.sortable-drag {
+  cursor: grabbing;
+  box-shadow: 0 0 0 2px var(--reorder-accent), 0 18px 48px rgba(0, 0, 0, 0.4);
+  transform: scale(1.015);
+}
+.is-customizing .card.sortable-chosen,
+.is-customizing .advanced-panel.sortable-chosen {
+  cursor: grabbing;
+}
+
 /* Customize toolbar (the floating "Done" pill). Slides in from the top
    the first time the user enters the mode and stays sticky. */
 .customize-bar {
@@ -7252,6 +7201,48 @@ body.is-customizing .sort-guide { display: none; }
   font-size: 0.7rem;
   color: var(--text-muted);
   margin-left: 6px;
+}
+
+/* Range-input scale labels (min / live value / max), shared across
+   every slider in the settings panel so the three-number row reads
+   consistently. */
+.settings-range {
+  width: 100%;
+}
+.settings-range-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.settings-range-scale span:nth-child(2) {
+  font-weight: 700;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Inline row: a label/value pair with an action button, e.g.
+   "90 raw = 100%  [Re-learn]". */
+.settings-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.settings-inline-value {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.settings-inline-row .settings-inline-value:first-child {
+  flex: 1;
+}
+.settings-inline-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.settings-number-input {
+  width: 96px;
 }
 .settings-input {
   width: 100%;
@@ -8362,3 +8353,4 @@ body.is-customizing [data-card-item-list] > [data-item-id] {
   border-radius: 8px;
   padding: 18px 14px;
 }
+                                                                                                                                                                                                                                                                                                                                                                                                                                            
