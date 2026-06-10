@@ -291,10 +291,6 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100%;
-  /* overflow: hidden prevents iOS rubber-band / bounce scroll which can
-     destabilise fixed-element hit-testing on iOS Safari. The app uses
-     position:fixed panels and cards so it doesn't need document scroll. */
-  overflow: hidden;
 }
 
 body {
