@@ -751,6 +751,8 @@ const app = (() => {
         connected = false;
         connectPending = false;
         deviceState = null;
+        updateProfilesUI([], null);
+        renderProfileLibrary();
         // A bridge drop in the middle of a save/reload/select leaves
         // every in-flight UI flag in limbo: the modal would sit on
         // "Saving…" forever, the profile-reload spinner would never
@@ -917,6 +919,8 @@ const app = (() => {
           deviceState = null;
           updateConnectionUI(false);
           updateStatusUI(null);
+          updateProfilesUI([], null);
+          renderProfileLibrary();
           renderBackendMirror();
           toast(msg.message || 'Disconnected from device', 'info');
           appendLog(msg.message || 'Disconnected from device', 'info');
@@ -2869,7 +2873,7 @@ const app = (() => {
 
   function saveDeviceProfileToLibrary(index) {
     const profile = findProfile(index);
-    if (!profile) return;
+    if (!profile) { toast('Profile not found', 'error'); return; }
     const stored = profileForStorage(profile, 'device');
     const validation = validateProfile(stored);
     if (!validation.ok) {
@@ -3728,7 +3732,7 @@ const app = (() => {
     editingProfileIndex = index;
     editingLocalProfileId = null;
     const profile = findProfile(index);
-    if (!profile) return;
+    if (!profile) { toast('Profile not found', 'error'); return; }
 
     document.getElementById('profile-modal')?.classList.remove('local-profile-edit');
     document.getElementById('modal-kicker').textContent = `Profile ${index}`;
@@ -4429,7 +4433,8 @@ const app = (() => {
   }
 
   function selectProfile(index) {
-    if (!connected || optimisticProfileIndex === Number(index)) return false;
+    if (!connected) { toast('Connect to a device first', 'warn'); return false; }
+    if (optimisticProfileIndex === Number(index)) return false;
     optimisticProfileIndex = Number(index);
     updateOptimisticProfile(index);
     if (!send('select_profile', { index })) {
@@ -5206,6 +5211,10 @@ const app = (() => {
         dateOfBirth: 'date_of_birth_unix',
         utcTime: 'utc_time_unix',
         dabTotalTime: 'dab_total_time_s',
+        stateTotalTime: 'state_total_time_s',
+        stateElapsedTime: 'state_elapsed_time_s',
+        selectedHeatCycle: 'current_profile',
+        chamberType: 'chamber',
       };
       Object.entries(map).forEach(([src, dst]) => {
         if (payload[dst] == null && official[src] != null) payload[dst] = official[src];

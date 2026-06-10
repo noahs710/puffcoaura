@@ -1,1 +1,0 @@
-{"function": "() => { try { if (window.app && typeof window.app.init === 'function') { window.app.init(); return 'init called'; } return 'no init'; } catch (e) { return 'init error: ' + e.message + '\\n' + e.stack; } }"}
