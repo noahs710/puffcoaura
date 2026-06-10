@@ -291,6 +291,10 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100%;
+  /* overflow: hidden prevents iOS rubber-band / bounce scroll which can
+     destabilise fixed-element hit-testing on iOS Safari. The app uses
+     position:fixed panels and cards so it doesn't need document scroll. */
+  overflow: hidden;
 }
 
 body {
@@ -316,7 +320,10 @@ body {
     radial-gradient(ellipse 50% 45% at 95% 95%, var(--halo-4), transparent 70%),
     radial-gradient(ellipse 45% 40% at 12% 88%, var(--halo-3), transparent 70%),
     linear-gradient(180deg, var(--bg-deep) 0%, var(--bg-mid) 100%);
-  background-attachment: fixed;
+  /* background-attachment: fixed is omitted — iOS Safari misroutes touch
+     events on fixed/sticky children when the body uses fixed attachment,
+     silently breaking tap targets across the whole page. The gradients
+     are purely decorative so the change is visually harmless. */
 }
 
 body:not(.advanced-user) [data-advanced-only] {
@@ -1544,6 +1551,10 @@ select:-webkit-autofill {
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
   transition: transform var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast), opacity var(--transition-fast), filter var(--transition-fast);
   white-space: nowrap;
   position: relative;
@@ -2848,6 +2859,10 @@ input[type="color"]::-webkit-color-swatch {
   background: rgba(255,255,255,0.055);
   color: var(--text-secondary);
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
   transition: var(--transition-fast);
 }
 
@@ -7750,6 +7765,12 @@ body.is-customizing .status-item:active {
   align-items: stretch;
   justify-content: flex-end;
   pointer-events: none;
+  visibility: hidden;
+  /* visibility:hidden is critical on iOS — iOS Safari has historically
+     routed touch events to fixed elements even when pointer-events:none,
+     and visibility is the only sure way to exclude an element from the
+     hit-test tree. display:none also excludes from hit-testing but the
+     .modal-backdrop rule (line 4407) already handles that. */
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -7760,15 +7781,22 @@ body.is-customizing .status-item:active {
 
 #dab-panel.visible {
   pointer-events: auto;
+  visibility: visible;
+  display: flex;
 }
 
 #dab-panel .modal.profile-editor-sheet {
   pointer-events: auto;
+  touch-action: manipulation;
   width: 100%;
   max-width: 100%;
   max-height: 100%;
   margin: 0;
+  /* Safe-area padding so the panel doesn't sit under the iOS home
+     indicator. env() falls back to 0 on non-notched devices. */
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   background:
     linear-gradient(160deg, rgba(0, 214, 180, 0.07), transparent 60%),
     rgba(20, 22, 32, 0.74);
@@ -8353,4 +8381,3 @@ body.is-customizing [data-card-item-list] > [data-item-id] {
   border-radius: 8px;
   padding: 18px 14px;
 }
-                                                                                                                                                                                                                                                                                                                                                                                                                                            
