@@ -730,43 +730,38 @@ body.device-disconnected .connected-only-nav {
   /* Hide desktop app-container on mobile — it takes over the layout */
   .app-container { display: none !important; }
 
-  /* .app-views: full-screen Swiper container, fixed behind the tab bar.
-     IMPORTANT: do NOT set display:flex here — Swiper v11 inserts a .swiper
-     wrapper element between .app-views and .swiper-wrapper, and the flex
-     display on .app-views interferes with Swiper's element detection,
-     causing getComputedStyle errors on init. Swiper manages its own layout. */
+  /* .app-views: horizontal scroll-snap container, fixed behind the tab bar.
+     Native CSS scroll-snap gives us smooth swipe gestures without Swiper.js. */
   .app-views {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: calc(60px + env(safe-area-inset-bottom, 0px));
     z-index: 100;
-    overflow: hidden;
-    /* Explicit height so Swiper can measure the container.
-       100vh minus tab bar (~60px) minus bottom safe area. */
-    height: calc(100vh - 60px - env(safe-area-inset-bottom, 0px));
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    /* Hide scrollbar but keep functionality */
+    scrollbar-width: none;  /* Firefox */
+    -ms-overflow-style: none;
+    /* Native scroll-snap: each view snaps to full viewport width */
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
   }
+  .app-views::-webkit-scrollbar { display: none; }
 
-  /* .swiper (Swiper wrapper) and .swiper-wrapper take full height of app-views.
-     Selector is intentionally loose — Swiper inserts .swiper between app-views
-     and .swiper-wrapper in the DOM. */
-  .app-views .swiper,
-  .app-views .swiper-wrapper {
-    height: 100%;
-  }
-
-  /* Each slide fills the full viewport minus the tab bar.
-     Swiper controls width; we control height. */
+  /* Each view fills the full viewport width (snaps to exactly one view) */
   .mobile-view {
+    flex: 0 0 100vw;
     height: 100%;
-    width: 100% !important;
-    flex-shrink: 0;
     overflow: hidden;
     background: transparent;
-    padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px));
-    box-sizing: border-box;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
   }
 
-  /* Mobile header: pinned to top of each slide, always visible.
-     Not sticky — slides don't scroll. */
+  /* Mobile header: pinned to top of each view, always visible. */
   .mobile-swipe-header {
     position: relative;
     top: 0;

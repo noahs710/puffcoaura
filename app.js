@@ -9604,27 +9604,25 @@ const app = (() => {
       openSettingsPanel();
       return;
     }
-    // On mobile: use Swiper if available
-    if (mobileSwiper && typeof mobileSwiper.slideTo === 'function') {
-      const viewOrder = ['connect', 'status', 'profiles', 'controls'];
-      const idx = viewOrder.indexOf(viewName);
-      if (idx >= 0) {
-        mobileSwiper.slideTo(idx, 250);
-      }
-      updateActiveTab(viewName);
-      return;
-    }
-    // Desktop fallback: scroll the card into view
-    const cardMap = {
-      connect:  'connect-card',
-      status:   'status-card',
-      profiles: 'profiles-card',
-      controls: 'controls-grid',
-    };
-    const id = cardMap[viewName];
-    const targetEl = id ? document.getElementById(id) : null;
-    if (targetEl) {
-      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const viewOrder = ['connect', 'status', 'profiles', 'controls'];
+    const idx = viewOrder.indexOf(viewName);
+    if (idx < 0) return;
+
+    const viewsEl = document.getElementById('app-views');
+    if (viewsEl) {
+      // Mobile: use native horizontal scroll
+      viewsEl.scrollTo({ left: window.innerWidth * idx, behavior: 'smooth' });
+    } else {
+      // Desktop fallback: scroll the card into view
+      const cardMap = {
+        connect:  'connect-card',
+        status:   'status-card',
+        profiles: 'profiles-card',
+        controls: 'controls-grid',
+      };
+      const id = cardMap[viewName];
+      const targetEl = id ? document.getElementById(id) : null;
+      if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     updateActiveTab(viewName);
   }
@@ -9655,30 +9653,19 @@ const app = (() => {
     move('brightness-card','mobile-view-controls');
     move('power-card',     'mobile-view-controls');
 
-    if (typeof Swiper === 'undefined') {
-      // Swiper.js not loaded — fall back to native horizontal scroll
-      viewsEl.style.overflowX = 'auto';
-      viewsEl.style.scrollSnapType = 'x mandatory';
-      return;
-    }
-    mobileSwiper = new Swiper(viewsEl, {
-      loop: false,
-      speed: 250,
-      resistanceRatio: 0.85,
-      shortSwipes: true,
-      longSwipesRatio: 0.2,
-      followFinger: true,
-      passiveListeners: true,
-      observer: true,
-      observeParents: true,
-      on: {
-        slideChange(sw) {
-          const names = ['connect', 'status', 'profiles', 'controls'];
-          const name = names[sw.activeIndex];
-          if (name) updateActiveTab(name);
-        },
-      },
-    });
+    // Use native CSS scroll-snap for swipe navigation (no Swiper.js needed).
+    // Cards are already moved by initMobileContent() above.
+    // Listen for scroll end to update the active tab.
+    let scrollTimeout = null;
+    viewsEl.addEventListener('scroll', () => {
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        const idx = Math.round(viewsEl.scrollLeft / window.innerWidth);
+        const names = ['connect', 'status', 'profiles', 'controls'];
+        const name = names[idx];
+        if (name) updateActiveTab(name);
+      }, 80);
+    }, { passive: true });
   }
 
 
