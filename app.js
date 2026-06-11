@@ -2931,6 +2931,11 @@ const app = (() => {
     if (isConnected) {
       if (badge) badge.classList.add('connected');
       if (text) text.textContent = deviceState?.name || 'Connected';
+      // Sync mobile header badge
+      const mobileBadge = document.getElementById('mobile-connection-badge');
+      const mobileText = document.getElementById('mobile-connection-text');
+      if (mobileBadge) mobileBadge.classList.add('connected');
+      if (mobileText) mobileText.textContent = deviceState?.name || 'Connected';
       if (btnConnect) {
         btnConnect.classList.add('hidden');
         btnConnect.innerHTML = 'Connect';
@@ -2958,6 +2963,10 @@ const app = (() => {
       scanPending = false;
       if (badge) badge.classList.remove('connected');
       if (text) text.textContent = 'Disconnected';
+      const mobileBadge = document.getElementById('mobile-connection-badge');
+      const mobileText = document.getElementById('mobile-connection-text');
+      if (mobileBadge) mobileBadge.classList.remove('connected');
+      if (mobileText) mobileText.textContent = 'Disconnected';
       if (btnConnect) {
         btnConnect.classList.remove('hidden');
         btnConnect.innerHTML = 'Connect';
@@ -9547,10 +9556,37 @@ const app = (() => {
   }
 
   // ============================================================
-  // Mobile view switching (bottom tab bar + vertical scroll)
-  // No Swiper, no JS DOM moves. Tab buttons call switchToView which
-  // scrolls the card into view and updates the active tab state.
+  // Mobile view switching (Swiper.js + bottom tab bar)
+  // Swiper instance is null on desktop or if Swiper isn't available.
   // ============================================================
+  let mobileSwiper = null;
+
+  // Move desktop card elements into their respective mobile swipe view containers.
+  // Each mobile view already has its placeholder div in the HTML (empty).
+  // This function moves the real card DOM nodes so the same elements appear
+  // in both the desktop layout (visible on 701px+) and the mobile layout
+  // (visible on ≤700px — but only one set is ever shown at a time).
+  // Cards are moved ONCE at boot; subsequent changes (profile edits, state
+  // updates) are fine because the elements stay in the DOM with their IDs.
+  function initMobileContent() {
+    const destinations = [
+      { id: 'connect-card',     target: 'mobile-view-connect'   },
+      { id: 'status-card',      target: 'mobile-view-status'    },
+      { id: 'profiles-card',    target: 'mobile-view-profiles'  },
+      { id: 'controls-grid',    target: 'mobile-view-controls'  },
+      { id: 'brightness-card', target: 'mobile-view-controls'  },
+      { id: 'power-card',       target: 'mobile-view-controls'  },
+    ];
+    for (const { id, target } of destinations) {
+      const card = document.getElementById(id);
+      const container = document.getElementById(target);
+      if (!card || !container) continue;
+      // Skip if already inside the target (handles HMR / hot reload)
+      if (card.parentElement === container) continue;
+      container.appendChild(card);
+    }
+  }
+
   function updateActiveTab(viewName) {
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       const isActive = btn.getAttribute('data-view') === viewName;
@@ -9559,7 +9595,8 @@ const app = (() => {
     });
   }
 
-  // Called from tab bar buttons and exposed on window.app
+  // Expose on window so the debug overlay (if any) can call it.
+  // The real app uses app.switchToView from the tab bar onclick.
   window.appSwitchToView = switchToView;
 
   function switchToView(viewName) {
@@ -9567,7 +9604,17 @@ const app = (() => {
       openSettingsPanel();
       return;
     }
-    // Map view names to their card element IDs
+    // On mobile: use Swiper if available
+    if (mobileSwiper && typeof mobileSwiper.slideTo === 'function') {
+      const viewOrder = ['connect', 'status', 'profiles', 'controls'];
+      const idx = viewOrder.indexOf(viewName);
+      if (idx >= 0) {
+        mobileSwiper.slideTo(idx, 250);
+      }
+      updateActiveTab(viewName);
+      return;
+    }
+    // Desktop fallback: scroll the card into view
     const cardMap = {
       connect:  'connect-card',
       status:   'status-card',
@@ -9582,48 +9629,36 @@ const app = (() => {
     updateActiveTab(viewName);
   }
 
-  function updateActiveTab(viewName) {
-    document.querySelectorAll('.tab-btn').forEach((btn) => {
-      const isActive = btn.getAttribute('data-view') === viewName;
-      btn.classList.toggle('active', isActive);
-      btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
-    });
-  }
-
-  // Sync active tab as the user swipes between views
-  function setupViewScrollSync() {
+  // Sync active tab when the user swipes between views.
+  // Tab bar highlights the current slide automatically.
+  function initMobileSwiper() {
     const viewsEl = document.getElementById('app-views');
     if (!viewsEl) return;
-
-    let scrollTimeout = null;
-    viewsEl.addEventListener('scroll', () => {
-      clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => {
-        const views = document.querySelectorAll('.mobile-view');
-        const containerLeft = viewsEl.scrollLeft;
-        const containerWidth = viewsEl.clientWidth;
-        // Find which view is most visible
-        let activeView = null;
-        let maxVisible = 0;
-        views.forEach((view) => {
-          const viewLeft = view.offsetLeft;
-          const viewRight = viewLeft + view.clientWidth;
-          const visibleLeft = Math.max(containerLeft, viewLeft);
-          const visibleRight = Math.min(containerLeft + containerWidth, viewRight);
-          const visibleWidth = Math.max(0, visibleRight - visibleLeft);
-          if (visibleWidth > maxVisible) {
-            maxVisible = visibleWidth;
-            activeView = view;
-          }
-        });
-        if (activeView) {
-          const viewName = activeView.getAttribute('data-view');
-          updateActiveTab(viewName);
-        }
-      }, 80); // debounce
-    }, { passive: true });
+    if (typeof Swiper === 'undefined') {
+      // Swiper.js not loaded — fall back to native horizontal scroll
+      viewsEl.style.overflowX = 'auto';
+      viewsEl.style.scrollSnapType = 'x mandatory';
+      return;
+    }
+    mobileSwiper = new Swiper(viewsEl, {
+      loop: false,
+      speed: 250,
+      resistanceRatio: 0.85,
+      shortSwipes: true,
+      longSwipesRatio: 0.2,
+      followFinger: true,
+      passiveListeners: true,
+      observer: true,
+      observeParents: true,
+      on: {
+        slideChange(sw) {
+          const names = ['connect', 'status', 'profiles', 'controls'];
+          const name = names[sw.activeIndex];
+          if (name) updateActiveTab(name);
+        },
+      },
+    });
   }
-
 
 
   function openSettingsPanel() {
@@ -11219,7 +11254,11 @@ const app = (() => {
     // restores the saved customize-mode state. This is the entry
     // point for reordering both cards and items within cards.
     initCustomizeMode();
-    // Mobile: CSS handles scroll; JS handles tab active state via switchToView
+    // Mobile: move desktop cards into their respective mobile swipe views.
+    // Called before initMobileSwiper so Swiper initializes with content.
+    initMobileContent();
+    // Mobile: initialize Swiper.js full-screen swipeable views
+    initMobileSwiper();
     renderTimer = setInterval(() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
