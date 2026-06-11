@@ -3,11 +3,11 @@
 // CACHE_NAME bump forces old clients to drop stale cache and re-fetch.
 // APP_SHELL lists all assets with their exact version strings.
 
-const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-12';
+const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-13';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=16',
+  './style.css?v=17',
   './app.js?v=22',
   './swiper.min.js',
   './ble-client.js?v=15',

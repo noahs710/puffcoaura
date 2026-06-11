@@ -731,7 +731,10 @@ body.device-disconnected .connected-only-nav {
   .app-container { display: none !important; }
 
   /* .app-views: full-screen Swiper container, fixed behind the tab bar.
-     Swiper v11 applies its own sizing — we just set the stage. */
+     IMPORTANT: do NOT set display:flex here — Swiper v11 inserts a .swiper
+     wrapper element between .app-views and .swiper-wrapper, and the flex
+     display on .app-views interferes with Swiper's element detection,
+     causing getComputedStyle errors on init. Swiper manages its own layout. */
   .app-views {
     position: fixed;
     inset: 0;
@@ -740,18 +743,14 @@ body.device-disconnected .connected-only-nav {
     /* Explicit height so Swiper can measure the container.
        100vh minus tab bar (~60px) minus bottom safe area. */
     height: calc(100vh - 60px - env(safe-area-inset-bottom, 0px));
-    padding-bottom: 0;
-    /* Swiper needs a defined height — flex trick forces it. */
-    display: flex;
-    flex-direction: column;
   }
 
-  /* .swiper-wrapper inside app-views takes full height. */
+  /* .swiper (Swiper wrapper) and .swiper-wrapper take full height of app-views.
+     Selector is intentionally loose — Swiper inserts .swiper between app-views
+     and .swiper-wrapper in the DOM. */
+  .app-views .swiper,
   .app-views .swiper-wrapper {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: row;
+    height: 100%;
   }
 
   /* Each slide fills the full viewport minus the tab bar.
