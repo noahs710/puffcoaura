@@ -1,18 +1,18 @@
 // Puffco BLE Controller — GitHub Pages app shell cache
 // Keeps the static UI available and avoids stale assets by versioning the cache.
 
-const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-08';
+const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-09';
 // APP_SHELL keys must match the URLs the page actually requests. index.html
 // uses cache-buster query strings (?v=15 for all assets); pre-caching the
 // un-versioned paths leaves the runtime cache to
 // discover those assets the hard way, which fails on a cold offline start.
-// Swiper removed (v2026-06-10-08) — mobile uses .app-container with vertical
-// scroll + tab bar. Swiper JS and CSS no longer needed.
+// Swiper.js v11 added for full-screen mobile swipe views (v2026-06-10-09).
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=14',
-  './app.js?v=20',
+  './style.css?v=15',
+  './app.js?v=21',
+  './swiper.min.js',
   './ble-client.js?v=15',
   './Sortable.min.js?v=15',
   './manifest.json',
