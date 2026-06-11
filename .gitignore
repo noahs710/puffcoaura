@@ -30,3 +30,18 @@ package-lock.json
 .idea/
 *.swp
 *.swo
+
+# === Agent / Mavis artifacts ===
+.opencode/
+.mavis/plans/
+.trash_synctest_marker*.txt
+index.html.clean
+
+# === Smoke test / dev artifacts ===
+smoke-*.json
+smoke-*.js
+spawn.json
+test-*.json
+test-*.txt
+validate-structure.js
+tools/dab_scoring_smoke.js
