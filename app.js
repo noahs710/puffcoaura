@@ -9547,106 +9547,10 @@ const app = (() => {
   }
 
   // ============================================================
-  // Mobile view switching (horizontal swipe + bottom tab bar)
+  // Mobile view switching (bottom tab bar + vertical scroll)
+  // No Swiper, no JS DOM moves. Tab buttons call switchToView which
+  // scrolls the card into view and updates the active tab state.
   // ============================================================
-
-  // Maps tab data-view values to their corresponding mobile-view element IDs.
-  // Swiper instance — set once mobile is initialized
-  let _swiperInstance = null;
-
-  // Map view name → slide index in the swiper
-  const VIEW_INDEX_MAP = {
-    connect:   0,
-    status:    1,
-    profiles:  2,
-    controls:  3,
-  };
-
-  // Move card DOM from .app-container into .mobile-view swiper-slides on init.
-  // This gives mobile swipe views and desktop layout a single source of truth.
-  // Only runs on mobile (≤700px) — on desktop the cards stay in .app-container.
-  function initMobileSwipeViews() {
-    const isMobile = window.innerWidth <= 700;
-    console.log('[Mavis] initMobileSwipeViews — innerWidth:', window.innerWidth, '→ isMobile:', isMobile);
-    if (!isMobile) return; // desktop: keep cards in .app-container
-    console.log('[Mavis] Mobile: moving cards into swiper slides…');
-
-    // Hide desktop container, show swiper and tab bar
-    const appContainer = document.querySelector('.app-container');
-    const appViews     = document.getElementById('app-views');
-    const tabBar       = document.getElementById('app-tab-bar');
-    if (appContainer) appContainer.style.display = 'none';
-    if (appViews)     appViews.style.display      = 'block'; // Swiper takes over display
-    if (tabBar)       tabBar.style.display        = 'flex';
-
-    // Helper: move an element into a target container
-    const move = (id, targetId) => {
-      const el     = document.getElementById(id);
-      const target = document.getElementById(targetId);
-      if (el && target) {
-        target.appendChild(el);
-        console.log('[Mavis] Moved', id, '→', targetId);
-      } else {
-        console.warn('[Mavis] Missing', id, '?', !el, '/', targetId, '?', !target);
-      }
-    };
-
-    // Each slide gets its top-level card/section
-    move('connect-card',    'mobile-view-connect');
-    move('status-card',    'mobile-view-status');
-    move('profiles-card',  'mobile-view-profiles');
-    move('controls-grid',  'mobile-view-controls');
-    move('brightness-card','mobile-view-controls');
-    move('power-card',     'mobile-view-controls');
-    // voice-card is already inside controls-grid — no separate move needed
-
-    // Now initialize Swiper — slides exist in DOM so Swiper can measure them
-    initSwiper();
-  }
-
-  // Initialize Swiper once DOM structure is ready
-  function initSwiper() {
-    const el = document.getElementById('app-views');
-    if (!el || _swiperInstance) return;
-    if (typeof Swiper === 'undefined') {
-      console.warn('[Mavis] Swiper not loaded — retrying in 500ms');
-      setTimeout(initSwiper, 500);
-      return;
-    }
-
-    _swiperInstance = new Swiper(el, {
-      direction: 'horizontal',
-      loop: false,
-      speed: 280,
-      resistanceRatio: 0.85,
-      noSwipingClass: 'swiper-no-swiping',
-      on: {
-        slideChange(sw) {
-          const names = ['connect', 'status', 'profiles', 'controls'];
-          const name  = names[sw.activeIndex] || 'connect';
-          updateActiveTab(name);
-        },
-      },
-    });
-    console.log('[Mavis] Swiper initialized');
-  }
-
-  // Called from tab bar buttons (onclick in HTML) and exposed on window.app
-  window.appSwitchToView = switchToView;
-
-  function switchToView(viewName) {
-    if (viewName === 'settings') {
-      openSettingsPanel();
-      return;
-    }
-    const idx = VIEW_INDEX_MAP[viewName];
-    if (idx == null) return;
-    if (_swiperInstance) {
-      _swiperInstance.slideTo(idx, 280);
-    }
-    updateActiveTab(viewName);
-  }
-
   function updateActiveTab(viewName) {
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       const isActive = btn.getAttribute('data-view') === viewName;
@@ -9654,17 +9558,27 @@ const app = (() => {
       btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
     });
   }
-    const viewId = MOBILE_VIEW_MAP[viewName];
-    if (!viewId) return;
-    const viewsEl = document.getElementById('app-views');
-    const targetView = document.getElementById(viewId);
-    if (!viewsEl || !targetView) return;
 
-    // Scroll the views container so the target view snaps into view
-    const targetLeft = targetView.offsetLeft;
-    viewsEl.scrollTo({ left: targetLeft, top: 0, behavior: 'smooth' });
+  // Called from tab bar buttons and exposed on window.app
+  window.appSwitchToView = switchToView;
 
-    // Update active tab button
+  function switchToView(viewName) {
+    if (viewName === 'settings') {
+      openSettingsPanel();
+      return;
+    }
+    // Map view names to their card element IDs
+    const cardMap = {
+      connect:  'connect-card',
+      status:   'status-card',
+      profiles: 'profiles-card',
+      controls: 'controls-grid',
+    };
+    const id = cardMap[viewName];
+    const targetEl = id ? document.getElementById(id) : null;
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
     updateActiveTab(viewName);
   }
 
@@ -9710,121 +9624,7 @@ const app = (() => {
     }, { passive: true });
   }
 
-  // Swiper instance — set once mobile is initialized
-  let _swiperInstance = null;
 
-  // Move card DOM from .app-container into .mobile-view swiper-slides on init.
-  // This gives mobile swipe views and desktop layout a single source of truth.
-  // Only runs on mobile (≤700px) — on desktop the cards stay in .app-container.
-  function initMobileSwipeViews() {
-    const isMobile = window.innerWidth <= 700;
-    console.log('[Mavis] initMobileSwipeViews — innerWidth:', window.innerWidth, '→ isMobile:', isMobile);
-    if (!isMobile) return; // desktop: keep cards in .app-container
-    console.log('[Mavis] Mobile: moving cards into swiper slides…');
-
-    // Hide desktop container, show swiper and tab bar
-    const appContainer = document.querySelector('.app-container');
-    const appViews     = document.getElementById('app-views');
-    const tabBar       = document.getElementById('app-tab-bar');
-    if (appContainer) appContainer.style.display = 'none';
-    if (appViews)     appViews.style.display      = 'block'; // Swiper takes over display
-    if (tabBar)       tabBar.style.display        = 'flex';
-
-    // Helper: move an element into a target container
-    const move = (id, targetId) => {
-      const el     = document.getElementById(id);
-      const target = document.getElementById(targetId);
-      if (el && target) {
-        target.appendChild(el);
-        console.log('[Mavis] Moved', id, '→', targetId);
-      } else {
-        console.warn('[Mavis] Missing', id, '?', !el, '/', targetId, '?', !target);
-      }
-    };
-
-    // Each slide gets its top-level card/section
-    move('connect-card',    'mobile-view-connect');
-    move('status-card',    'mobile-view-status');
-    move('profiles-card',  'mobile-view-profiles');
-    move('controls-grid',  'mobile-view-controls');
-    move('brightness-card','mobile-view-controls');
-    move('power-card',     'mobile-view-controls');
-    // voice-card is already inside controls-grid — no separate move needed
-
-    // Now initialize Swiper — slides exist in DOM so Swiper can measure them
-    initSwiper();
-  }
-
-  // Map view name → slide index in the swiper
-  const VIEW_INDEX_MAP = {
-    connect:   0,
-    status:    1,
-    profiles:  2,
-    controls:  3,
-  };
-
-  // Initialize Swiper once DOM structure is ready
-  function initSwiper() {
-    const el = document.getElementById('app-views');
-    if (!el || _swiperInstance) return;
-    if (typeof Swiper === 'undefined') {
-      console.warn('[Mavis] Swiper not loaded yet — aborting initSwiper');
-      return;
-    }
-
-    _swiperInstance = new Swiper(el, {
-      direction: 'horizontal',
-      loop: false,
-      speed: 280,
-      resistanceRatio: 0.85,
-      noSwipingClass: 'swiper-no-swiping',
-      on: {
-        slideChange(sw) {
-          const names = ['connect', 'status', 'profiles', 'controls'];
-          const name  = names[sw.activeIndex] || 'connect';
-          updateActiveTab(name);
-        },
-      },
-    });
-    console.log('[Mavis] Swiper initialized');
-  }
-
-  // Called from tab bar buttons (onclick in HTML)
-  window.appSwitchToView = switchToView;
-
-  function switchToView(viewName) {
-    if (viewName === 'settings') {
-      openSettingsPanel();
-      return;
-    }
-    const idx = VIEW_INDEX_MAP[viewName];
-    if (idx == null) return;
-    if (_swiperInstance) {
-      _swiperInstance.slideTo(idx, 280);
-    }
-    updateActiveTab(viewName);
-  }
-
-  function updateActiveTab(viewName) {
-    document.querySelectorAll('.tab-btn').forEach((btn) => {
-      const isActive = btn.getAttribute('data-view') === viewName;
-      btn.classList.toggle('active', isActive);
-      btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
-    });
-  }
-    });
-    // Also move voice-card, brightness-card, and power-card into controls view
-    ['voice-card', 'brightness-card', 'power-card'].forEach((id) => {
-      const card = document.getElementById(id);
-      const controlsView = document.getElementById('mobile-view-controls');
-      if (card && controlsView) {
-        controlsView.appendChild(card);
-      }
-    });
-  }
-
-  // Called from tab bar buttons (onclick in HTML)
-  window.appSwitchToView = switchToView;
 
   function openSettingsPanel() {
     const panel = document.getElementById('settings-panel');
@@ -11419,8 +11219,7 @@ const app = (() => {
     // restores the saved customize-mode state. This is the entry
     // point for reordering both cards and items within cards.
     initCustomizeMode();
-    // Mobile: move card DOM into swiper slides and init Swiper
-    initMobileSwipeViews();
+    // Mobile: CSS handles scroll; JS handles tab active state via switchToView
     renderTimer = setInterval(() => {
       if (deviceState) updateHeatLiveUI(deviceState);
     }, 1000);
@@ -11476,8 +11275,6 @@ const app = (() => {
     closeSettingsPanel,
     renderSettingsPanel,
     switchToView,
-    initSwiper,
-    initMobileSwipeViews,
     // Customize-layout entry points — exposed so the new Settings >
     // Display > "Customize layout" checkbox can drive the same state
     // machine the header popover's "Customize layout…" button uses.

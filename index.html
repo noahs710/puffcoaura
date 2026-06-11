@@ -13,7 +13,6 @@
   <title>Puffco Controller</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="style.css?v=14" />
-  <link rel="stylesheet" href="swiper.min.css" />
   <style>
     @media (min-width: 701px) { .app-menu { display: none !important; } }
     /* Round 2: hold the card surface-in animation until the
@@ -118,7 +117,7 @@
       var ticker = setInterval(show, 500);
 
       // When app.js fires DOMContentLoaded, it calls init() which runs
-      // initMobileSwipeViews(). Once that happens, hide the debug panel.
+      // switchToView(). Once that happens, hide the debug panel.
       window.__dbgDone = function() {
         clearInterval(ticker);
         dbg.style.display = 'none';
@@ -126,14 +125,14 @@
 
       // Manual trigger in case the auto-hide didn't fire
       window.__dbgForce = function() {
-        if (typeof window.app !== 'undefined' && window.app.initMobileSwipeViews) {
-          window.app.initMobileSwipeViews();
+        if (typeof window.app !== 'undefined' && window.app.switchToView) {
+          window.app.switchToView('connect');
           show();
-        } else if (typeof initMobileSwipeViews === 'function') {
-          initMobileSwipeViews();
+        } else if (typeof switchToView === 'function') {
+          switchToView('connect');
           show();
         } else {
-          dbgChildren.textContent = 'initMobileSwipeViews NOT FOUND — app.js may be old/stale';
+          dbgChildren.textContent = 'switchToView NOT FOUND — app.js may be old/stale';
         }
       };
     })();
@@ -263,54 +262,50 @@
     </nav>
 
     <!-- Mobile grouped views: horizontal swipeable panels, one per tab.
-         On desktop (701px+) these are hidden and the original card layout shows.
-         On mobile the .app-views container handles scroll-snap and the tab bar
-         switches views. Each .mobile-view wraps the relevant card sections. -->
-    <div class="app-views swiper" id="app-views" aria-label="App sections">
-      <div class="swiper-wrapper">
+         Pure CSS scroll-snap — no JS DOM moves, no Swiper dependency. -->
+    <div class="app-views" id="app-views" aria-label="App sections">
 
-        <!-- Connect -->
-        <div class="mobile-view swiper-slide" id="mobile-view-connect" data-view="connect">
-          <!-- Real connect-card is moved here by initMobileSwipeViews() -->
-        </div>
+      <!-- Connect -->
+      <div class="mobile-view" id="mobile-view-connect" data-view="connect">
+        <!-- Real connect-card stays here — no DOM moves -->
+      </div>
 
-        <!-- Status -->
-        <div class="mobile-view swiper-slide" id="mobile-view-status" data-view="status">
-          <!-- Real status-card is moved here by initMobileSwipeViews() -->
-        </div>
+      <!-- Status -->
+      <div class="mobile-view" id="mobile-view-status" data-view="status">
+        <!-- Real status-card stays here -->
+      </div>
 
-        <!-- Profiles -->
-        <div class="mobile-view swiper-slide" id="mobile-view-profiles" data-view="profiles">
-          <!-- Real profiles-card is moved here by initMobileSwipeViews() -->
-        </div>
+      <!-- Profiles -->
+      <div class="mobile-view" id="mobile-view-profiles" data-view="profiles">
+        <!-- Real profiles-card stays here -->
+      </div>
 
-        <!-- Controls -->
-        <div class="mobile-view swiper-slide" id="mobile-view-controls" data-view="controls">
-          <!-- Real controls-grid, voice-card, brightness-card, power-card are moved here by initMobileSwipeViews() -->
-        </div>
+      <!-- Controls -->
+      <div class="mobile-view" id="mobile-view-controls" data-view="controls">
+        <!-- Real controls-grid, voice-card, brightness-card, power-card stay here -->
+      </div>
 
-      </div><!-- end .swiper-wrapper -->
-    </div><!-- end .app-views / .swiper -->
+    </div><!-- end .app-views -->
 
     <!-- Bottom tab bar — mobile only. Hidden on desktop (701px+). -->
     <nav class="app-tab-bar" id="app-tab-bar" aria-label="App sections">
-      <button class="tab-btn active" data-view="connect" onclick="app.switchToView(this.getAttribute('data-view'))" aria-label="Connect" aria-selected="true">
+      <a class="tab-btn active" href="#connect-card" data-view="connect" aria-label="Connect" aria-selected="true" onclick="app.switchToView(this.getAttribute('data-view')); return false;">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
         <span>Connect</span>
       </button>
-      <button class="tab-btn" data-view="status" onclick="app.switchToView(this.getAttribute('data-view'))" aria-label="Status" aria-selected="false">
+      <a class="tab-btn" href="#status-card" data-view="status" aria-label="Status" aria-selected="false" onclick="app.switchToView(this.getAttribute('data-view')); return false;">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         <span>Status</span>
       </button>
-      <button class="tab-btn" data-view="profiles" onclick="app.switchToView(this.getAttribute('data-view'))" aria-label="Profiles" aria-selected="false">
+      <a class="tab-btn" href="#profiles-card" data-view="profiles" aria-label="Profiles" aria-selected="false" onclick="app.switchToView(this.getAttribute('data-view')); return false;">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
         <span>Profiles</span>
       </button>
-      <button class="tab-btn" data-view="controls" onclick="app.switchToView(this.getAttribute('data-view'))" aria-label="Controls" aria-selected="false">
+      <a class="tab-btn" href="#controls-grid" data-view="controls" aria-label="Controls" aria-selected="false" onclick="app.switchToView(this.getAttribute('data-view')); return false;">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
         <span>Controls</span>
       </button>
-      <button class="tab-btn" data-view="settings" onclick="app.switchToView(this.getAttribute('data-view'))" aria-label="Settings" aria-selected="false">
+      <a class="tab-btn" href="#" data-view="settings" aria-label="Settings" aria-selected="false" onclick="app.switchToView(this.getAttribute('data-view')); return false;">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span>Settings</span>
       </button>
@@ -2298,8 +2293,7 @@
 
   <script src="ble-client.js?v=15"></script>
   <script src="Sortable.min.js?v=15"></script>
-  <script src="swiper.min.js"></script>
-  <script src="app.js?v=19"></script>
+  <script src="app.js?v=20"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js?t=07').catch(function(err) {
