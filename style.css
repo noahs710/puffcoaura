@@ -745,9 +745,7 @@ body.device-disconnected .connected-only-nav {
      position:sticky (not inside the Swiper transform layer). */
   .mobile-view {
     height: 100%;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
+    overflow: hidden;
     background: transparent;
     padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px));
   }
