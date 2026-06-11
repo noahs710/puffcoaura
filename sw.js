@@ -1,69 +1,30 @@
-// Puffco BLE Controller — GitHub Pages app shell cache
-// Keeps the static UI available and avoids stale assets by versioning the cache.
+// Puffco BLE Controller — Service Worker
+// Dev PWA: no offline caching — all requests go to network directly.
+// This guarantees zero stale-JS / blank-screen issues during development.
+// Activate event clears all old caches on every update.
 
-const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-10';
-// APP_SHELL keys must match the URLs the page actually requests. index.html
-// uses cache-buster query strings (?v=15 for all assets); pre-caching the
-// un-versioned paths leaves the runtime cache to
-// discover those assets the hard way, which fails on a cold offline start.
-// style.css v=16: removed overflow scroll from mobile views — pure swipe only.
-// Swiper.js v11 for full-screen mobile swipe views.
-const APP_SHELL = [
-  './',
-  './index.html',
-  './style.css?v=16',
-  './app.js?v=21',
-  './swiper.min.js',
-  './ble-client.js?v=15',
-  './Sortable.min.js?v=15',
-  './manifest.json',
-];
+const CACHE_NAME = 'puffco-ble-shell-v2026-06-10-11';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())
-  );
+  // No pre-cache needed — all fetches go to network
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
+  // Clear all old caches on activate
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+      .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
       .then(() => self.clients.claim())
   );
 });
 
+// Dev shortcut: no caching at all — always serve from network.
+// This guarantees no stale JS/CSS is ever served during development.
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
-
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('./index.html', copy));
-          return response;
-        })
-        .catch(() => caches.match('./index.html'))
-    );
-    return;
-  }
-
-  // Network-first: always try the network, update cache, fall back to cache only on failure.
-  // This prevents stale cached JS/CSS from being served when new versions are available.
-  event.respondWith(
-    fetch(request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-        return response;
-      })
-      .catch(() => caches.match(request))
-  );
+  event.respondWith(fetch(request));
 });
