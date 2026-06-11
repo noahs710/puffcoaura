@@ -4,19 +4,20 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useDeviceStore } from '../device/deviceStore'
 
-const NAV_ITEMS = [
-  { path: '/device',    label: 'Device',    icon: DeviceIcon },
-  { path: '/profiles',  label: 'Profiles',  icon: ProfilesIcon },
-  { path: '/mood',      label: 'Mood',      icon: MoodIcon },
-  { path: '/library',    label: 'Library',   icon: LibraryIcon },
-  { path: '/settings',   label: 'Settings',  icon: SettingsIcon },
-  { path: '/diagnostics', label: 'Diagnostics', icon: DiagIcon },
-]
-
 export function DesktopShell() {
   const status = useDeviceStore((s) => s.connectionStatus)
   const telemetry = useDeviceStore((s) => s.telemetry)
   const deviceInfo = useDeviceStore((s) => s.deviceInfo)
+  const advancedUser = useDeviceStore((s) => s.settings.advancedUser)
+
+  const navItems = [
+    { path: '/device',     label: 'Device',     icon: DeviceIcon },
+    { path: '/profiles',   label: 'Profiles',  icon: ProfilesIcon },
+    { path: '/mood',       label: 'Mood',        icon: MoodIcon },
+    { path: '/library',   label: 'Library',   icon: LibraryIcon },
+    { path: '/settings',  label: 'Settings',  icon: SettingsIcon },
+    ...(advancedUser ? [{ path: '/diagnostics', label: 'Advanced', icon: DiagIcon }] : []),
+  ]
 
   return (
     <div className="desktop-shell">
@@ -24,7 +25,7 @@ export function DesktopShell() {
       <aside className="desktop-sidebar">
         <div className="sidebar-logo">Puffco</div>
         <nav aria-label="App sections">
-          {NAV_ITEMS.map(({ path, label, icon: Icon }) => (
+          {navItems.map(({ path, label, icon: Icon }) => (
             <NavLink
               key={path}
               to={path}

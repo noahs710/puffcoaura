@@ -4,16 +4,18 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useDeviceStore } from '../device/deviceStore'
 
-const NAV_ITEMS = [
-  { path: '/device',     label: 'Device',     icon: DeviceIcon },
-  { path: '/profiles',  label: 'Profiles',  icon: ProfilesIcon },
-  { path: '/mood',      label: 'Mood',       icon: MoodIcon },
-  { path: '/library',    label: 'Library',    icon: LibraryIcon },
-  { path: '/settings',   label: 'Settings',   icon: SettingsIcon },
-]
-
 export function MobileShell() {
   const status = useDeviceStore((s) => s.connectionStatus)
+  const advancedUser = useDeviceStore((s) => s.settings.advancedUser)
+
+  const navItems = [
+    { path: '/device',   label: 'Device',   icon: DeviceIcon },
+    { path: '/profiles', label: 'Profiles', icon: ProfilesIcon },
+    { path: '/mood',     label: 'Mood',     icon: MoodIcon },
+    { path: '/library',  label: 'Library',   icon: LibraryIcon },
+    { path: '/settings', label: 'Settings', icon: SettingsIcon },
+    ...(advancedUser ? [{ path: '/diagnostics', label: 'Advanced', icon: DiagIcon }] : []),
+  ]
 
   return (
     <div className="mobile-shell">
@@ -35,7 +37,7 @@ export function MobileShell() {
 
       {/* Bottom tab bar */}
       <nav className="mobile-tab-bar" aria-label="App sections">
-        {NAV_ITEMS.map(({ path, label, icon: Icon }) => (
+        {navItems.map(({ path, label, icon: Icon }) => (
           <NavLink
             key={path}
             to={path}
@@ -90,6 +92,13 @@ function SettingsIcon() {
     <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <circle cx="12" cy="12" r="3"/>
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  )
+}
+function DiagIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
     </svg>
   )
 }
