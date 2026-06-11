@@ -45,3 +45,6 @@ test-*.json
 test-*.txt
 validate-structure.js
 tools/dab_scoring_smoke.js
+
+# === Build output ===
+dist/
