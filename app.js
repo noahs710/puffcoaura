@@ -9634,6 +9634,27 @@ const app = (() => {
   function initMobileSwiper() {
     const viewsEl = document.getElementById('app-views');
     if (!viewsEl) return;
+
+    // Show mobile UI, hide desktop container
+    const appContainer = document.querySelector('.app-container');
+    const tabBar       = document.getElementById('app-tab-bar');
+    if (appContainer) appContainer.style.display = 'none';
+    if (tabBar)        tabBar.style.display       = 'flex';
+
+    // Move cards from .app-container into their mobile view wrappers.
+    // Each .mobile-view already exists in the DOM (HTML) but is empty.
+    const move = (id, targetId) => {
+      const el     = document.getElementById(id);
+      const target = document.getElementById(targetId);
+      if (el && target) target.appendChild(el);
+    };
+    move('connect-card',    'mobile-view-connect');
+    move('status-card',    'mobile-view-status');
+    move('profiles-card',  'mobile-view-profiles');
+    move('controls-grid',  'mobile-view-controls');
+    move('brightness-card','mobile-view-controls');
+    move('power-card',     'mobile-view-controls');
+
     if (typeof Swiper === 'undefined') {
       // Swiper.js not loaded — fall back to native horizontal scroll
       viewsEl.style.overflowX = 'auto';
