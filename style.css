@@ -731,29 +731,45 @@ body.device-disconnected .connected-only-nav {
   .app-container { display: none !important; }
 
   /* .app-views: full-screen Swiper container, fixed behind the tab bar.
-     The Swiper.js library applies its own width/transform to this element. */
+     Swiper v11 applies its own sizing — we just set the stage. */
   .app-views {
     position: fixed;
     inset: 0;
     z-index: 100;
-    display: flex !important;
     overflow: hidden;
+    /* Explicit height so Swiper can measure the container.
+       100vh minus tab bar (~60px) minus bottom safe area. */
+    height: calc(100vh - 60px - env(safe-area-inset-bottom, 0px));
+    padding-bottom: 0;
+    /* Swiper needs a defined height — flex trick forces it. */
+    display: flex;
+    flex-direction: column;
   }
 
-  /* .mobile-view: each Swiper slide fills the viewport.
-     The sticky header inside is excluded from the slide by using
-     position:sticky (not inside the Swiper transform layer). */
+  /* .swiper-wrapper inside app-views takes full height. */
+  .app-views .swiper-wrapper {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+  }
+
+  /* Each slide fills the full viewport minus the tab bar.
+     Swiper controls width; we control height. */
   .mobile-view {
     height: 100%;
+    width: 100% !important;
+    flex-shrink: 0;
     overflow: hidden;
     background: transparent;
     padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
   }
 
-  /* Mobile sticky header — pinned to top inside each slide.
-     Does NOT scroll with the slide, so it's always visible. */
+  /* Mobile header: pinned to top of each slide, always visible.
+     Not sticky — slides don't scroll. */
   .mobile-swipe-header {
-    position: sticky;
+    position: relative;
     top: 0;
     z-index: 200;
     display: flex;

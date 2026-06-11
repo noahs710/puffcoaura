@@ -1,0 +1,2201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="description" content="Control your Puffco device via Bluetooth: profiles, heat, lighting, brightness, power, and diagnostics." />
+  <meta name="theme-color" content="#07070c" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#e8edf4" media="(prefers-color-scheme: light)" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Puffco BLE" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Puffco Controller</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="style.css?v=13" />
+  <style>
+    @media (min-width: 701px) { .app-menu { display: none !important; } }
+    /* Round 2: hold the card surface-in animation until the
+       pre-paint script can re-order the cards to their saved
+       positions. Without this, the .card surface-in 420ms keyframe
+       runs against the default order and we see a flash. */
+    html.pre-paint .card,
+    html.pre-paint .advanced-panel,
+    html.pre-paint .section-grid {
+      animation: none !important;
+      opacity: 1 !important;
+      transform: none !important;
+    }
+  </style>
+  <script>
+    // Pre-paint (round 2): apply theme + card order before the body
+    // paints so the first frame already shows the saved layout.
+    // Runs synchronously in <head> — no flicker.
+    (function () {
+      try {
+        var themeKey = 'puffco:theme';
+        var orderKey = 'puffco:card-order';
+        var theme = localStorage.getItem(themeKey) || 'auto';
+        if (theme !== 'auto' && theme !== 'light' && theme !== 'dark') theme = 'auto';
+        document.documentElement.setAttribute('data-theme', theme);
+
+        // Reorder cards as soon as the container exists.
+        function applyOrder() {
+          var raw = null;
+          try { raw = localStorage.getItem(orderKey); } catch (e) { return; }
+          if (!raw) return;
+          var order;
+          try { order = JSON.parse(raw); } catch (e) { return; }
+          if (!Array.isArray(order) || !order.length) return;
+          var container = document.querySelector('.app-container[data-card-order-key]');
+          if (!container) return;
+          var byId = {};
+          Array.prototype.forEach.call(container.children, function (el) {
+            var id = el.getAttribute && el.getAttribute('data-card-id');
+            if (id) byId[id] = el;
+          });
+          // Re-append in saved order. appendChild on an existing
+          // child is a no-op move, so this is cheap and idempotent.
+          order.forEach(function (id) {
+            var node = byId[id];
+            if (node && node.parentNode === container) {
+              container.appendChild(node);
+            }
+          });
+        }
+        // Run as soon as the container parses; fall back to DOMContentLoaded.
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', applyOrder, { once: true });
+        } else {
+          applyOrder();
+        }
+
+        // Suppress the surface-in animation for the first 500ms so the
+        // pre-paint reorder isn't followed by a snap.
+        document.documentElement.classList.add('pre-paint');
+        setTimeout(function () {
+          document.documentElement.classList.remove('pre-paint');
+        }, 500);
+      } catch (_) { /* ignore */ }
+    })();
+  </script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2307070c'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2300d6b4' stroke-width='7'/%3E%3Cpath d='M22 36c8 8 22 3 22-8' fill='none' stroke='%23f6a623' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div class="toast-container" id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  <div class="app-container" data-card-order-key="puffco:card-order" data-default-order="connect-card,status-card,profiles-card,controls-grid,brightness-card,power-card,advanced-panel">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo">Puffco BLE</div>
+      <div class="subtitle">Local device console</div>
+      <div class="connection-badge" id="connection-badge">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="connection-text">Disconnected</span>
+        <button class="ble-capability" id="ble-capability" type="button" onclick="app.toggleBleCapability()" aria-expanded="false">
+          <div class="capability-ring" id="ble-capability-ring"></div>
+          <div class="capability-summary">
+            <div class="capability-title" id="ble-capability-title">Checking browser Bluetooth</div>
+            <div class="capability-hint" id="ble-capability-hint">Click for details</div>
+          </div>
+          <div class="capability-details" id="ble-capability-details">
+            <div class="capability-copy" id="ble-capability-copy">Direct web BLE needs a supported browser and a secure page.</div>
+            <div class="capability-tags" id="ble-capability-tags"></div>
+          </div>
+        </button>
+      </div>
+      <div class="header-actions">
+        <button class="settings-button" id="btn-settings" type="button" onclick="app.toggleSettings()" aria-haspopup="dialog" aria-expanded="false" aria-label="Appearance settings" title="Appearance">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path fill="currentColor" d="M19.43 12.98c.04-.32.07-.64.07-.98 0-.34-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.03 7.03 0 0 0-1.7-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.18.58-1.7.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98 0 .33.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.09.73 1.7.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.18-.58 1.7-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65zM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5z"/>
+          </svg>
+        </button>
+        <div class="theme-popover" id="theme-popover" role="dialog" aria-label="Appearance settings" aria-hidden="true" inert>
+          <div class="theme-popover-header">
+            <span class="theme-popover-title">Appearance</span>
+            <button class="theme-popover-close" type="button" onclick="app.toggleSettings()" aria-label="Close">&times;</button>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Theme</span>
+            <div class="theme-options" role="radiogroup" aria-label="Color theme">
+              <button class="theme-option" type="button" data-theme-option="light" role="radio" aria-checked="false">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5zm0 8a3 3 0 1 1 3-3 3 3 0 0 1-3 3zm0-13a1 1 0 0 0 1-1V1a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1zm0 18a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1zM4.22 4.22a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1 1 0 1 0-1.41 1.41zM19.78 19.78a1 1 0 0 0-1.41 0 1 1 0 0 0 0 1.41l.71.71a1 1 0 1 0 1.41-1.41zM1 12a1 1 0 0 0 1 1h1a1 1 0 0 0 0-2H2a1 1 0 0 0-1 1zm20-1h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2zM4.22 19.78l.71-.71a1 1 0 1 0-1.41-1.41l-.71.71a1 1 0 0 0 1.41 1.41zM19.78 4.22l-.71.71a1 1 0 1 0 1.41 1.41l.71-.71a1 1 0 0 0-1.41-1.41z"/></svg>
+                </span>
+                <span class="theme-option-label">Light</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="dark" role="radio" aria-checked="false">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05z"/></svg>
+                </span>
+                <span class="theme-option-label">Dark</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="auto" role="radio" aria-checked="false">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18V4a8 8 0 0 1 0 16z"/></svg>
+                </span>
+                <span class="theme-option-label">Auto</span>
+              </button>
+            </div>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Accent</span>
+            <div class="accent-swatches" role="radiogroup" aria-label="Accent color">
+              <button class="accent-swatch" type="button" data-accent="teal"    style="--swatch:#00d6b4" aria-label="Teal"   role="radio" aria-checked="true"></button>
+              <button class="accent-swatch" type="button" data-accent="orange"  style="--swatch:#f6a623" aria-label="Orange" role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="violet"  style="--swatch:#7c3aed" aria-label="Violet" role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="pink"    style="--swatch:#f43f5e" aria-label="Pink"   role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="cyan"    style="--swatch:#38bdf8" aria-label="Cyan"   role="radio" aria-checked="false"></button>
+              <button class="accent-swatch" type="button" data-accent="gold"    style="--swatch:#f6d365" aria-label="Gold"   role="radio" aria-checked="false"></button>
+            </div>
+          </div>
+          <div class="theme-popover-section">
+            <label class="checkbox-row advanced-user-toggle">
+              <input type="checkbox" id="advanced-user-toggle" onchange="app.toggleAdvancedUser()" />
+              <span>Advanced user</span>
+            </label>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Layout</span>
+            <button type="button" class="customize-layout-btn" id="btn-customize-layout" onclick="app.toggleCustomizeMode()" aria-pressed="false" aria-label="Reorder cards and items within cards">
+              <span class="customize-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="9" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/>
+                  <circle cx="15" cy="6" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="15" cy="18" r="1.2"/>
+                </svg>
+              </span>
+              <span class="customize-label">Customize layout…</span>
+            </button>
+          </div>
+          <div class="theme-popover-section">
+            <span class="theme-popover-label">Status panel</span>
+            <button type="button" class="customize-layout-btn" id="btn-customize-status-items" onclick="app.toggleStatusItemsPanel()" aria-pressed="false" aria-label="Toggle and reorder status panel info items">
+              <span class="customize-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+              </span>
+              <span class="customize-label">Edit status items…</span>
+            </button>
+          </div>
+          <div class="status-items-popover" id="status-items-popover" role="dialog" aria-label="Status panel items" aria-hidden="true">
+            <div class="status-items-popover-header">
+              <span class="theme-popover-title">Status Panel</span>
+              <button class="theme-popover-close" type="button" onclick="app.toggleStatusItemsPanel()" aria-label="Close">×</button>
+            </div>
+            <div class="status-items-popover-body" id="status-items-popover-body">
+              <!-- Dynamically populated by app.initStatusItemsUI() -->
+            </div>
+          </div>
+          <div class="theme-popover-footer">
+            <span id="theme-popover-hint">Auto follows your system theme.</span>
+            <button type="button" class="reset-layout-btn" onclick="app.resetAllLayouts()" aria-label="Reset card and item layout to default order">
+              <span aria-hidden="true">↺</span>
+              <span>Reset all layouts</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <nav class="app-menu" aria-label="App sections">
+      <a href="#connect-card">Connect</a>
+      <a href="#status-card">Status</a>
+      <a href="#profiles-card" class="connected-only-nav">Profiles</a>
+      <a href="#heat-control-card" class="connected-only-nav">Heat</a>
+      <a href="#advanced-panel" data-advanced-only>Advanced</a>
+    </nav>
+
+    <!-- Settings backdrop -->
+    <div class="settings-backdrop" id="settings-backdrop" inert aria-hidden="true" onclick="app.closeSettingsPanel()"></div>
+
+    <!-- Full settings panel -->
+    <div class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-label="Settings" aria-hidden="true" inert>
+      <div class="settings-header">
+        <div class="settings-title-row">
+          <h2>Settings</h2>
+          <button type="button" class="settings-close-btn" onclick="app.closeSettingsPanel()" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="settings-nav" role="tablist" aria-label="Settings sections">
+          <button class="settings-nav-btn active" data-settings-section="connection" role="tab" aria-selected="true" aria-controls="settings-section-connection">Connection</button>
+          <button class="settings-nav-btn" data-settings-section="display" role="tab" aria-selected="false" aria-controls="settings-section-display">Display</button>
+          <button class="settings-nav-btn" data-settings-section="behavior" role="tab" aria-selected="false" aria-controls="settings-section-behavior">Behavior</button>
+          <button class="settings-nav-btn" data-settings-section="dab" role="tab" aria-selected="false" aria-controls="settings-section-dab">Dab</button>
+          <button class="settings-nav-btn" data-settings-section="data" role="tab" aria-selected="false" aria-controls="settings-section-data">Data</button>
+          <button class="settings-nav-btn" data-settings-section="about" role="tab" aria-selected="false" aria-controls="settings-section-about">About</button>
+        </div>
+      </div>
+
+      <div class="settings-body">
+
+        <!-- CONNECTION -->
+        <div class="settings-section" id="settings-section-connection" role="tabpanel">
+          <div class="settings-section-heading">Connection</div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-transport">BLE Transport</label>
+            <div class="settings-radio-group" id="settings-transport" role="radiogroup" aria-label="BLE transport">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-transport" value="browser_ble"
+                       onchange="app.settings.set('transportMode', 'browser_ble')" />
+                <span>Browser Bluetooth</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-transport" value="bridge"
+                       onchange="app.settings.set('transportMode', 'bridge')" />
+                <span>Local Bridge</span>
+              </label>
+            </div>
+            <p class="settings-hint" id="settings-transport-hint">
+              Browser Bluetooth works online from HTTPS. Bridge requires the Windows bridge server.
+            </p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-device-name">Device Name</label>
+            <input type="text" id="settings-device-name" class="settings-input"
+                   placeholder="Peak" maxlength="32"
+                   onchange="app.settings.set('deviceName', this.value)" />
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-use-mac"
+                     onchange="app.settings.set('useMacAddress', this.checked)" />
+              <span>Use MAC address instead of device name</span>
+            </label>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-bridge-url">Bridge URL</label>
+            <input type="text" id="settings-bridge-url" class="settings-input"
+                   placeholder="ws://127.0.0.1:8421/ws" spellcheck="false"
+                   onchange="app.settings.set('bridgeUrl', this.value)" />
+          </div>
+        </div>
+
+        <!-- DISPLAY -->
+        <div class="settings-section hidden" id="settings-section-display" role="tabpanel">
+          <div class="settings-section-heading">Display</div>
+
+          <div class="settings-field">
+            <div class="settings-label-row">
+              <span class="settings-label">Theme</span>
+            </div>
+            <div class="theme-options settings-theme-options" role="radiogroup" aria-label="Color theme">
+              <button class="theme-option" type="button" data-theme-option="light" role="radio" aria-checked="false"
+                      onclick="app.settings.set('theme', 'light')">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5zm0 8a3 3 0 1 1 3-3 3 3 0 0 1-3 3zm0-13a1 1 0 0 0 1-1V1a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1zm0 18a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1zM4.22 4.22a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1 1 0 1 0-1.41 1.41zM19.78 19.78a1 1 0 0 0-1.41 0 1 1 0 0 0 0 1.41l.71.71a1 1 0 1 0 1.41-1.41zM1 12a1 1 0 0 0 1 1h1a1 1 0 0 0 0-2H2a1 1 0 0 0-1 1zm20-1h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2zM4.22 19.78l.71-.71a1 1 0 1 0-1.41-1.41l-.71.71a1 1 0 0 0 1.41 1.41zM19.78 4.22l-.71.71a1 1 0 1 0 1.41 1.41l.71-.71a1 1 0 0 0-1.41-1.41z"/></svg>
+                </span>
+                <span class="theme-option-label">Light</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="dark" role="radio" aria-checked="false"
+                      onclick="app.settings.set('theme', 'dark')">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M21.64 13a1 1 0 0 0-1.05-.14 8.05 8.05 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05z"/></svg>
+                </span>
+                <span class="theme-option-label">Dark</span>
+              </button>
+              <button class="theme-option" type="button" data-theme-option="auto" role="radio" aria-checked="false"
+                      onclick="app.settings.set('theme', 'auto')">
+                <span class="theme-option-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18V4a8 8 0 0 1 0 16z"/></svg>
+                </span>
+                <span class="theme-option-label">Auto</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-label">Accent Color</span>
+            <div class="accent-swatches settings-accent-swatches" role="radiogroup" aria-label="Accent color">
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="teal"
+                      style="--swatch:#00d6b4" aria-label="Teal" role="radio" aria-checked="true"
+                      onclick="app.settings.set('accent', 'teal')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="orange"
+                      style="--swatch:#f6a623" aria-label="Orange" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'orange')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="violet"
+                      style="--swatch:#7c3aed" aria-label="Violet" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'violet')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="pink"
+                      style="--swatch:#f43f5e" aria-label="Pink" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'pink')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="cyan"
+                      style="--swatch:#38bdf8" aria-label="Cyan" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'cyan')"></button>
+              <button class="accent-swatch settings-accent-swatch" type="button" data-accent="gold"
+                      style="--swatch:#f6d365" aria-label="Gold" role="radio" aria-checked="false"
+                      onclick="app.settings.set('accent', 'gold')"></button>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-label">Font Size</span>
+            <div class="settings-radio-group settings-compact" role="radiogroup" aria-label="Font size">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-font-size" value="small"
+                       onchange="app.settings.set('fontSize', 'small')" />
+                <span>Small</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-font-size" value="medium" checked
+                       onchange="app.settings.set('fontSize', 'medium')" />
+                <span>Medium</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-font-size" value="large"
+                       onchange="app.settings.set('fontSize', 'large')" />
+                <span>Large</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-label">Layout Density</span>
+            <div class="settings-radio-group settings-compact" role="radiogroup" aria-label="Layout density">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-density" value="compact"
+                       onchange="app.settings.set('density', 'compact')" />
+                <span>Compact</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-density" value="comfortable" checked
+                       onchange="app.settings.set('density', 'comfortable')" />
+                <span>Comfortable</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-density" value="spacious"
+                       onchange="app.settings.set('density', 'spacious')" />
+                <span>Spacious</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="advanced-user-toggle"
+                     onchange="app.toggleAdvancedUser()" />
+              <span>Advanced user mode</span>
+            </label>
+            <p class="settings-hint">Shows the Advanced diagnostics panel, Lorax explorer, and debug console.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-customize-mode"
+                     onchange="app.setCustomizeMode(this.checked)" />
+              <span>Customize layout</span>
+            </label>
+            <p class="settings-hint">Show drag handles on every card and reorderable item. Turn off to hide handles and disable dragging.</p>
+          </div>
+        </div>
+
+        <!-- BEHAVIOR -->
+        <div class="settings-section hidden" id="settings-section-behavior" role="tabpanel">
+          <div class="settings-section-heading">Behavior</div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-auto-reconnect" checked
+                     onchange="app.settings.set('autoReconnect', this.checked)" />
+              <span>Auto-reconnect</span>
+            </label>
+            <p class="settings-hint">Automatically reconnect to the bridge when the connection drops.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-confirm-dialogs" checked
+                     onchange="app.settings.set('confirmDialogs', this.checked)" />
+              <span>Confirm dangerous actions</span>
+            </label>
+            <p class="settings-hint">Show a confirmation dialog before factory reset or destructive operations.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-sound" checked
+                     onchange="app.settings.set('soundEnabled', this.checked)" />
+              <span>Sound effects</span>
+            </label>
+            <p class="settings-hint">Play audio feedback for connection events and errors.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-voice-enabled"
+                     onchange="app.settings.set('voiceEnabled', this.checked)" />
+              <span>Voice commands</span>
+            </label>
+            <p class="settings-hint">Enable hands-free voice control. Requires microphone permission.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-voice-prefix">Voice wake word</label>
+            <input type="text" id="settings-voice-prefix" class="settings-input"
+                   placeholder="puffco" maxlength="24"
+                   onchange="app.settings.set('voicePrefix', this.value)" />
+            <p class="settings-hint">Only transcriptions containing this word will trigger commands. Leave blank to fire on any match.</p>
+          </div>
+        </div>
+
+        <!-- DAB SCORING -->
+        <div class="settings-section hidden" id="settings-section-dab" role="tabpanel">
+          <div class="settings-section-heading">Dab Scoring</div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-dab-enabled"
+                     onchange="app.settings.set('dabEnabled', this.checked)" />
+              <span>Enable dab scoring</span>
+            </label>
+            <p class="settings-hint">Score your dabs across flow, consistency, and control. Tap Start before drawing.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-difficulty">Difficulty</label>
+            <div class="settings-radio-group" id="settings-dab-difficulty" role="radiogroup" aria-label="Dab difficulty">
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-dab-difficulty" value="casual"
+                       onchange="app.settings.set('dabDifficulty', 'casual')" />
+                <span>Casual</span>
+                <span class="settings-hint-inline">Target flow: 15</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-dab-difficulty" value="standard" checked
+                       onchange="app.settings.set('dabDifficulty', 'standard')" />
+                <span>Standard</span>
+                <span class="settings-hint-inline">Target flow: 30</span>
+              </label>
+              <label class="settings-radio-label">
+                <input type="radio" name="settings-dab-difficulty" value="beast"
+                       onchange="app.settings.set('dabDifficulty', 'beast')" />
+                <span>Beast</span>
+                <span class="settings-hint-inline">Target flow: 50</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-threshold">Detection threshold</label>
+            <input type="range" id="settings-dab-threshold" class="settings-range" min="1" max="30" value="12"
+                   oninput="document.getElementById('dab-threshold-val').textContent = this.value + '%'; app.settings.set('dabThreshold', Number(this.value))"
+                   onchange="app.settings.set('dabThreshold', Number(this.value))" />
+            <div class="settings-range-scale">
+              <span>1%</span><span id="dab-threshold-val">12%</span><span>30%</span>
+            </div>
+            <p class="settings-hint">Airflow must exceed this (and stay above it for ~3 seconds) to start a dab session. Default 12% filters out preheat pulses.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-dab-auto-arm"
+                     onchange="app.settings.set('dabAutoArm', this.checked)" />
+              <span>Auto-open on heat</span>
+            </label>
+            <p class="settings-hint">Open the scoring panel automatically when a heat cycle starts, with the preheat countdown. Scoring begins the instant preheat ends.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-toggle-row">
+              <input type="checkbox" id="settings-dab-fast-sampler"
+                     onchange="app.settings.set('dabFastSampler', this.checked)" />
+              <span>High-rate sensor sampling</span>
+            </label>
+            <p class="settings-hint">During a live session, read the inhale sensor directly at high speed (browser Bluetooth only). Smoother chart, finer scoring detail.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-fast-ms">Session sample interval</label>
+            <input type="range" id="settings-dab-fast-ms" class="settings-range" min="100" max="1000" step="50" value="150"
+                   oninput="document.getElementById('dab-fast-ms-val').textContent = this.value + 'ms'"
+                   onchange="app.settings.set('dabFastSampleMs', Number(this.value))" />
+            <div class="settings-range-scale">
+              <span>100ms</span><span id="dab-fast-ms-val">150ms</span><span>1000ms</span>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-idle-bar-ms">Idle bar poll</label>
+            <input type="range" id="settings-dab-idle-bar-ms" class="settings-range" min="50" max="400" step="25" value="100"
+                   oninput="document.getElementById('dab-idle-bar-ms-val').textContent = this.value + 'ms'"
+                   onchange="app.settings.set('dabIdleBarSampleMs', Number(this.value))" />
+            <div class="settings-range-scale">
+              <span>50ms</span><span id="dab-idle-bar-ms-val">100ms</span><span>400ms</span>
+            </div>
+            <p class="settings-hint">How often the inhale bar reads the sensor between scoring sessions. Lower = snappier bar; the radio is the bottleneck, so 50–200ms is the sweet spot.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label">Draw calibration</label>
+            <div class="settings-inline-row">
+              <span id="settings-dab-draw-max" class="settings-inline-value">90 raw = 100%</span>
+              <button class="btn btn-sm btn-secondary" onclick="app.resetDabDrawCalibration()">Re-learn</button>
+            </div>
+            <p class="settings-hint">The app learns your device's strongest pull and scales every percent to it — your hardest draw reads ~100%. Re-learn after changing chambers.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-drop-timeout">End-of-dab timeout</label>
+            <input type="range" id="settings-dab-drop-timeout" class="settings-range" min="500" max="5000" step="100" value="1200"
+                   oninput="document.getElementById('dab-drop-timeout-val').textContent = (this.value / 1000).toFixed(1) + 's'"
+                   onchange="app.settings.set('dabDropTimeoutMs', Number(this.value))" />
+            <div class="settings-range-scale">
+              <span>0.5s</span><span id="dab-drop-timeout-val">1.2s</span><span>5s</span>
+            </div>
+            <p class="settings-hint">How long airflow can sit below the threshold before the session ends. Raise this if pause-and-sip draws end your dab early.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-max-duration">Max session length</label>
+            <input type="range" id="settings-dab-max-duration" class="settings-range" min="30" max="300" step="10" value="90"
+                   oninput="document.getElementById('dab-max-duration-val').textContent = this.value + 's'"
+                   onchange="app.settings.set('dabMaxDurationS', Number(this.value))" />
+            <div class="settings-range-scale">
+              <span>30s</span><span id="dab-max-duration-val">90s</span><span>300s</span>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dab-ui-max">Airflow display ceiling</label>
+            <input type="range" id="settings-dab-ui-max" class="settings-range" min="100" max="200" step="10" value="150"
+                   oninput="document.getElementById('dab-ui-max-val').textContent = this.value + '%'"
+                   onchange="app.settings.set('dabUiAirflowMax', Number(this.value))" />
+            <div class="settings-range-scale">
+              <span>100%</span><span id="dab-ui-max-val">150%</span><span>200%</span>
+            </div>
+            <p class="settings-hint">Top of the chart and readouts. Hard pulls can overshoot 100% — raise this if your draws pin at the ceiling. Scoring is unaffected.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label">Preheat timer calibration</label>
+            <div class="settings-inline-row">
+              <span id="settings-dab-preheat-offset" class="settings-inline-value">+0.0s learned</span>
+              <button class="btn btn-sm btn-secondary" onclick="app.resetDabPreheatCalibration()">Reset</button>
+            </div>
+            <p class="settings-hint">The app learns how far the firmware preheat timer runs short on your device and corrects the countdown. Reset to re-learn from scratch.</p>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label">Score history</label>
+            <div class="settings-inline-row">
+              <div id="dab-score-history-summary" class="settings-inline-value">No dabs recorded yet.</div>
+              <button class="btn btn-sm btn-secondary" onclick="app.clearDabHistory()">Clear</button>
+            </div>
+          </div>
+
+          <div class="settings-field">
+            <label class="settings-label" for="settings-cleaning-threshold">Cleaning reminder threshold</label>
+            <div class="settings-inline-row">
+              <input type="number" id="settings-cleaning-threshold" class="settings-number-input" min="0" max="500" step="5" value="0"
+                     onchange="app.settings.set('cleaningThreshold', Number(this.value))" />
+              <span class="settings-inline-note">dabs per cycle (0 = off)</span>
+            </div>
+            <p class="settings-hint">After this many qualifying dabs, the status card shows "Cleaning" instead of the next count, reminding you to run a burn-off cycle. Only dabs longer than 5 seconds count, and cleaning cycles themselves never count.</p>
+          </div>
+        </div>
+
+        <!-- DATA -->
+        <div class="settings-section hidden" id="settings-section-data" role="tabpanel">
+          <div class="settings-section-heading">Data</div>
+
+          <div class="settings-actions-row">
+            <button type="button" class="btn btn-secondary" onclick="app.exportSettingsJson()">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+              Export Settings
+            </button>
+            <button type="button" class="btn btn-secondary" id="btn-import-settings">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/>
+              </svg>
+              Import Settings
+            </button>
+            <input class="hidden" id="settings-import-file" type="file" accept="application/json,.json" />
+          </div>
+
+          <div class="settings-danger-zone">
+            <div class="settings-danger-heading">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+              </svg>
+              <span>Danger Zone</span>
+            </div>
+            <div class="settings-field">
+              <button type="button" class="btn btn-danger"
+                      onclick="app.settings.reset()">
+                Reset All Settings
+              </button>
+              <p class="settings-hint">Restores all settings to their defaults. This does not delete profiles or bridge history.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABOUT -->
+        <div class="settings-section hidden" id="settings-section-about" role="tabpanel">
+          <div class="settings-section-heading">About</div>
+
+          <div class="settings-about-grid">
+            <div class="settings-about-item">
+              <span class="settings-about-label">App</span>
+              <span class="settings-about-value">Puffco BLE Controller</span>
+            </div>
+            <div class="settings-about-item">
+              <span class="settings-about-label">Version</span>
+              <span class="settings-about-value" id="settings-version">1.0.0</span>
+            </div>
+            <div class="settings-about-item">
+              <span class="settings-about-label">Build</span>
+              <span class="settings-about-value" id="settings-build">2025.1</span>
+            </div>
+            <div class="settings-about-item">
+              <span class="settings-about-label">Protocol</span>
+              <span class="settings-about-value">Lorax v2</span>
+            </div>
+          </div>
+
+          <div class="settings-links">
+            <a href="https://github.com/puffcopuffco/PuffcoBLE" target="_blank" rel="noopener noreferrer" class="settings-link">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/>
+              </svg>
+              View on GitHub
+            </a>
+            <a href="https://github.com/puffcopuffco/PuffcoBLE/issues" target="_blank" rel="noopener noreferrer" class="settings-link">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+              </svg>
+              Report an Issue
+            </a>
+            <a href="https://github.com/puffcopuffco/PuffcoBLE/releases" target="_blank" rel="noopener noreferrer" class="settings-link">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l4.59-4.58L18 11l-6 6z"/>
+              </svg>
+              Release Notes
+            </a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Customize-layout floating toolbar. Hidden by default, shown when
+         the user enters customize mode from the appearance popover.
+         Mirrors the macOS app organizer "Done" pill — a single action
+         that exits the mode and saves the current order. -->
+    <div class="customize-bar" id="customize-bar" role="region" aria-label="Customize layout" hidden>
+      <div class="customize-bar-inner">
+        <div class="customize-bar-title">
+          <span class="customize-bar-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="9" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/>
+              <circle cx="15" cy="6" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="15" cy="18" r="1.2"/>
+            </svg>
+          </span>
+          <div>
+            <strong>Customizing layout</strong>
+            <span>Drag cards by their handle, or grab items inside a card to rearrange them.</span>
+          </div>
+        </div>
+        <div class="customize-bar-actions">
+          <button type="button" class="btn btn-sm btn-secondary customize-bar-reset" onclick="app.resetAllLayouts()" aria-label="Reset all card and item layout to default order">
+            <span aria-hidden="true">↺</span>
+            <span>Reset</span>
+          </button>
+          <button type="button" class="btn btn-sm btn-primary customize-bar-done" onclick="app.toggleCustomizeMode()" aria-label="Done customizing layout">
+            <span aria-hidden="true">✓</span>
+            <span>Done</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drag-and-drop sort guide. Sits at the top of the app container
+         so every section can be reordered. Carries no data-card-id, so
+         Sortable treats it as a static sibling and never tries to drag
+         it. Dismissed state persists in localStorage. -->
+    <aside class="sort-guide" id="sort-guide" role="note" aria-label="Drag and drop sort guide">
+      <div class="sort-guide-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/>
+          <circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/>
+        </svg>
+      </div>
+      <div class="sort-guide-body">
+        <strong class="sort-guide-title">Want to rearrange the page?</strong>
+        <span class="sort-guide-text">
+          Open <strong>Appearance</strong> and pick <strong>Customize layout…</strong>
+          to drag cards and items within cards, like the macOS app organizer.
+        </span>
+      </div>
+      <div class="sort-guide-actions">
+        <button type="button" class="sort-guide-reset" id="btn-sort-guide-reset"
+                aria-label="Reset the card order to the default"
+                onclick="app.resetCardOrder()">Reset order</button>
+        <button type="button" class="sort-guide-close" id="btn-sort-guide-close"
+                aria-label="Dismiss the drag and drop sort guide"
+                title="Dismiss this tip"
+                onclick="app.dismissSortGuide()">&times;</button>
+      </div>
+    </aside>
+
+    <!-- Connection Card -->
+    <section class="card" id="connect-card" data-card-id="connect-card">
+      <div class="card-header">
+        <h2><span class="icon icon-link"></span> Connection</h2>
+      </div>
+      <div class="connect-section">
+        <!-- Device name / MAC / transport / bridge options all live in
+             Settings > Connection now. The inputs stay in the DOM
+             (hidden) because the connect pipeline reads them, but the
+             card itself is a single obvious action. -->
+        <div class="input-group hidden" id="device-identity-group" aria-hidden="true">
+          <label for="device-name" id="device-identity-label">Device Name</label>
+          <input type="text" id="device-name" placeholder="Peak" value="Peak" />
+        </div>
+        <label class="checkbox-row optional-device-field hidden" id="device-mac-row" aria-hidden="true">
+          <input type="checkbox" id="use-mac-address" onchange="app.toggleMacAddressMode()" />
+          <span>Use MAC address</span>
+        </label>
+        <button class="btn btn-primary" id="btn-connect" onclick="app.connect()">
+          Connect Puffco
+        </button>
+        <button class="btn btn-secondary hidden" id="btn-scan" onclick="app.scanDevices()">
+          Scan Puffcos
+        </button>
+        <button class="btn btn-danger hidden" id="btn-disconnect" onclick="app.disconnect()">
+          Disconnect
+        </button>
+        <p class="settings-hint" style="margin:6px 0 0 0;">Device name, transport, and bridge options are in Settings → Connection.</p>
+      </div>
+      <div class="scan-results" id="device-scan-results"></div>
+    </section>
+
+    <!-- Device Status -->
+    <section class="card" id="status-card" data-card-id="status-card">
+      <div class="card-header">
+        <h2><span class="icon icon-status"></span> Device Status</h2>
+        <button class="btn btn-sm btn-secondary" data-device-command="status" onclick="app.refreshStatus()">Refresh</button>
+      </div>
+
+      <div class="disconnected-overlay visible" id="status-empty">
+        <div class="offline-stage">
+          <div class="offline-stage-copy">
+            <div class="stage-eyebrow">Ready to sync</div>
+            <h3>Pair your Puffco</h3>
+            <p>Connect to reveal live temperature, battery state, heat timer, profile data, and firmware diagnostics.</p>
+          </div>
+          <div class="placeholder-art" aria-hidden="true">
+            <div class="art-stack">
+              <svg viewBox="0 0 64 64" width="84" height="84" focusable="false">
+                <defs>
+                  <linearGradient id="placeholder-art-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="currentColor" stop-opacity="0.9" />
+                    <stop offset="100%" stop-color="currentColor" stop-opacity="0.5" />
+                  </linearGradient>
+                </defs>
+                <rect x="22" y="8" width="20" height="48" rx="10" fill="none" stroke="currentColor" stroke-width="2.5" />
+                <line x1="22" y1="22" x2="42" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.6" />
+                <line x1="22" y1="32" x2="42" y2="32" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4" />
+                <line x1="22" y1="42" x2="42" y2="42" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.6" />
+                <circle cx="32" cy="52" r="3" fill="currentColor" />
+                <path d="M28 6 Q32 2 36 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+              <span class="art-name">Puffco device</span>
+              <span class="art-caption">Connect to unlock live controls</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hidden" id="status-content" data-card-item-list="status-items">
+        <div class="status-item" data-item-id="device-stage" data-status-item data-status-label="Device &amp; temperature">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('device-stage')" aria-label="Toggle Device &amp; temperature" aria-pressed="true" data-toggle-btn="device-stage">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Device &amp; temperature</span>
+          </div>
+        <div class="device-stage">
+          <div class="device-stage-copy">
+            <div class="stage-eyebrow">Live device</div>
+            <div class="device-title-row">
+              <h3 id="hero-device-name">—</h3>
+              <span class="state-chip" id="hero-state-chip">—</span>
+              <span class="draw-chip" id="draw-sensor-chip" data-state="hidden" aria-live="polite" title="Inhale sensor">
+                <span class="draw-dot" aria-hidden="true"></span>
+                <span id="draw-sensor-chip-label">—</span>
+              </span>
+            </div>
+            <div class="device-temp-readout">
+              <span id="hero-current-temp">—</span>
+              <small>chamber temperature</small>
+            </div>
+            <div class="hero-telemetry-strip">
+              <div>
+                <span>Target</span>
+                <strong id="hero-target-temp">—</strong>
+              </div>
+              <div>
+                <span>Timer</span>
+                <strong id="hero-heat-timer">—</strong>
+              </div>
+              <div>
+                <span>Profile</span>
+                <strong id="hero-profile">—</strong>
+              </div>
+              <div>
+                <span>Vapor</span>
+                <strong id="hero-vapor">—</strong>
+              </div>
+            </div>
+          </div>
+          <div class="device-visual" aria-hidden="true">
+            <div class="device-halo"></div>
+          </div>
+        </div>
+        </div><!-- end .status-item[data-item-id="device-stage"] -->
+
+        <div class="status-item" data-item-id="heat-control" data-status-item data-status-label="Heat control &amp; timer">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('heat-control')" aria-label="Toggle Heat control" aria-pressed="true" data-toggle-btn="heat-control">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Heat control &amp; timer</span>
+          </div>
+        <div class="heat-status-control connected-only" id="heat-control-card">
+          <div class="heat-status-heading">
+            <div>
+              <div class="stat-label">Heat Control</div>
+              <strong id="heat-status-text" aria-live="polite">Idle</strong>
+            </div>
+            <div class="heat-indicator" id="heat-indicator">
+              <span class="heat-dot" aria-hidden="true"></span>
+            </div>
+          </div>
+          <div class="heat-controls">
+            <button class="btn btn-heat" id="btn-heat" onclick="app.heat()">Start Heat</button>
+            <button class="btn btn-secondary" id="btn-clean" onclick="app.startCleaningMode()" title="Low-temp burn-off: 150°F for 20 seconds">Clean</button>
+            <button class="btn btn-secondary hidden" id="btn-boost" onclick="app.boost()">Boost</button>
+            <button class="btn btn-secondary hidden" id="btn-extend" disabled title="Extend is not exposed by this BLE bridge yet">Extend</button>
+            <button class="btn btn-danger hidden" id="btn-stop" onclick="app.stop()">Stop</button>
+            <button class="btn btn-secondary" id="btn-boost-options" aria-expanded="false" aria-controls="boost-options-panel" onclick="app.toggleBoostOptions()">Boost Options</button>
+          </div>
+          <div class="boost-options hidden" id="boost-options-panel">
+            <div class="input-group">
+              <label for="boost-temp-delta">Boost Temp</label>
+              <input type="number" id="boost-temp-delta" min="0" max="120" step="1" placeholder="+10" />
+            </div>
+            <div class="input-group">
+              <label for="boost-time-delta">Boost Time</label>
+              <input type="number" id="boost-time-delta" min="0" max="180" step="1" placeholder="+30" />
+            </div>
+            <button class="btn btn-primary" id="btn-save-boost-options" onclick="app.saveBoostOptions()">Save Boost</button>
+          </div>
+          <div class="heat-live-panel" id="heat-live-panel" aria-live="polite">
+            <div>
+              <span class="heat-live-label">Timer</span>
+              <strong id="heat-countdown">Idle</strong>
+            </div>
+            <div class="heat-live-details">
+              <span id="heat-live-phase">Idle</span>
+              <span id="heat-live-current">Current unavailable</span>
+              <span id="heat-live-target">Target unavailable</span>
+              <span id="heat-live-meta">Waiting for device</span>
+            </div>
+          </div>
+          <div class="draw-strength-panel" id="draw-strength-panel" role="progressbar" aria-label="Draw strength" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Disconnected" style="--draw-strength: 0;">
+            <div class="draw-strength-head">
+              <span>Draw Strength</span>
+              <div class="draw-strength-head-meta">
+                <span class="draw-strength-readout" id="draw-strength-readout" aria-hidden="true">—</span>
+                <strong id="draw-strength-label">Idle</strong>
+              </div>
+            </div>
+            <div class="draw-strength-track">
+              <div class="draw-strength-fill" id="draw-strength-fill"></div>
+              <div class="draw-strength-peak" id="draw-strength-peak" aria-hidden="true"></div>
+              <div class="draw-strength-threshold" aria-hidden="true"></div>
+            </div>
+          </div>
+          <div class="session-metrics" id="session-metrics">
+          <span><b>Remaining</b><i id="session-remaining">—</i></span>
+          <span><b>Boost</b><i id="session-boost">—</i></span>
+          <span><b>Chamber</b><i id="session-chamber">—</i></span>
+          </div>
+        </div>
+        </div><!-- end .status-item[data-item-id="heat-control"] -->
+
+        <div class="status-item" data-item-id="battery" data-status-item data-status-label="Battery">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('battery')" aria-label="Toggle Battery" aria-pressed="true" data-toggle-btn="battery">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Battery</span>
+          </div>
+        <div class="status-summary">
+          <div class="battery-panel">
+            <div class="battery-ring" id="battery-ring" style="--battery-level: 0;">
+              <div class="battery-core">
+                <span class="battery-pct" id="battery-pct">—</span>
+                <span class="battery-caption">battery</span>
+              </div>
+            </div>
+            <div class="battery-details">
+              <div class="stat-label">Power</div>
+              <div class="charge-pill" id="charge-pill">—</div>
+              <div class="battery-rail" aria-hidden="true">
+                <div class="battery-fill" id="battery-fill" style="width: 0%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div><!-- end .status-item[data-item-id="battery"] -->
+
+        <div class="status-item" data-item-id="usage" data-status-item data-status-label="Usage">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('usage')" aria-label="Toggle Usage" aria-pressed="true" data-toggle-btn="usage">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Usage</span>
+          </div>
+        <div class="usage-strip">
+          <div class="usage-card">
+            <div class="usage-label">Dabs / day</div>
+            <div class="usage-value" id="stat-dpd-hero">—</div>
+            <div class="usage-trend" id="stat-dpd-trend">—</div>
+          </div>
+          <div class="usage-card">
+            <div class="usage-label">Total dabs</div>
+            <div class="usage-value" id="stat-total-dabs-hero">—</div>
+            <div class="usage-trend">lifetime</div>
+          </div>
+          <div class="usage-card">
+            <div class="usage-label">Dabs left</div>
+            <div class="usage-value" id="stat-drem-hero">—</div>
+            <div class="usage-trend">estimated</div>
+          </div>
+          <div class="usage-card" id="cleaning-reminder-card" data-card-id="cleaning-reminder">
+            <div class="usage-label">Cleaning</div>
+            <div class="usage-value" id="stat-cleaning-counter">—</div>
+            <div class="usage-trend" id="stat-cleaning-trend">set in Settings</div>
+          </div>
+        </div>
+        </div><!-- end .status-item[data-item-id="usage"] -->
+
+        <div class="status-item" data-item-id="diagnostics" data-status-item data-status-label="Diagnostics">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('diagnostics')" aria-label="Toggle Diagnostics" aria-pressed="true" data-toggle-btn="diagnostics">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Diagnostics</span>
+          </div>
+        <div class="status-grid mt-md">
+          <div class="stat-item">
+            <div class="stat-label">Device</div>
+            <div class="stat-value" id="stat-device-model">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">State</div>
+            <div class="stat-value" id="stat-state">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Active Profile</div>
+            <div class="stat-value" id="stat-profile">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Vapor Control</div>
+            <div class="stat-value" id="stat-vapor">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">LED Brightness</div>
+            <div class="stat-value" id="stat-led-brightness">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Chamber</div>
+            <div class="stat-value" id="stat-chamber">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Firmware</div>
+            <div class="stat-value" id="stat-firmware-display">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Serial</div>
+            <div class="stat-value" id="stat-serial-display">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Boost</div>
+            <div class="stat-value" id="stat-boost">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Last Connected</div>
+            <div class="stat-value" id="stat-last-connected">—</div>
+          </div>
+        </div>
+        </div><!-- end .status-item[data-item-id="diagnostics"] -->
+
+        <div class="status-item" data-item-id="capabilities" data-status-item data-status-label="Capabilities">
+          <div class="status-item-header">
+            <button type="button" class="status-item-toggle" onclick="app.toggleStatusItem('capabilities')" aria-label="Toggle Capabilities" aria-pressed="true" data-toggle-btn="capabilities">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="toggle-eye-icon"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <span class="status-item-label">Capabilities</span>
+          </div>
+        <div class="capability-strip" id="capability-strip" aria-live="polite"></div>
+        </div><!-- end .status-item[data-item-id="capabilities"] -->
+        <div id="stat-charge" class="hidden" aria-hidden="true">—</div>
+      </div><!-- end #status-content -->
+    </section>
+
+    <!-- Profiles -->
+    <section class="card connected-only" id="profiles-card" data-card-id="profiles-card">
+      <div class="card-header">
+        <h2><span class="icon icon-profile"></span> Profiles</h2>
+        <div class="inline-actions">
+          <button class="btn btn-sm btn-primary" onclick="app.addNewProfile()">+ New Profile</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.exportProfiles()">Export</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.openProfileImport()">Import</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.restoreProfileBackup()">Restore Backup</button>
+          <button class="btn btn-sm btn-secondary" onclick="app.restoreDefaultProfiles()">Defaults</button>
+          <input class="hidden" id="profile-import-file" type="file" accept="application/json,.json" />
+        </div>
+      </div>
+      <div class="library-toolbar">
+        <span class="stat-label">Device slots</span>
+        <span class="stat-label">Local library</span>
+      </div>
+      <div class="profiles-grid" id="profiles-grid">
+        <!-- Populated by JS -->
+      </div>
+      <div class="profile-library-grid" id="profile-library-grid"></div>
+    </section>
+
+    <div class="section-grid" id="controls-grid" data-card-id="controls-grid">
+      <section class="card" id="voice-card">
+        <div class="card-header">
+          <h2><span class="icon icon-status"></span> Voice Commands</h2>
+          <div class="voice-card-actions">
+            <span class="voice-last-action empty" id="voice-last-action" aria-live="polite" title="Last command sent via voice"></span>
+            <button class="btn btn-sm btn-secondary" id="btn-voice" onclick="app.toggleVoiceCommands()" aria-pressed="false">Enable Voice</button>
+          </div>
+        </div>
+        <div class="voice-command-panel">
+          <div>
+            <div class="stat-label">Priority Commands</div>
+            <div class="voice-command-list">find device · disconnect · resync · start heat · stop · boost · profile one-four · battery · lantern · stealth · brightness 70</div>
+          </div>
+          <div class="voice-state" id="voice-state" data-state="idle">Permission required</div>
+        </div>
+        <!-- Voice command prefix (a.k.a. wake word). When the input has a
+             value, the speech recognizer only fires a command if the
+             transcript contains the wake word — the wake word is stripped
+             and the remainder is matched against the command list. When
+             empty, the current "fire on any matching command" behavior is
+             preserved. Persisted in localStorage (puffco:voice-prefix). -->
+        <div class="voice-prefix-row">
+          <label for="voice-prefix-input" class="voice-prefix-label">Wake word</label>
+          <input type="text" id="voice-prefix-input" class="voice-prefix-input"
+                 autocomplete="off" autocapitalize="off" spellcheck="false"
+                 maxlength="24"
+                 aria-describedby="voice-prefix-hint"
+                 title="Only transcriptions that contain this word will fire a command. Leave blank to fire on any matching command." />
+          <span class="voice-prefix-hint" id="voice-prefix-hint">say e.g. &quot;puffco, start heat&quot;</span>
+        </div>
+        <!-- One-tap re-arm prompt. Visible only when the user previously
+             had voice on but mic permission hasn't been re-granted this
+             session (browsers require a user gesture, so we can't truly
+             auto-resume). The button calls startVoiceCommands which
+             re-prompts for mic permission. -->
+        <div class="voice-rearm hidden" id="voice-rearm" role="status" aria-live="polite">
+          <span>
+            <strong>Voice was on.</strong>
+            <span class="voice-rearm-detail">Tap to resume listening.</span>
+          </span>
+          <button class="btn btn-sm btn-primary" id="btn-voice-rearm" type="button">Resume listening</button>
+        </div>
+        <div class="voice-preview">
+          <div class="voice-meter" style="--voice-level:0;" aria-hidden="true">
+            <div class="voice-meter-fill" id="voice-meter-fill"></div>
+          </div>
+          <div class="voice-preview-meta">
+            <span id="voice-heard-preview">Heard: —</span>
+            <span id="voice-confidence">Confidence: —</span>
+          </div>
+        </div>
+        <div class="voice-command-chips" data-card-item-list="voice-command-chips" aria-label="Test voice commands">
+          <button class="btn btn-sm btn-primary" data-item-id="find-device" data-voice-cmd="find device" onclick="app.handleVoiceCommand('find device')">Find Device</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="resync" data-voice-cmd="resync" onclick="app.handleVoiceCommand('resync')">Resync</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="disconnect" data-voice-cmd="disconnect" onclick="app.handleVoiceCommand('disconnect')">Disconnect</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="status" data-voice-cmd="status" onclick="app.handleVoiceCommand('status')">Status</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="start-heat" data-voice-cmd="start heat" onclick="app.handleVoiceCommand('start heat')">Start Heat</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="stop" data-voice-cmd="stop" onclick="app.handleVoiceCommand('stop')">Stop</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="boost" data-voice-cmd="boost" onclick="app.handleVoiceCommand('boost')">Boost</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="profile-two" data-voice-cmd="profile two" onclick="app.handleVoiceCommand('profile two')">Profile 2</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="battery" data-voice-cmd="battery" onclick="app.handleVoiceCommand('battery')">Battery</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="lantern" data-voice-cmd="lantern on" onclick="app.handleVoiceCommand('lantern on')">Lantern</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="stealth" data-voice-cmd="stealth on" onclick="app.handleVoiceCommand('stealth on')">Stealth</button>
+          <button class="btn btn-sm btn-secondary" data-item-id="brightness" data-voice-cmd="brightness 70" onclick="app.handleVoiceCommand('brightness 70')">Brightness 70</button>
+        </div>
+        <details class="voice-grammar">
+          <summary>All voice commands</summary>
+          <div class="voice-grammar-grid">
+            <div>
+              <div class="stat-label">Connection</div>
+              <ul>
+                <li><code>find device</code></li>
+                <li><code>disconnect</code> · <code>unpair</code></li>
+                <li><code>resync</code></li>
+              </ul>
+            </div>
+            <div>
+              <div class="stat-label">Heat &amp; power</div>
+              <ul>
+                <li><code>start heat</code> · <code>heat up</code> · <code>begin session</code></li>
+                <li><code>stop</code> · <code>cancel</code> · <code>end it</code></li>
+                <li><code>boost</code> · <code>boost it</code></li>
+                <li><code>sleep</code> · <code>go to sleep</code></li>
+                <li><code>power off</code> · <code>shut down</code></li>
+              </ul>
+            </div>
+            <div>
+              <div class="stat-label">Profiles &amp; lights</div>
+              <ul>
+                <li><code>profile one</code>–<code>profile four</code> · <code>profile evening</code> (by name)</li>
+                <li><code>lantern on</code> / <code>lantern off</code> / <code>lantern</code> (toggle)</li>
+                <li><code>stealth on</code> / <code>stealth off</code> / <code>stealth</code> (toggle)</li>
+                <li><code>brightness 70</code> · <code>lights to 50 percent</code></li>
+              </ul>
+            </div>
+            <div>
+              <div class="stat-label">Readouts</div>
+              <ul>
+                <li><code>battery</code> · <code>show battery</code></li>
+                <li><code>version</code> · <code>firmware</code></li>
+                <li><code>status</code> · <code>refresh</code> · <code>sync</code></li>
+              </ul>
+            </div>
+          </div>
+        </details>
+        <div class="voice-bluetooth-prompt hidden" id="voice-bluetooth-prompt">
+          <div>
+            <strong>Find device queued</strong>
+            <span id="voice-bluetooth-note">Browsers need one tap to open the device selector.</span>
+          </div>
+          <button class="btn btn-sm btn-primary" id="voice-open-bluetooth" onclick="app.openBluetoothFromVoice()">Find Device</button>
+        </div>
+        <div class="voice-test-row">
+          <input type="text" id="voice-test-command" placeholder="Try: start heat" aria-label="Test voice command" />
+          <button class="btn btn-sm btn-secondary" onclick="app.testVoiceCommand()">Run</button>
+        </div>
+        <div class="voice-transcript" id="voice-transcript">No command heard yet</div>
+        <div class="voice-help">Enable Voice should first move the mic meter, then update Heard as speech-to-text receives words.</div>
+      </section>
+    </div>
+
+    <!-- Brightness -->
+    <section class="card connected-only" id="brightness-card" data-card-id="brightness-card">
+      <div class="card-header">
+        <h2><span class="icon icon-bright"></span> LED Brightness</h2>
+        <button class="btn btn-sm btn-primary" onclick="app.applyBrightness()">Apply</button>
+      </div>
+      <div class="brightness-sliders" data-card-item-list="brightness-sliders">
+        <div class="slider-group slider-wide" data-item-id="all">
+          <label>All LEDs <span class="slider-value" id="val-all">50%</span></label>
+          <input type="range" id="slider-all" min="1" max="100" value="50" oninput="app.updateAllBrightness()" />
+        </div>
+        <div class="slider-group" data-item-id="base">
+          <label>Base <span class="slider-value" id="val-base">50%</span></label>
+          <input type="range" id="slider-base" min="1" max="100" value="50" oninput="app.updateSliderLabel('base')" />
+        </div>
+        <div class="slider-group" data-item-id="mid">
+          <label>Mid <span class="slider-value" id="val-mid">50%</span></label>
+          <input type="range" id="slider-mid" min="1" max="100" value="50" oninput="app.updateSliderLabel('mid')" />
+        </div>
+        <div class="slider-group" data-item-id="glass">
+          <label>Glass <span class="slider-value" id="val-glass">50%</span></label>
+          <input type="range" id="slider-glass" min="1" max="100" value="50" oninput="app.updateSliderLabel('glass')" />
+        </div>
+        <div class="slider-group" data-item-id="logo">
+          <label>Logo <span class="slider-value" id="val-logo">50%</span></label>
+          <input type="range" id="slider-logo" min="1" max="100" value="50" oninput="app.updateSliderLabel('logo')" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Power -->
+    <section class="card connected-only" id="power-card" data-card-id="power-card">
+      <div class="card-header">
+        <h2><span class="icon icon-power"></span> Power</h2>
+      </div>
+      <div class="power-controls">
+        <button class="btn btn-secondary" onclick="app.power('sleep')">Sleep</button>
+        <button class="btn btn-danger" onclick="app.power('off')"><span aria-hidden="true">⏻</span> Power Off</button>
+      </div>
+      <div class="power-light-controls" data-card-item-list="power-light-controls">
+        <div class="toggle-wrap" data-item-id="lantern">
+          <button class="toggle" id="toggle-lantern" type="button" onclick="app.toggleLantern()" aria-pressed="false" aria-label="Toggle lantern mode"></button>
+          <span class="toggle-label">Lantern</span>
+        </div>
+        <div class="toggle-wrap" data-item-id="stealth">
+          <button class="toggle" id="toggle-stealth" type="button" onclick="app.toggleStealth()" aria-pressed="false" aria-label="Toggle stealth mode"></button>
+          <span class="toggle-label">Stealth</span>
+        </div>
+        <button class="btn btn-sm btn-secondary" data-item-id="show-battery" onclick="app.showBattery()">Show Battery</button>
+        <button class="btn btn-sm btn-secondary" data-item-id="apply-mood" onclick="app.applyMoodToLantern()">Apply Mood</button>
+      </div>
+    </section>
+
+    <details class="advanced-panel" id="advanced-panel" data-card-id="advanced-panel" data-advanced-only>
+      <summary>
+        <span>Advanced diagnostics</span>
+        <small>Lorax paths, raw reads, and activity</small>
+      </summary>
+
+      <div class="advanced-sections-list" id="advanced-sections-list" data-card-item-list="advanced-sections">
+        <section class="card advanced-section-item" id="backend-card" data-item-id="backend-card" data-status-item data-status-label="Backend Mirror">
+        <div class="card-header">
+          <h2><span class="icon icon-status"></span> Backend Mirror</h2>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('backend-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Sync Now</button>
+            <button class="btn btn-sm btn-primary" onclick="app.resyncDevice()">Resync BLE</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.copyBrowserDebugLog()">Copy Debug</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.downloadBrowserDebugLog()">Download Debug</button>
+          </div>
+        </div>
+        <div class="backend-summary-grid">
+          <div class="stat-item telemetry-stat">
+            <div class="stat-label">Backend Stage</div>
+            <div class="stat-value" id="backend-stage">Socket idle</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Last Message</div>
+            <div class="stat-value" id="backend-last-message">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Updated</div>
+            <div class="stat-value" id="backend-updated">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">BLE Link</div>
+            <div class="stat-value" id="backend-ble-link">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Backend Connected</div>
+            <div class="stat-value" id="backend-connected">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Polling</div>
+            <div class="stat-value" id="backend-poll">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Raw</div>
+            <div class="stat-value" id="backend-battery-raw">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Temp Source</div>
+            <div class="stat-value" id="backend-temp-source">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Firmware</div>
+            <div class="stat-value" id="stat-firmware">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Bootloader</div>
+            <div class="stat-value" id="stat-bootloader">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Serial</div>
+            <div class="stat-value" id="stat-serial">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Device Name</div>
+            <div class="stat-value" id="stat-name">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Source</div>
+            <div class="stat-value" id="stat-battery-source">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge ETA</div>
+            <div class="stat-value" id="stat-charge-eta">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Lantern</div>
+            <div class="stat-value" id="stat-lantern-time">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Low Battery</div>
+            <div class="stat-value" id="stat-low-battery">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Max Battery</div>
+            <div class="stat-value" id="stat-max-battery">—</div>
+          </div>
+        </div>
+
+        <h3 class="backend-section-heading">Hardware Diagnostics</h3>
+        <div class="backend-summary-grid">
+          <div class="stat-item">
+            <div class="stat-label">Battery Voltage</div>
+            <div class="stat-value" id="stat-battery-voltage">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Current</div>
+            <div class="stat-value" id="stat-battery-current">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Temperature</div>
+            <div class="stat-value" id="stat-battery-temperature">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Battery Capacity</div>
+            <div class="stat-value" id="stat-battery-capacity">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Heater Power</div>
+            <div class="stat-value" id="stat-heater-power">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Heater Resistance</div>
+            <div class="stat-value" id="stat-heater-resistance">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Heater Voltage</div>
+            <div class="stat-value" id="stat-heater-voltage">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge Source</div>
+            <div class="stat-value" id="stat-charge-source">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge Rate</div>
+            <div class="stat-value" id="stat-charge-rate">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Charge Elapsed</div>
+            <div class="stat-value" id="stat-charge-elapsed">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Cable</div>
+            <div class="stat-value" id="stat-cable-attached">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Mode</div>
+            <div class="stat-value" id="stat-mode">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Days Owned</div>
+            <div class="stat-value" id="stat-days-owned">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Device UTC</div>
+            <div class="stat-value" id="stat-device-utc">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Fault End Index</div>
+            <div class="stat-value" id="stat-fault-end">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">BLE Faults (abs)</div>
+            <div class="stat-value" id="stat-ble-fault-abs">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">BLE Faults (cr)</div>
+            <div class="stat-value" id="stat-ble-fault-cr">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Avg Time / Dab</div>
+            <div class="stat-value" id="stat-avg-time-dab">—</div>
+          </div>
+        </div>
+        <div class="backend-json-grid mt-md">
+          <details class="backend-json-panel">
+            <summary>Usage Counters</summary>
+            <div class="metric-cards usage-metrics">
+              <div class="metric-card metric-primary">
+                <div class="stat-label">Dabs left</div>
+                <div class="metric-value" id="stat-drem">—</div>
+                <div class="metric-note">estimated remaining</div>
+              </div>
+              <div class="metric-card">
+                <div class="stat-label">Dabs/day</div>
+                <div class="metric-value" id="stat-dpd">—</div>
+                <div class="metric-note">usage pace</div>
+              </div>
+              <div class="metric-card">
+                <div class="stat-label">Total dabs</div>
+                <div class="metric-value" id="stat-total-dabs">—</div>
+                <div class="metric-note">lifetime count</div>
+              </div>
+            </div>
+          </details>
+          <details open class="backend-json-panel">
+            <summary>Device Snapshot</summary>
+            <pre id="backend-snapshot-json">No snapshot yet</pre>
+          </details>
+          <details class="backend-json-panel">
+            <summary>Official Attributes</summary>
+            <pre id="backend-official-json">No official attributes yet</pre>
+          </details>
+          <details class="backend-json-panel">
+            <summary>Latest Backend Message</summary>
+            <pre id="backend-message-json">No backend message yet</pre>
+          </details>
+        </div>
+      </section>
+
+      <section class="card" id="advanced-actions-card">
+        <div class="card-header">
+          <h2><span class="icon icon-power"></span> Device Actions</h2>
+        </div>
+        <div class="advanced-action-grid">
+          <div class="advanced-action">
+            <div>
+              <strong>Version flash</strong>
+              <span>Ask the device to display its firmware version pattern.</span>
+            </div>
+            <button class="btn btn-sm btn-secondary" onclick="app.showVersion()">Show Version</button>
+          </div>
+          <div class="advanced-action danger-zone">
+            <div>
+              <strong>Factory reset</strong>
+              <span>Clears device settings after confirmation.</span>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="app.factoryReset()">Factory Reset</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card debug-console-card advanced-section-item" id="browser-debug-card" data-item-id="browser-debug-card" data-status-item data-status-label="Browser Debug">
+        <div class="card-header">
+          <h2><span class="icon icon-activity"></span> Browser Debug Console</h2>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('browser-debug-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="app.copyBrowserDebugLog()">Copy</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.downloadBrowserDebugLog()">Download</button>
+            <button class="btn btn-sm btn-danger" onclick="app.clearBrowserDebugLog()">Clear</button>
+          </div>
+        </div>
+        <div class="debug-console-shell">
+          <div class="session-debug-strip" id="session-debug-strip" aria-live="polite">
+            <div>
+              <span>Mode</span>
+              <strong id="debug-transport">Browser Bluetooth</strong>
+            </div>
+            <div>
+              <span>Platform</span>
+              <strong id="debug-platform">Checking</strong>
+            </div>
+            <div>
+              <span>Events</span>
+              <strong id="debug-event-count">0</strong>
+            </div>
+            <div>
+              <span>Last</span>
+              <strong id="debug-last-event">Ready</strong>
+            </div>
+          </div>
+          <div class="debug-console-meta">
+            <div>
+              <span>Transport</span>
+              <strong id="debug-console-transport">Browser Bluetooth</strong>
+            </div>
+            <div>
+              <span>Context</span>
+              <strong id="debug-console-context">Checking</strong>
+            </div>
+            <div>
+              <span>Events</span>
+              <strong id="debug-console-count">0</strong>
+            </div>
+          </div>
+          <div class="browser-debug-log" id="browser-debug-log" aria-live="polite">
+            <div class="log-empty">No browser events yet</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card advanced-section-item" id="dev-command-card" data-item-id="dev-command-card" data-status-item data-status-label="Dev Commands">
+        <div class="card-header">
+          <h2><span class="icon icon-explorer"></span> Developer Command Deck</h2>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('dev-command-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="app.clearDevOutput()">Clear Output</button>
+          </div>
+        </div>
+        <div class="dev-command-grid">
+          <div class="dev-command-box">
+            <div class="stat-label">Official telemetry</div>
+            <button class="btn btn-sm btn-primary" onclick="app.devOfficialAttrs()">Read Official Attributes</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.refreshStatus()">Refresh Snapshot</button>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Live temperature discovery</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devHeatProbe()">Probe Heater Paths</button>
+              <button class="btn btn-sm btn-primary" onclick="app.devHeatObserve()">Observe Heat</button>
+            </div>
+            <label class="checkbox-row compact">
+              <input type="checkbox" id="dev-promote-temp" />
+              <span>Promote matching temp source</span>
+            </label>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Lorax probe</div>
+            <div class="dev-inline-fields">
+              <select id="dev-lorax-category" aria-label="Lorax category filter">
+                <option value="">Any category</option>
+                <option value="system">System</option>
+                <option value="heater">Heater</option>
+                <option value="battery">Battery</option>
+                <option value="profile">Profile</option>
+                <option value="lighting">Lighting</option>
+                <option value="usage">Usage</option>
+                <option value="logs">Logs</option>
+                <option value="misc">Misc</option>
+              </select>
+              <select id="dev-lorax-status" aria-label="Lorax status filter">
+                <option value="experimental">Experimental</option>
+                <option value="known">Known</option>
+                <option value="">Any status</option>
+              </select>
+              <input type="number" id="dev-lorax-limit" min="1" max="150" value="40" aria-label="Lorax probe result limit" />
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devLoraxProbe()">Probe</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devLoraxObserve()">Observe</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Temperature source</div>
+            <input type="text" id="dev-temp-path" placeholder="/p/app/..." aria-label="Lorax path for temperature source" />
+            <select id="dev-temp-encoding" aria-label="Temperature source encoding">
+              <option value="float32_c">float32 C</option>
+              <option value="float32_f">float32 F</option>
+              <option value="uint16_c_x10">uint16 C x10</option>
+              <option value="uint16_f_x10">uint16 F x10</option>
+              <option value="uint8_c">uint8 C</option>
+              <option value="uint8_f">uint8 F</option>
+            </select>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devSetTemperatureSource()">Set Source</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devClearTemperatureSource()">Clear</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Lorax action</div>
+            <select id="dev-lorax-action" aria-label="Lorax action to run">
+              <option value="">Load registry for actions</option>
+            </select>
+            <input type="text" id="dev-action-confirm" placeholder="Confirm text if required" aria-label="Lorax action confirmation text" />
+            <button class="btn btn-sm btn-danger" onclick="app.devRunLoraxAction()">Run Action</button>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Inhale sensor</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devDrawState()">Sensor State</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devDrawObserve(false)">Observe Paths</button>
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devDrawObserve(true)">Observe + Promote</button>
+              <button class="btn btn-sm btn-danger" onclick="app.devDrawClearPin()">Clear Pin</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Dab scoring harness</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devDabState()">Scorer State</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devDabGateTest()">Gate Self-Test</button>
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.devDabSynthetic()">Synthetic Run (8s)</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devCalibrationState()">Calibration</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Raw path read</div>
+            <input type="text" id="dev-read-path" placeholder="/p/app/htr/inh" aria-label="Lorax path to read" />
+            <select id="dev-read-type" aria-label="Read value type">
+              <option value="float32">float32</option>
+              <option value="uint8">uint8</option>
+              <option value="uint16">uint16</option>
+              <option value="uint32">uint32</option>
+              <option value="text">text</option>
+            </select>
+            <button class="btn btn-sm btn-primary" onclick="app.devReadPath()">Read</button>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Device quick tests</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.showBattery()">Battery Anim</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.showVersion()">Version Anim</button>
+            </div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-secondary" onclick="app.startCleaningMode()">Clean Cycle</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.downloadBrowserDebugLog()">Export Debug</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Profile backup / restore</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devProfileExport()">Export Profiles</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devProfileImport()">Import…</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.applyImportedProfiles()">Apply Staged</button>
+            </div>
+            <input class="hidden" id="dev-profile-import-file" type="file" accept="application/json,.json" />
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Vapor mass-edit</div>
+            <div class="dev-inline-fields">
+              <select id="dev-vapor-mode" aria-label="Vapor mode for all profiles">
+                <option value="standard">Smooth</option>
+                <option value="high">Bold</option>
+                <option value="max">Intense</option>
+                <option value="xl">Extreme</option>
+              </select>
+              <button class="btn btn-sm btn-primary" onclick="app.devVaporSetAll()">Apply to all</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Time / clock</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devTimeSync()">Sync to browser</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Dab score history</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devDabHistoryExport()">Export to JSON</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.clearDabHistory()">Clear history</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Brightness quick set</div>
+            <div class="dev-inline-fields">
+              <input type="number" id="dev-brightness-pct" min="1" max="100" value="80" aria-label="Brightness percent" />
+              <span class="stat-label">%</span>
+              <button class="btn btn-sm btn-primary" onclick="app.devBrightnessQuickSet()">Set</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Profile duplicate</div>
+            <div class="dev-inline-fields">
+              <input type="number" id="dev-profile-dup-from" min="0" max="3" value="0" aria-label="Source slot" />
+              <span class="stat-label">→</span>
+              <input type="number" id="dev-profile-dup-to" min="0" max="3" value="1" aria-label="Target slot" />
+              <button class="btn btn-sm btn-primary" onclick="app.devProfileDuplicate()">Copy</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Local storage</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devResetLocalSettings()">Wipe settings</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devSessionInfo()">Session info</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">Lorax regex search</div>
+            <div class="dev-inline-fields">
+              <input type="text" id="dev-lorax-search" placeholder="/htr/(air|inh|flow)" aria-label="Lorax regex" />
+              <button class="btn btn-sm btn-primary" onclick="app.devLoraxSearch()">Search</button>
+            </div>
+          </div>
+          <div class="dev-command-box">
+            <div class="stat-label">System / snapshot</div>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-primary" onclick="app.devSystemCheck()">System check</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.devFullSnapshot()">Full snapshot</button>
+            </div>
+          </div>
+        </div>
+        <pre class="dev-output" id="dev-command-output">Developer command output will appear here.</pre>
+      </section>
+
+      <!-- Lorax Path Explorer -->
+      <section class="card advanced-section-item" id="lorax-card" data-item-id="lorax-card" data-status-item data-status-label="Lorax Explorer">
+        <div class="card-header">
+          <h2><span class="icon icon-explorer"></span> Lorax Path Explorer</h2>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('lorax-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" id="btn-reload-lorax" onclick="app.refreshLoraxRegistry()">Reload Registry</button>
+          </div>
+        </div>
+
+        <div class="disconnected-overlay visible" id="lorax-empty">
+          <div class="icon-large"></div>
+          <p>Connect to your device to explore Lorax paths</p>
+        </div>
+
+        <div class="hidden" id="lorax-content">
+          <!-- Category tabs — reorderable via drag -->
+          <div class="lorax-tabs" id="lorax-tabs" data-card-item-list="lorax-tabs">
+            <button type="button" class="lorax-tab active" data-item-id="tab-all" data-lorax-tab="all" onclick="app.setLoraxTab('all')">All</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-system" data-lorax-tab="system" onclick="app.setLoraxTab('system')">System</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-heater" data-lorax-tab="heater" onclick="app.setLoraxTab('heater')">Heater</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-battery" data-lorax-tab="battery" onclick="app.setLoraxTab('battery')">Battery</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-profile" data-lorax-tab="profile" onclick="app.setLoraxTab('profile')">Profile</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-lighting" data-lorax-tab="lighting" onclick="app.setLoraxTab('lighting')">Lighting</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-usage" data-lorax-tab="usage" onclick="app.setLoraxTab('usage')">Usage</button>
+            <button type="button" class="lorax-tab" data-item-id="tab-experimental" data-lorax-tab="experimental" onclick="app.setLoraxTab('experimental')">Experimental</button>
+          </div>
+
+          <!-- Filters -->
+          <div class="lorax-filters">
+            <div class="input-group">
+              <label for="lorax-search">Search Paths</label>
+              <input type="text" id="lorax-search" placeholder="Search path or name..." oninput="app.filterLoraxPaths()" />
+            </div>
+            <div class="input-group">
+              <label for="lorax-category-filter">Category</label>
+              <select id="lorax-category-filter" onchange="app.filterLoraxPaths(); app.syncLoraxDropdownToTab();">
+                <option value="all">All Categories</option>
+                <option value="system">System</option>
+                <option value="heater">Heater</option>
+                <option value="battery">Battery</option>
+                <option value="profile">Profile</option>
+                <option value="lighting">Lighting</option>
+                <option value="usage">Usage</option>
+                <option value="logs">Logs</option>
+                <option value="misc">Misc</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label for="lorax-status-filter">Status</label>
+              <select id="lorax-status-filter" onchange="app.filterLoraxPaths()">
+                <option value="all">All Statuses</option>
+                <option value="known">Known</option>
+                <option value="experimental">Experimental</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="lorax-quick-actions" id="lorax-quick-actions">
+            <span class="lorax-quick-actions-label">Quick tests</span>
+            <button class="btn btn-sm btn-secondary" onclick="app.testHeaterSensorPaths()">Test heater sensors</button>
+            <button class="btn btn-sm btn-secondary btn-lorax-test-copy hidden" id="btn-lorax-test-copy" disabled
+                    aria-label="Copy the latest path test results to the clipboard"
+                    title="Run a path test, then copy the per-path results to the clipboard"
+                    onclick="app.copyLoraxTestResults()">Copy results</button>
+            <span class="lorax-quick-actions-status" id="lorax-quick-actions-status">Idle</span>
+          </div>
+
+          <div class="lorax-explorer-layout">
+            <!-- Left Panel: Path List -->
+            <div class="lorax-path-panel">
+              <div class="lorax-path-list-header">
+                <span>Path</span>
+                <span>Access</span>
+              </div>
+              <div class="lorax-path-list" id="lorax-path-list">
+                <!-- Dynamically populated -->
+              </div>
+            </div>
+
+            <!-- Right Panel: Path Details & Interactive Terminal -->
+            <div class="lorax-details-panel" id="lorax-details-panel">
+              <div class="lorax-placeholder-text">
+                Select a path from the list to view details, read, or write value.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Activity -->
+      <section class="card advanced-section-item" id="activity-card" data-item-id="activity-card" data-status-item data-status-label="Activity">
+        <div class="card-header">
+          <h2><span class="icon icon-activity"></span> Activity</h2>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-sm btn-secondary section-collapse-btn" onclick="app.toggleAdvancedSection('activity-card')" aria-label="Collapse section" title="Collapse" aria-expanded="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="collapse-icon"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="app.clearLog()">Clear</button>
+          </div>
+        </div>
+        <div class="activity-log" id="activity-log">
+          <div class="log-empty">No activity yet</div>
+        </div>
+      </section>
+      </div><!-- end #advanced-sections-list -->
+    </details>
+  </div>
+
+  <!-- Profile Edit Modal -->
+  <div class="modal-backdrop" id="profile-modal">
+    <div class="modal profile-editor-sheet">
+      <div class="profile-editor-hero">
+        <button class="icon-btn modal-close" onclick="app.closeModal()" aria-label="Close profile editor" title="Close editor">×</button>
+        <div class="profile-editor-glow" id="modal-color-preview" style="background:#ff0000;"></div>
+        <div class="profile-editor-title">
+          <span id="modal-kicker">Profile 0</span>
+          <input type="text" id="modal-name" placeholder="Profile name" maxlength="31" aria-label="Profile name" />
+          <p id="modal-summary">Profile details</p>
+        </div>
+      </div>
+
+      <div class="profile-editor-body">
+        <section class="editor-panel heat-panel">
+          <div class="mood-section-title">
+            <span>Heat Profile</span>
+            <small>Temperature and duration</small>
+          </div>
+          <div class="profile-dials">
+            <label class="dial-field">
+              <span>Temperature <em id="modal-temp-hint">250 – 700 °F</em></span>
+              <div class="dial-combo">
+                <input type="range" id="modal-temp-slider" min="250" max="700" step="5" value="520" aria-label="Temperature slider" />
+                <input type="number" id="modal-temp" min="250" max="700" step="5" placeholder="520" />
+                <strong>°F</strong>
+              </div>
+            </label>
+            <label class="dial-field">
+              <span>Duration <em id="modal-time-hint">5 – 180 s</em></span>
+              <div class="dial-combo">
+                <input type="range" id="modal-time-slider" min="5" max="180" step="1" value="60" aria-label="Duration slider" />
+                <input type="number" id="modal-time" min="5" max="180" step="1" placeholder="60" />
+                <strong>s</strong>
+              </div>
+            </label>
+            <label class="dial-field vapor-field">
+              <span>Vapor Control</span>
+              <select id="modal-vapor">
+                <option value="standard">Smooth</option>
+                <option value="high">Bold</option>
+                <option value="max">Intense</option>
+                <option value="xl">Extreme</option>
+              </select>
+              <div class="vapor-presets" id="modal-vapor-presets" aria-label="Vapor presets"></div>
+            </label>
+            <label class="dial-field color-field">
+              <span>Color</span>
+              <input type="color" id="modal-color" value="#ff0000" />
+              <strong id="modal-color-swatch">#FF0000</strong>
+            </label>
+          </div>
+          <label class="check-row">
+            <input type="checkbox" id="modal-select" />
+            <span>Make active after saving</span>
+          </label>
+          <div class="profile-readback" id="modal-readback" aria-live="polite">
+            <div class="readback-row">
+              <span>Chamber</span>
+              <strong id="modal-chamber">—</strong>
+            </div>
+            <div class="readback-row">
+              <span>Boost temp</span>
+              <strong id="modal-boost-temp">—</strong>
+            </div>
+            <div class="readback-row">
+              <span>Boost time</span>
+              <strong id="modal-boost-time">—</strong>
+            </div>
+            <div class="readback-row">
+              <span>Last saved</span>
+              <strong id="modal-saved-stamp">—</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="editor-panel mood-studio">
+          <div class="mood-hero compact">
+            <div class="mood-orbit" id="color-preview" style="background:#ff0000;"></div>
+            <div>
+              <div class="stat-label">Mood Light</div>
+              <p>Official-style preset controls saved with this profile.</p>
+            </div>
+          </div>
+          <div class="mood-library-actions">
+            <input type="text" id="mood-name" placeholder="Mood preset name" maxlength="40" aria-label="Mood preset name" />
+            <button class="btn btn-sm btn-secondary" onclick="app.saveMoodPreset()">Save Mood</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.deleteMoodPreset()">Delete</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.exportMoods()">Export</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.openMoodImport()">Import</button>
+            <button class="btn btn-sm btn-secondary" onclick="app.restoreDefaultMoods()">Defaults</button>
+            <input class="hidden" id="mood-import-file" type="file" accept="application/json,.json" />
+          </div>
+          <div class="mood-presets" id="mood-presets"></div>
+          <div class="mood-editor-grid">
+            <div class="mood-panel">
+              <div class="mood-section-title">
+                <span>Colors</span>
+                <small id="mood-color-range">1-6 colors</small>
+              </div>
+              <div class="mood-colors" id="mood-colors"></div>
+              <div class="mood-color-tools">
+                <button class="btn btn-sm btn-secondary" id="mood-add-color" onclick="app.addMoodColor()">Add color</button>
+                <div class="color-input-wrapper">
+                  <input type="color" id="color-wheel" value="#ff0000" aria-label="Color wheel" />
+                  <input type="text" id="hex-input" class="hex-input" value="#FF0000" placeholder="#RRGGBB" maxlength="7" aria-label="Hex color value" />
+                </div>
+              </div>
+            </div>
+
+            <div class="mood-panel">
+              <div class="mood-section-title">
+                <span>Motion</span>
+                <small>Device animation params</small>
+              </div>
+              <div class="slider-group" id="mood-tempo-wrap">
+                <label>Tempo <span class="slider-value" id="mood-tempo-value">50%</span></label>
+                <input type="range" id="mood-tempo" min="0" max="100" value="50" />
+              </div>
+              <label class="check-row">
+                <input type="checkbox" id="mood-dynamic" />
+                <span>Dynamic inhale</span>
+              </label>
+              <div class="stat-label mb-sm">Quick Colors</div>
+              <div class="color-swatches" id="color-swatches"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <input type="hidden" id="modal-index" />
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+        <button class="btn btn-secondary" onclick="app.reloadCurrentProfile()" title="Discard local changes and re-read this profile from the device">
+          Reload from device
+        </button>
+        <button class="btn btn-secondary" onclick="app.resetCurrentProfile()" title="Clear the form. Use 'Reset slot to default' to write default values to the device.">
+          Revert form
+        </button>
+        <button class="btn btn-secondary btn-danger" onclick="app.deleteCurrentProfile()" title="Write the default values (red, 520°F, 60s, Smooth) to this profile slot on the device.">
+          Reset slot to default
+        </button>
+        <button class="btn btn-secondary" data-device-command="set_profile" onclick="app.saveProfile(true)">Save &amp; Activate</button>
+        <button class="btn btn-primary" data-device-command="set_profile" onclick="app.saveProfile()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DAB SESSION PANEL -->
+  <div class="modal-backdrop" id="dab-panel">
+    <div class="modal profile-editor-sheet" style="max-width:560px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <span style="font-weight:700;font-size:1rem;">Dab Scoring</span>
+        <button class="icon-btn" onclick="app.closeDabPanel()" aria-label="Close dab panel">×</button>
+      </div>
+
+      <!-- Live session strip: device heat info shared by the preheat,
+           countdown, and active views. Hidden in idle/results/diagnostic. -->
+      <div id="dab-session-strip" class="hidden"
+           style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:14px;padding:10px 8px;background:var(--bg-input);border-radius:10px;text-align:center;">
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">State</div>
+          <div id="dab-session-state" style="font-size:0.85rem;font-weight:700;color:var(--text-primary);">—</div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">Temp</div>
+          <div style="font-size:0.85rem;font-weight:700;font-variant-numeric:tabular-nums;">
+            <span id="dab-session-temp" style="color:var(--accent,#c084fc);">—</span><span id="dab-session-target" style="color:var(--text-muted);font-weight:500;"></span>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">Timer</div>
+          <div id="dab-session-timer" style="font-size:0.85rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-primary);">—</div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;">Draw</div>
+          <div id="dab-session-draw" style="font-size:0.85rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-primary);">—</div>
+        </div>
+      </div>
+
+      <!-- Idle: Start button -->
+      <div id="dab-idle-view" class="dab-view">
+        <p style="color:var(--text-secondary,#9ca3af);font-size:0.875rem;margin-bottom:16px;">
+          Take a dab — your airflow will be scored across flow, consistency, and control.
+          Target flow varies by difficulty.
+        </p>
+        <button class="btn btn-primary" style="width:100%;padding:14px;font-size:1.1rem;" onclick="app.startDab()">
+          Start Dab
+        </button>
+        <div style="margin-top:12px;text-align:center;font-size:0.75rem;color:var(--text-muted);">
+          Current: <span id="dab-idle-difficulty">Standard</span> · threshold <span id="dab-idle-threshold">12%</span>
+        </div>
+        <button id="btn-dab-diagnostic" class="btn btn-secondary dab-diagnostic-btn hidden"
+                style="width:100%;margin-top:14px;font-size:0.85rem;"
+                onclick="app.startDabDiagnostic()">
+          Run sensor diagnostic
+        </button>
+        <p class="dab-diagnostic-hint" style="margin-top:6px;text-align:center;font-size:0.7rem;color:var(--text-muted);">
+          30-second capture to inspect raw airflow, state transitions, and timing. Saves a JSON log.
+        </p>
+      </div>
+
+      <!-- Preheat: chamber is heating, M:SS countdown until drawable.
+           The first ~3s shows a brief "Get ready" intro with the
+           device's live airflow so the user can prepare their draw.
+           After that the panel flips to the timer + live draw
+           readout so they can see exactly when the chamber is hot
+           enough to start scoring. -->
+      <div id="dab-preheat-view" class="dab-view hidden" style="text-align:center;">
+        <div style="font-size:0.75rem;color:var(--text-muted);letter-spacing:0.04em;text-transform:uppercase;margin-bottom:6px;">
+          <span id="dab-preheat-state">Preheating</span>
+        </div>
+        <div id="dab-preheat-timer"
+             style="font-size:3.2rem;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;color:var(--accent,#c084fc);">
+          —
+        </div>
+        <p id="dab-preheat-subtitle"
+           style="color:var(--text-secondary);font-size:0.9rem;margin-top:10px;">
+          Scoring will start when the chamber is ready to draw.
+        </p>
+        <!-- Live airflow readout shared by the preheat intro ("Get
+             ready" + 3-2-1-style countdown) and the steady timer view.
+             The bar is filled by dabApplyFastReadingToUi every poll,
+             so the user sees the sensor respond to their draw while
+             the chamber is still warming. -->
+        <div id="dab-preheat-airflow" class="dab-preheat-airflow">
+          <div class="dab-preheat-airflow-label">Inhale live</div>
+          <div class="dab-preheat-airflow-row">
+            <div class="dab-preheat-airflow-bar">
+              <div class="dab-preheat-airflow-fill" id="dab-preheat-airflow-fill"></div>
+            </div>
+            <div class="dab-preheat-airflow-readout" id="dab-preheat-airflow-readout">0%</div>
+          </div>
+        </div>
+        <!-- The "Get ready" intro banner. Shown for the first 3s of
+             preheat (configurable) and then fades out as the steady
+             timer takes over. -->
+        <div id="dab-preheat-intro" class="dab-preheat-intro">
+          <div class="dab-preheat-intro-eyebrow">Get ready</div>
+          <div class="dab-preheat-intro-countdown" id="dab-preheat-intro-countdown">3</div>
+          <div class="dab-preheat-intro-text">Take a breath and line up. Scoring begins the moment the chamber is hot.</div>
+        </div>
+        <button class="btn btn-secondary" style="width:100%;margin-top:18px;" onclick="app.closeDabPanel()">
+          Cancel
+        </button>
+      </div>
+
+      <!-- Diagnostic: live capture of 100ms status snapshots -->
+      <div id="dab-diagnostic-view" class="dab-view hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <span style="font-size:0.8rem;color:var(--text-muted);">SENSOR DIAGNOSTIC</span>
+          <span id="dab-diag-meta"
+                style="font-size:0.75rem;color:var(--text-secondary);text-align:right;">
+            Waiting…
+          </span>
+        </div>
+        <canvas id="dab-diag-canvas" width="420" height="140"
+                style="width:100%;height:140px;background:var(--bg-input);border-radius:8px;display:block;margin-bottom:8px;">
+        </canvas>
+        <p style="font-size:0.7rem;color:var(--text-muted);margin:0 0 12px 0;">
+          Live airflow (% over time). Dashed line = threshold. Vertical lines = state transitions.
+        </p>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" style="flex:1;" onclick="app.closeDabPanel()">Close</button>
+          <button id="btn-dab-diag-save" class="btn btn-primary hidden" style="flex:1;"
+                  onclick="app.downloadDabDiagnosticLog()">
+            Save log
+          </button>
+        </div>
+      </div>
+
+      <!-- Active: Live chart -->
+      <div id="dab-active-view" class="dab-view hidden">
+        <div class="dab-live-head">
+          <span class="dab-live-label"><span class="dab-live-pulse" aria-hidden="true"></span>Live score</span>
+          <span id="dab-live-score">—</span>
+        </div>
+        <canvas id="dab-canvas" width="500" height="170" class="dab-live-canvas"></canvas>
+        <div class="dab-live-stats">
+          <div class="dab-live-stat">
+            <span class="dab-live-stat-label">Peak</span>
+            <span class="dab-live-stat-value" id="dab-peak-display">—</span>
+          </div>
+          <div class="dab-live-stat">
+            <span class="dab-live-stat-label">Time</span>
+            <span class="dab-live-stat-value" id="dab-time-display">0.0s</span>
+          </div>
+          <div class="dab-live-stat">
+            <span class="dab-live-stat-label">In zone</span>
+            <span class="dab-live-stat-value" id="dab-zone-display">—</span>
+          </div>
+        </div>
+        <button class="btn btn-secondary" style="width:100%;margin-top:14px;" onclick="app.stopDab()">End Dab</button>
+      </div>
+
+      <!-- Results -->
+      <div id="dab-results-view" class="dab-view hidden">
+        <div id="dab-results-empty" class="hidden"
+             style="text-align:center;margin:24px 8px;color:var(--text-secondary);">
+          <div style="font-size:1.1rem;font-weight:600;color:var(--text-primary);margin-bottom:6px;">
+            Not enough data
+          </div>
+          <p style="font-size:0.85rem;margin:0;">Need at least 1 second of drawing to score.</p>
+        </div>
+        <div id="dab-results-numbers">
+          <div style="text-align:center;margin-bottom:16px;">
+            <div style="font-size:4.2rem;font-weight:800;line-height:1.05;color:var(--accent,#c084fc);" id="dab-final-score">—</div>
+            <div style="font-size:0.85rem;color:var(--text-muted);margin-top:2px;">out of 10,000</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
+            <div class="dab-score-row">
+              <span class="dab-score-label">Total Flow</span>
+              <span class="dab-score-value" id="dab-score-flow">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Consistency</span>
+              <span class="dab-score-value" id="dab-score-consistency">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Target Control</span>
+              <span class="dab-score-value" id="dab-score-target">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Stability</span>
+              <span class="dab-score-value" id="dab-score-stability">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Finish Bonus</span>
+              <span class="dab-score-value" id="dab-score-finish">—</span>
+            </div>
+            <div class="dab-score-row">
+              <span class="dab-score-label">Style</span>
+              <span class="dab-score-value" id="dab-score-style">—</span>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:16px;font-size:0.75rem;color:var(--text-muted);text-align:center;">
+            <div>Peak: <strong id="dab-result-peak" style="color:var(--text-primary);">—</strong></div>
+            <div>Duration: <strong id="dab-result-duration" style="color:var(--text-primary);">—</strong></div>
+            <div>Samples: <strong id="dab-result-samples" style="color:var(--text-primary);">—</strong></div>
+          </div>
+          <canvas id="dab-result-canvas" width="500" height="110" style="width:100%;height:110px;background:var(--bg-input);border-radius:12px;display:block;margin-bottom:16px;"></canvas>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" style="flex:1;" onclick="app.saveDabScore()">Save to History</button>
+          <button class="btn btn-primary" style="flex:1;" onclick="app.startDab()">Again</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="ble-client.js?v=15"></script>
+  <script src="Sortable.min.js?v=15"></script>
+  <script src="app.js?v=16"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(function(err) {
+        console.warn('SW registration failed:', err);
+      });
+    }
+  </script>
+</body>
+</html>

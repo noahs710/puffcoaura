@@ -1,0 +1,144 @@
+version: 1
+plan:
+  name: fix-mobile-blank-screen
+  max_concurrency: 4
+  max_consecutive_failures: 3
+  auto_reject_retries: 2
+
+tasks:
+  - id: diagnose
+    title: "Diagnose blank screen on mobile — find root cause"
+    role: produce
+    prompt: |
+      You are investigating why the PuffcoBLE PWA shows a blank screen on mobile browsers (Bluefy/iOS Safari).
+
+      CONTEXT FROM ORCHESTRATOR:
+      - Debug panel at top of page shows "app.js loaded: NO"
+      - Multiple SW cache bumps (v04→v07) and network-first SW fetch haven't fixed it
+      - The mobile swipe UI uses Swiper.js v11 + JS DOM manipulation (initMobileSwipeViews)
+      - The debug panel is an inline <script> in index.html that checks for window.app
+      - Desktop layout (≥701px) may or may not be broken too
+
+      YOUR JOB:
+      1. Read these files and check for JS syntax errors, missing functions, broken references:
+         - C:\PuffcoBLE\app.js — focus on initMobileSwipeViews, initSwiper, switchToView, setupViewScrollSync, MOBILE_VIEW_MAP, the app.js exports (window.app = app)
+         - C:\PuffcoBLE\index.html — focus on the inline <script> block near top, the app-views/swiper structure, the sw.js registration, the app.js script tag
+         - C:\PuffcoBLE\sw.js — check the fetch handler, activate handler, APP_SHELL list
+         - C:\PuffcoBLE\style.css — check the mobile (max-width:700px) CSS rules for app-views, mobile-view, app-container
+
+      2. Specifically check:
+         - Is there any JS syntax error in app.js that would prevent it from loading?
+         - Does window.app get properly set at the end of app.js?
+         - Is the inline debug script in index.html checking window.app BEFORE app.js has run?
+         - Does the swiper.min.js file exist in the project?
+         - Is swiper.min.js referenced in sw.js APP_SHELL?
+         - Is the HTML mobile-view structure correct (swiper-slide class, swiper-wrapper, swiper class)?
+         - On desktop (≥701px): is app-views hidden, app-container shown? Are original cards visible?
+
+      3. Check desktop layout: open C:\PuffcoBLE\index.html and look at the app-container. 
+         Does the desktop layout still work? Are the cards (connect-card, status-card, etc.) still in app-container?
+         Read the style.css to confirm the desktop hiding rules for app-views/app-tab-bar.
+
+      4. Write a findings report to deliverable.md covering:
+         - Root cause of blank screen (or if uncertain, the most likely causes ranked by probability)
+         - Whether desktop layout is also broken
+         - Exact list of files that need to change and what each change should be
+         - Whether swiper.min.js is properly included in sw.js APP_SHELL
+
+    assigned_to: coder
+    verified_by: tester
+    verify_prompt: |
+      Re-read the files the investigator checked. Independently verify:
+      1. Run node -e "require('fs').readFileSync('C:\\PuffcoBLE\\app.js','utf8')" to check if node can parse app.js (syntax check)
+      2. Confirm swiper.min.js exists: Get-ChildItem C:\PuffcoBLE\swiper.min.js
+      3. Confirm swiper.min.js is in sw.js APP_SHELL array
+      4. Confirm app.js script tag in index.html has swiper.min.js BEFORE it
+      5. Check: is app.js syntax valid? (look for unbalanced braces, missing semicolons that would cause parse errors)
+      6. Check: does the desktop layout (≥701px) have any obvious CSS conflicts?
+      Report PASS or FAIL with specific evidence.
+
+  - id: build-safe-fallback
+    title: "Build guaranteed-safe mobile fallback UI"
+    role: produce
+    prompt: |
+      Build a mobile UI that is GUARANTEED to work on mobile — no Swiper.js, no JS DOM manipulation, no external dependencies.
+
+      GOAL: Mobile (≤700px) shows the app content via pure CSS scroll-snap, tab bar switches views using pure anchor links, desktop (≥701px) unchanged.
+
+      EXACT SPEC:
+      
+      1. HTML changes to index.html:
+         - Keep the existing .app-container and all its cards (connect-card, status-card, profiles-card, controls-grid, brightness-card, power-card, advanced-panel) in place — DO NOT move them
+         - Keep the existing .app-views / .mobile-view wrappers but EMPTY them of any content
+         - Use CSS to show .app-container on desktop (≥701px) and HIDE it on mobile (≤700px)
+         - Use CSS to show .app-views on mobile (≤700px) and HIDE it on desktop (≥701px)
+         - On mobile: use CSS scroll-snap on .app-views (pure CSS, no JS needed) to make it horizontally swipeable
+         - The tab bar buttons should use anchor links (#connect-card, #status-card, etc.) to scroll the document — NOT JS switchToView
+         - Add a data-view attribute to each card's wrapping mobile-view div for reference
+
+      2. CSS changes to style.css:
+         - On mobile (≤700px): .app-container { display: none !important }
+         - On mobile (≤700px): .app-views { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; height: calc(100vh - 120px - env(safe-area-inset-bottom, 0px)); }
+         - On mobile (≤700px): .mobile-view { flex: 0 0 100vw; width: 100vw; scroll-snap-align: start; overflow-y: auto; padding: 12px 16px calc(68px + env(safe-area-inset-bottom, 0px)); }
+         - On desktop (≥701px): .app-views { display: none !important }
+         - Keep tab bar styling as-is
+         - Keep desktop rules for .app-container as-is
+
+      3. JS changes to app.js:
+         - REMOVE initMobileSwipeViews function entirely
+         - REMOVE initSwiper function entirely  
+         - REMOVE switchToView function (or keep it but it does nothing on mobile)
+         - REMOVE setupViewScrollSync function
+         - REMOVE _swiperInstance variable
+         - REMOVE MOBILE_VIEW_MAP constant
+         - REMOVE VIEW_INDEX_MAP constant
+         - Remove the initMobileSwipeViews() and setupViewScrollSync() calls from init()
+         - Remove setupViewScrollSync and initMobileSwipeViews from the window.app export object
+         - KEEP window.appSwitchToView = switchToView but make switchToView a no-op (just console.log)
+         - The tab bar uses anchor links (href="#connect-card") so no JS is needed for tab switching
+         - The cards stay in .app-container on desktop and are hidden on mobile via CSS
+
+      4. sw.js changes:
+         - Add swiper.min.js to APP_SHELL if not already there (it should be from previous work, but confirm)
+         - Bump CACHE_NAME date by one
+
+      5. Cache busting:
+         - Update app.js?v=19 to app.js?v=20 in index.html
+         - Update style.css?v=14 to style.css?v=15 in index.html
+         - Update sw.js registration cache-bust: sw.js?t=07 to sw.js?t=08
+
+      IMPORTANT RULES:
+      - Read all files before writing anything
+      - Read the style.css mobile section (around line 719) carefully before modifying it
+      - Read the app.js init function before removing functions from it
+      - The desktop layout must NOT be broken — cards stay in .app-container and show normally on ≥701px
+      - The settings panel must still work (it's opened via JS onclick)
+      - Keep the debug panel inline script in index.html but update it to not check for initMobileSwipeViews
+
+      After making all changes, write a summary of exactly what changed in each file to deliverable.md.
+      Commit message should be: "fix: mobile blank screen — pure CSS scroll-snap, no Swiper, no JS DOM moves, guaranteed to work"
+
+    assigned_to: coder
+    verified_by: tester
+    verify_prompt: |
+      Independently verify the fallback build:
+      1. Read the modified index.html — confirm:
+         - .app-container still contains all cards (connect-card, status-card, profiles-card, etc.) and is NOT empty
+         - .app-views wrappers exist but are empty (no card content inside them)
+         - swiper.min.js is NOT referenced in index.html (should be removed or kept but not used)
+      2. Read the modified style.css mobile section — confirm:
+         - On ≤700px: .app-container { display: none !important }
+         - On ≤700px: .app-views has scroll-snap CSS (not display:none)
+         - On ≥701px: .app-views { display: none !important }
+         - .mobile-view has flex: 0 0 100vw / scroll-snap-align: start
+      3. Read app.js init function — confirm:
+         - initMobileSwipeViews() call is REMOVED from init()
+         - initSwiper() call is REMOVED from init()  
+         - _swiperInstance is REMOVED or never set
+         - window.app still has all other exports (connect, disconnect, settings, etc.)
+      4. Read sw.js — confirm:
+         - APP_SHELL has app.js?v=20 and style.css?v=15
+         - CACHE_NAME is bumped to a new version
+      5. Desktop smoke test: confirm the desktop CSS (≥701px) has no rule hiding .app-container
+      Report PASS or FAIL with specific line references.
+
